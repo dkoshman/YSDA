@@ -1,0 +1,37 @@
+method: bayes
+metric:
+  goal: maximize
+  name: val_ndcg
+parameters:
+  model:
+    value: dssm
+  datasets:
+    values:
+      - max_features_None
+      - max_features_4096
+      - max_features_1024
+      - max_features_256
+  num_workers:
+    value: 4
+  hidden_dimensions:
+    values:
+      - [16, 4]
+      - [32, 8]
+      - [64, 16]
+      - [128, 32]
+      - [256, 128, 64]
+  optimizer:
+    values:
+      - adam
+      - sgd_with_momentum
+  lr_scheduler:
+    values:
+      - null
+      - cosine
+      - cycle
+      - lambda
+  lr_range:
+    values:
+      - [1.e-4, 1.e-3]
+      - [1.e-3, 1.e-2]
+      - [1.e-2, 1.e-1]

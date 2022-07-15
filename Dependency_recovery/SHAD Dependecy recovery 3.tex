@@ -1,0 +1,113 @@
+\documentclass[10pt]{article}
+
+\usepackage{amsfonts,amssymb}
+\usepackage[utf8]{inputenc}
+\usepackage[english,russian]{babel}
+\usepackage{graphicx}
+\usepackage{mathtools}
+\usepackage{multicol}
+\usepackage{ textcomp }
+\usepackage[colorlinks,urlcolor=blue]{hyperref}
+
+\newcommand{\argmin}{\mathop{\rm arg\,min}\limits}
+\newcommand{\argmax}{\mathop{\rm arg\,max}\limits}
+\newcommand{\sign}{\mathop{\rm sign}\limits}
+\newcommand{\cond}{\mspace{3mu}{|}\mspace{3mu}}
+\def\RR{\mathbb{R}}
+\def\XX{\mathbb{X}}
+\def\EE{\mathbb{E}}
+\def\NN{\mathcal{N}}
+\def\LL{\mathcal{L}}
+\def\YY{\mathbb{Y}}
+
+\textheight=220mm
+\textwidth=160mm
+
+\title{Школа анализа данных\\ Восстановление зависимостей \\Домашнее задание №3}
+\author{Кошман Дмитрий}
+\date{}
+
+\begin{document}
+	
+	
+	\voffset=-20mm
+	\hoffset=-17mm
+	\font\Got=eufm10 scaled\magstep2 \font\Got=eufm10
+	
+	
+	\maketitle
+	
+\bigskip
+
+\textbf{Задача 1}
+
+\medskip
+
+Доказать:
+
+$$P\left(\sup_x \left| F_n(x) -F(x) \right|  \xrightarrow[n\rightarrow \infty]{} 0 \right) = 1$$
+
+где $F(a) = P(x < a), F_n(a) = \frac{\sum_i [x_i < a]}{L}, L - $ размер выборки
+\\
+
+Интересующая нас сигма алгребра событий порождена множествами вида $\{x < a\}$. Найдем функцию роста относительно множества $S =\{\{x|x < a\} |a \in \mathbb{R}\}$:
+
+$$m^S(L) = \max_{X^{(L)}}\Delta^S(X^{(L)})  = \max_{X^{(L)}} \left(\text{мощность множества подвыборок $X^{(L)}$, индуцированных $S$}\right)$$ 
+
+Поскольку каждая подвыборка, порожденная элементом $s \in S, s= \{x < a\}$ однозначно определяется расположением $a$ между двумя соседними элементами выборки, то разных подвыборок не больше таких расположений, то есть $L + 1$, и это число всегда достижимо. Значит,
+
+$$m^S(L)  = L + 1$$
+
+Теперь воспользуемся достаточным условием равномерной сходимости почти наверное [1] \\$P\left(\sup_x \left| f_n(x) -f(x) \right|  \xrightarrow[n\rightarrow \infty]{} 0 \right) = 1$: достаточно, чтобы существовало такое $n$, что $m^S(L) \leq L^n + 1 $.
+
+В нашем случае $n=1$, и факт доказан.
+	
+\bigskip
+
+\textbf{Задача 2}
+
+\medskip 
+
+A) Подвыборка $m$ различных целых чисел, индуцированная данным классом решающих правил, однозначно определяется как пара $(i, j), \medspace 0 \leq i <j \leq m $ - индексы вставки чисел $a, b$ в возрастающую последовательность элементов выборки, если выделяемая подвыборка не пустая. Поскольку количество таких различных пар равно $C_{m+1}^2$, и учитывая случай пустой выделяемой подвыборки, получаем
+
+$$m^S(L) = C_{L+1}^2 + 1$$
+
+\medskip
+B) Этот класс подвыборок содержит предыдущий, и помимо этого порождает подвыборки, где $a,b,c,d$ соответствуют индексам $(i, j, k, l), \medspace 0 \leq i < j  < k < l \leq m$. Получаем 
+
+$$m^S(L) = C_{L+1}^2 + 1  + C_{L+1}^4$$
+
+
+\medskip
+C) Поскольку пересечение двух отрезков тоже отрезок, то здесь такой же ответ, как в пункте A:
+
+$$m^S(L) = C_{L+1}^2 + 1$$
+
+\bigskip
+
+\textbf{Задача 3}
+
+\medskip
+
+$vc_n = \max \{L|m^S_n(L) = 2^L\} - ?$
+
+Где $x \in \mathbb{R}^n$, $S$ - множество, порожденное разбиениями всевозможных гиперплоскостей.
+\medskip
+
+Для фиксированных точек $x_i$ нас интересуют решения неравенств $\langle w,x_i\rangle + b \lessgtr 0$ относительно $w, b$. Но в таком виде задача некорректно поставлена. Регуляризуем ее следующим образом:
+
+$c_i(\langle w,x_i\rangle + b) \geq 1; ||w|| \rightarrow min$, где $c_i = \pm 1$ - класс объекта.
+
+Пусть $x_0 = 0, x_i = e_i; \medspace \hat{x}=(x,1) , \medspace \hat{w} = (w,b)$. Тогда $\hat{X}\hat{w} = y$ имеет решение для любого $y$, поскольку расширенная матрица $\hat{X}$ обратима, значит $m^S_n(n+1) = 2^{n+1}$.
+
+\medskip
+
+А поскольку размерность пространства $y$ не может быть больше размерности пространства переменных, то $m^S_n(n+2) < 2^{n+2}$, и $vc_n = n+1$.
+
+\bigskip
+\bigskip
+
+[1]  В.Н.В а п н и к , А . Я . Ч е р в о н е н к и с , О равномерной сходимости частот появления событий к их вероятностям, Д А Н СССР, 181, 4 (1968), 781.
+	
+\end{document}
+
