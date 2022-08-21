@@ -185,7 +185,7 @@ wcwidth==0.2.5
 webencodings==0.5.1
 Werkzeug==2.0.3
 widgetsnbextension==3.6.0
-xray==0.7.0
+xarray @ git+https://github.com/pydata/xarray@0ef9aa3abae55833e4431d690bc55c5b5a44911b
 xxhash==3.0.0
 yarl==1.7.2
 zipp==3.6.0
