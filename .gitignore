@@ -2,4 +2,6 @@
 *.ipynb_checkpoints
 **/data/
 *.pickle
+*.ckpt
+**/lightning_logs/
 
