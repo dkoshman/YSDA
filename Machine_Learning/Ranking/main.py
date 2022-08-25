@@ -11,7 +11,7 @@ from agent import Agent
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Launch agents to explore current sweep, to configure a new sweep, see sweep.py"
+        description="Launch agents to explore current sweep. To configure a new sweep, see sweep.py"
         "Output of child agents will be written to 'pipes' directory.",
         allow_abbrev=True,
     )
