@@ -3,6 +3,7 @@
 
 **/lightning_logs/
 **/.idea/
+**/__pycache__/
 
 *.pickle
 *.ckpt
