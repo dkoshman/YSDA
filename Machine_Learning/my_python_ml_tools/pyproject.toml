@@ -1,0 +1,13 @@
+[tool.poetry]
+name = "my_ml_tools"
+description = "my package for building and training models"
+version = "0.1.0"
+authors = ["Dima Koshman <koshmandk@yandex.ru>"]
+
+[tool.poetry.dependencies]
+python = "*"
+
+[build-system]
+requires = ["poetry_core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
