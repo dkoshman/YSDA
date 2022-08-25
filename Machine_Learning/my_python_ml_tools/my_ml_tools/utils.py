@@ -8,6 +8,7 @@ import torch
 
 from pathlib import Path
 
+__all__ = ['reuse_pickled_object_or_construct']
 
 def reuse_pickled_object_or_construct(
     hashable_attribute, object_constructor, algorithm_name="blake2s", dirpath="local"
