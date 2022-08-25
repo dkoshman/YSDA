@@ -1,8 +1,10 @@
 **/data/
 **/local/
+
+**/lightning_logs/
+**/.idea/
+
 *.pickle
 *.ckpt
-**/lightning_logs/
 *.DS_Store
 *.ipynb_checkpoints
-
