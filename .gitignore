@@ -1,7 +1,8 @@
-*.DS_Store
-*.ipynb_checkpoints
 **/data/
+**/local/
 *.pickle
 *.ckpt
 **/lightning_logs/
+*.DS_Store
+*.ipynb_checkpoints
 
