@@ -1,26 +1,45 @@
 import torch
 
 
-def reuse_pickled_object_or_construct(
-    hashable_attribute, object_constructor, algorithm_name="blake2s", dirpath="local"
+def reuse_shelved_object_or_construct(
+    hashable_attribute, object_constructor, object_name, dir_path="local"
 ):
     import hashlib
-    import pickle
+    import shelve
 
     from pathlib import Path
 
-    hexdigest = hashlib.new(name=algorithm_name, data=hashable_attribute).hexdigest()
-    file_path = Path.cwd() / Path(dirpath) / Path(hexdigest + "." + algorithm_name)
+    digest = hashlib.new(name="blake2s", data=hashable_attribute).hexdigest()
+    file_path = Path(dir_path) / Path(object_name + ".shelf")
 
     if file_path.exists():
-        print(f"Reusing {file_path}")
-        obj = pickle.load(open(file_path, "rb"))
-    else:
-        print(f"Constructing {file_path}")
-        obj = object_constructor()
-        pickle.dump(obj, open(file_path, "wb"))
+        with shelve.open(file_path) as file_dict:
+            if file_dict.get("digest") == digest:
+                print(f"Reusing {file_path}")
+                return file_dict["object"]
 
-    return obj
+    print(f"Constructing {file_path}")
+    obj = object_constructor()
+    with shelve.open(file_path) as file_dict:
+        file_dict["digest"] = digest
+        file_dict["object"] = obj
+        return obj
+
+
+def free_cuda():
+    import gc as garbage_collector
+
+    garbage_collector.collect()
+    torch.cuda.empty_cache()
+
+
+def sparse_dense_multiply(sparse: torch.Tensor, dense: torch.Tensor):
+    if not sparse.is_sparse or dense.is_sparse:
+        raise ValueError("Incorrect tensor layouts")
+
+    indices = sparse._indices()
+    values = sparse._values() * dense[indices[0, :], indices[1, :]]
+    return torch.sparse_coo_tensor(indices, values, sparse.size(), device=sparse.device)
 
 
 def timeit(func):
@@ -40,19 +59,3 @@ def timeit(func):
             )
 
     return _time_it
-
-
-def free_cuda():
-    import gc as garbage_collector
-
-    garbage_collector.collect()
-    torch.cuda.empty_cache()
-
-
-def sparse_dense_multiply(sparse: torch.Tensor, dense: torch.Tensor):
-    if not sparse.is_sparse or dense.is_sparse:
-        raise ValueError("Incorrect tensor layouts")
-
-    indices = sparse._indices()
-    values = sparse._values() * dense[indices[0, :], indices[1, :]]
-    return torch.sparse_coo_tensor(indices, values, sparse.size(), device=sparse.device)

@@ -1,30 +1,17 @@
 import torch
 
-class WeightDecayGradientHook:
-    def __init__(self, weight, regularization_lambda):
-        self.decay = regularization_lambda * weight.detach().clone()
-
-    def __call__(self, grad):
-        grad.data += self.decay
-        return grad
-
-
-def weight_decay(tensor, regularization_lambda):
-    if not tensor.requires_grad:
-        return tensor
-
-    hook = WeightDecayGradientHook(tensor, regularization_lambda)
-    tensor.register_hook(hook)
-    return tensor
+from my_ml_tools.models import weight_decay
 
 
 class ProbabilityMatrixFactorization(torch.nn.Module):
+    """predicted rating = user_factors @ item_factors, with bias and L2 regularization"""
+
     def __init__(self, n_users, n_items, latent_dimension, regularization_lambda):
         super().__init__()
 
         self.regularization_lambda = regularization_lambda
 
-        self.user_weight = torch.nn.Parameter(torch.empty(n_users, latent_dimension))
+        self.user_factors = torch.nn.Parameter(torch.empty(n_users, latent_dimension))
         torch.nn.init.xavier_normal_(self.user_weight)
         self.user_bias = torch.nn.Parameter(torch.zeros(n_users, 1))
 

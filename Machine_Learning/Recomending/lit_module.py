@@ -6,19 +6,21 @@ from torch.utils.data import DataLoader
 
 from data import GridSampler
 from model import ProbabilityMatrixFactorization
-from utils import sparse_dense_multiply
+
+from my_ml_tools.utils import sparse_dense_multiply
+
 
 class LitPMF(pl.LightningModule):
     def __init__(
-            self,
-            dataset,
-            n_users,
-            n_items,
-            latent_dimension=10,
-            batch_size=1e9,
-            weight_decay=1e-3,
-            learning_rate=5e-3,
-            momentum=0.9,
+        self,
+        dataset,
+        n_users,
+        n_items,
+        latent_dimension=10,
+        batch_size=1e9,
+        weight_decay=1e-3,
+        learning_rate=5e-3,
+        momentum=0.9,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["model", "dataset"])
@@ -30,7 +32,7 @@ class LitPMF(pl.LightningModule):
             n_users=self.hparams["n_users"],
             n_items=self.hparams["n_items"],
             latent_dimension=self.hparams["latent_dimension"],
-            regularization_lambda=self.hparams["weight_decay"]
+            regularization_lambda=self.hparams["weight_decay"],
         )
 
     def train_dataloader(self):
@@ -69,7 +71,5 @@ class LitPMF(pl.LightningModule):
 
     def configure_optimizers(self):
         #         optimizer = torch.optim.SGD(params=self.parameters(), **self.optim_kwargs)
-        optimizer = torch.optim.Adam(
-            params=self.parameters()
-        )
+        optimizer = torch.optim.Adam(params=self.parameters())
         return optimizer

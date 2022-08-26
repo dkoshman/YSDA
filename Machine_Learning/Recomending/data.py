@@ -1,7 +1,8 @@
+import itertools
+
 import numpy as np
 import scipy
 import torch
-
 
 from torch.utils.data import Dataset
 
@@ -56,8 +57,6 @@ class SparseDataset(Dataset):
             user_ids=indices[0],
             item_ids=indices[1],
         )
-
-import itertools
 
 
 class GridSampler:

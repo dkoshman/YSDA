@@ -1,0 +1,17 @@
+project: recommending
+method: bayes
+metric:
+  goal: maximize
+  name: val_ndcg
+parameters:
+  model:
+    value: probabilistic_matrix_factorization
+  max_epochs:
+    value: 30
+  batch_size:
+    value: 1e8
+  hidden_dimension:
+    values:
+      - 5
+      - 10
+      - 15
