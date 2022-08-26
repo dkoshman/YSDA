@@ -1,5 +1,8 @@
+import torch
+
+
 def reuse_pickled_object_or_construct(
-        hashable_attribute, object_constructor, algorithm_name="blake2s", dirpath="local"
+    hashable_attribute, object_constructor, algorithm_name="blake2s", dirpath="local"
 ):
     import hashlib
     import pickle
@@ -42,17 +45,13 @@ def timeit(func):
 def free_cuda():
     import gc as garbage_collector
 
-    import torch
-
     garbage_collector.collect()
     torch.cuda.empty_cache()
 
 
-def sparse_dense_multiply(sparse: "torch.Tensor", dense: "torch.Tensor"):
-    import torch
-
+def sparse_dense_multiply(sparse: torch.Tensor, dense: torch.Tensor):
     if not sparse.is_sparse or dense.is_sparse:
-        raise ValueError("Incorrect tensor types")
+        raise ValueError("Incorrect tensor layouts")
 
     indices = sparse._indices()
     values = sparse._values() * dense[indices[0, :], indices[1, :]]
