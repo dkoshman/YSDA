@@ -26,21 +26,44 @@ class CustomClassifier(LogisticRegression):
     def __init__(self):
 
         super(CustomClassifier, self).__init__()
-        self.coef_ = np.array([[
-            -0.21404096, -2.33748762, -2.70184235, -2.73066579, -1.54875568,
-            -2.06471249, -1.00291385, -1.43804488, -1.63824906, -1.0017922,
-            -0.48928441, -0.62414559, -0.27359805,  0.98648587,  1.32501456,
-            -0.80052908, -0.283991,  1.34641143,  0.02758078, -2.6099112,
-            -1.63476157, -3.525323,  0.60030625
-        ]])
+        self.coef_ = np.array(
+            [
+                [
+                    -0.21404096,
+                    -2.33748762,
+                    -2.70184235,
+                    -2.73066579,
+                    -1.54875568,
+                    -2.06471249,
+                    -1.00291385,
+                    -1.43804488,
+                    -1.63824906,
+                    -1.0017922,
+                    -0.48928441,
+                    -0.62414559,
+                    -0.27359805,
+                    0.98648587,
+                    1.32501456,
+                    -0.80052908,
+                    -0.283991,
+                    1.34641143,
+                    0.02758078,
+                    -2.6099112,
+                    -1.63476157,
+                    -3.525323,
+                    0.60030625,
+                ]
+            ]
+        )
         self.intercept_ = np.array([-7.76999576])
         self.classes_ = np.array([0, 1])
 
     def predict(self, X):
-        assert len(X.shape) == 2, 'Invalid tensor shape'
+        assert len(X.shape) == 2, "Invalid tensor shape"
         if X.shape[1] == 23:
             return super().predict(X)
         else:
             return super().predict(dummy_transform(X))
+
 
 clf = CustomClassifier()

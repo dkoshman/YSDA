@@ -3,7 +3,10 @@ class WeightDecayGradientHook:
         self.decay = regularization_lambda * weight.detach().clone()
 
     def __call__(self, grad):
-        grad.data += self.decay
+        try:
+            grad.data += self.decay
+        except RuntimeError:
+            grad.data = grad.data.clone() + self.decay
         return grad
 
 

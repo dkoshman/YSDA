@@ -2,6 +2,7 @@
 **/local/
 
 **/lightning_logs/
+**/wandb/
 **/.idea/
 **/__pycache__/
 

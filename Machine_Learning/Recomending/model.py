@@ -11,7 +11,7 @@ class ProbabilityMatrixFactorization(torch.nn.Module):
 
         self.regularization_lambda = regularization_lambda
 
-        self.user_factors = torch.nn.Parameter(torch.empty(n_users, latent_dimension))
+        self.user_weight = torch.nn.Parameter(torch.empty(n_users, latent_dimension))
         torch.nn.init.xavier_normal_(self.user_weight)
         self.user_bias = torch.nn.Parameter(torch.zeros(n_users, 1))
 

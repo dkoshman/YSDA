@@ -1,10 +1,44 @@
 import itertools
 
 import numpy as np
+import pytorch_lightning as pl
 import scipy
 import torch
 
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
+
+
+class SparseDataModule(pl.LightningDataModule):
+    def __init__(
+        self,
+        train_path="local/train_explicit.npz",
+        val_path="local/val_explicit.npz",
+        batch_size=1e8,
+    ):
+        super().__init__()
+        self.batch_size = batch_size
+        self.train_dataset = self.build_dataset(train_path)
+        self.val_dataset = self.build_dataset(val_path)
+
+    @staticmethod
+    def build_dataset(path):
+        explicit_train = scipy.sparse.load_npz(path).tocsr()
+        implicit_train = explicit_train > 0
+        return SparseDataset(explicit_train, implicit_train)
+
+    @staticmethod
+    def build_dataloader(dataset, batch_size):
+        sampler = GridSampler(
+            dataset_shape=dataset.shape,
+            approximate_batch_size=batch_size,
+        )
+        return DataLoader(dataset=dataset, sampler=sampler, batch_size=None)
+
+    def train_dataloader(self):
+        return self.build_dataloader(self.train_dataset, self.batch_size)
+
+    def val_dataloader(self):
+        return self.build_dataloader(self.val_dataset, self.batch_size)
 
 
 class SparseDataset(Dataset):
