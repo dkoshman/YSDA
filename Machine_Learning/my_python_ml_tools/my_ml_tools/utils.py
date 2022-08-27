@@ -13,14 +13,14 @@ def reuse_shelved_object_or_construct(
     file_path = Path(dir_path) / Path(object_name + ".shelf")
 
     if file_path.exists():
-        with shelve.open(file_path) as file_dict:
+        with shelve.open(file_path.as_posix()) as file_dict:
             if file_dict.get("digest") == digest:
                 print(f"Reusing {file_path}")
                 return file_dict["object"]
 
     print(f"Constructing {file_path}")
     obj = object_constructor()
-    with shelve.open(file_path) as file_dict:
+    with shelve.open(file_path.as_posix()) as file_dict:
         file_dict["digest"] = digest
         file_dict["object"] = obj
         return obj
