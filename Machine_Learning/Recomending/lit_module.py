@@ -7,15 +7,14 @@ from model import ProbabilityMatrixFactorization
 from my_ml_tools.utils import sparse_dense_multiply
 
 
-class LitPMF(pl.LightningModule):
+class LitProbabilityMatrixFactorization(pl.LightningModule):
     def __init__(
         self,
         n_users,
         n_items,
         latent_dimension=10,
         weight_decay=1e-3,
-        learning_rate=5e-3,
-        momentum=0.9,
+        optimizer_kwargs=None,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -59,6 +58,16 @@ class LitPMF(pl.LightningModule):
         return recommendations
 
     def configure_optimizers(self):
-        #         optimizer = torch.optim.SGD(params=self.parameters(), **self.optim_kwargs)
-        optimizer = torch.optim.Adam(params=self.parameters())
+        config = self.hparams["optimizer_kwargs"]
+        if config["optimizer"] in [None, "adam"]:
+            optimizer = torch.optim.Adam(params=self.parameters())
+        elif config["optimizer"] == "sgd":
+            optimizer = torch.optim.SGD(
+                params=self.parameters(),
+                lr=config["sgd"]["learning_rate"],
+                momentum=config["sgd"]["momentum"],
+            )
+        else:
+            raise ValueError("Unknown optimizer config.")
+
         return optimizer

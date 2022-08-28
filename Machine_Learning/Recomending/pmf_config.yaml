@@ -1,18 +1,66 @@
-project: recommending
+project: Recommending
 method: bayes
 metric:
-  goal: maximize
-  name: val_ndcg
+  goal: minimize
+  name: val_loss
 parameters:
   model:
     value: probabilistic_matrix_factorization
   max_epochs:
-    value: 30
+    value: 50
   batch_size:
-    value: 1e8
-  hidden_dimension:
-    values:
-      - 5
-      - 10
-      - 15
-sweep_id: r8myzgkb
+    value: 1.0e8
+  n_batches_for_gradient_accumulation:
+    value: 10
+  val_check_interval:
+    value: 3
+  early_stopping:
+    parameters:
+      monitor:
+        value: val_loss
+      mode:
+        value: min
+      min_delta:
+        value: 1.0e-2
+      patience:
+        value: 2
+  automatic_mixed_precision:
+    parameters:
+      amp_backend:
+        values: [ apex, native ]
+      amp_level:
+        values: [ O1, O2 ]
+  stochastic_weight_averaging:
+    parameters:
+      enable:
+        values: [ true, false ]
+      swa_lrs:
+        min: 1.0e-3
+        max: 1.0e-1
+      swa_epoch_start:
+        min: 10
+        max: 30
+      annealing_epochs:
+        min: 1
+        max: 10
+      annealing_strategy:
+        values: [ cos, linear ]
+  latent_dimension:
+    min: 5
+    max: 15
+  weight_decay:
+    min: 1.0e-4
+    max: 1.0e-2
+  optimizer_kwargs:
+    parameters:
+      optimizer:
+        values: [ adam, sgd ]
+      sgd:
+        parameters:
+          learning_rate:
+            min: 1.0e-3
+            max: 1.0e-2
+          momentum:
+            min: 0.0
+            max: 0.99
+sweep_id: 0jyeigbx
