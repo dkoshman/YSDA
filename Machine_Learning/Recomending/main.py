@@ -54,7 +54,7 @@ def main(experiment, cli_args):
     )
     trainer = pl.Trainer(
         logger=WandbLogger(experiment=experiment),
-        val_check_interval=config.val_check_interval,
+        check_val_every_n_epoch=config.check_val_every_n_epoch,
         default_root_dir="local",
         max_epochs=config.max_epochs,
         accelerator="gpu",

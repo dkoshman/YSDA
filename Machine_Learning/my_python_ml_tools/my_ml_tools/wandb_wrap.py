@@ -8,10 +8,14 @@ from .utils import free_cuda
 
 
 class WandbCLIWrapper:
-    @staticmethod
-    def initialize_sweep(config_file_path):
+    def __init__(self, train_function=None):
+        if train_function:
+            self.main = train_function
+
+    def initialize_sweep(self, config_file_path):
         """Returns sweep id if it is a field in config file, otherwise initializes new sweep."""
         sweep_config = yaml.safe_load(open(config_file_path))
+        self.project = sweep_config.project
         sweep_id = sweep_config.get("sweep_id")
         if sweep_id:
             print(f"Using sweep id {sweep_id} from config file", file=sys.stderr)
@@ -47,11 +51,12 @@ class WandbCLIWrapper:
         )
         return parser
 
-    def parser(self):
-        return self.default_parser
+    def build_parser(self, default_parser):
+        """Overwrite this method to extend default parser or build new one."""
+        return default_parser
 
     def launch_agent(self):
-        parser = self.parser()
+        parser = self.build_parser(default_parser=self.default_parser)
         args = parser.parse_args()
         self.cli_args = args
         sweep_id = self.initialize_sweep(args.config)
@@ -61,15 +66,21 @@ class WandbCLIWrapper:
             count=args.runs,
         )
 
+    def __call__(self):
+        """To enable use of this class as decorator."""
+        self.launch_agent()
+
     def _main_wrapper(self):
         free_cuda()
-        with wandb.init() as wandb_run:
+        # Without explicit project arg, the run is marked as 'uncategorized'
+        with wandb.init(project=self.project) as wandb_run:
             self.experiment = wandb_run
             try:
                 self.main(wandb_run, self.cli_args)
             except Exception as exception:
                 import traceback
 
+                # This enables full traceback, as wandb agent truncates it
                 print(traceback.print_exc(), file=sys.stderr)
                 raise exception
 
@@ -81,5 +92,4 @@ class WandbCLIDecorator(WandbCLIWrapper):
     def __init__(self, train_function):
         self.main = train_function
 
-    def __call__(self):
-        self.launch_agent()
+
