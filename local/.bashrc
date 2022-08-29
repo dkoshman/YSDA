@@ -126,3 +126,8 @@ alias av3.10='cd /external2/dkkoshman && . ./venv3.10/bin/activate'
 
 # launch notebook server
 alias jn='jupyter notebook --no-browser --port 6172 --ip 0.0.0.0'
+
+export PATH=/external2/dkkoshman/poetry/bin:$PATH
+
+export WANDB_DIR=/external2/dkkoshman
+
