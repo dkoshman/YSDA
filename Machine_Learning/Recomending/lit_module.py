@@ -37,8 +37,8 @@ class LitProbabilityMatrixFactorization(pl.LightningModule):
         loss = torch.sparse.sum(error) / error._values().numel()
         return loss
 
-    def loss_fn(self, batch, ratings):
-        return self.sparse_pmf_loss(batch["explicit"], batch["implicit"], ratings)
+    def loss_fn(self, batch, model_ratings):
+        return self.sparse_pmf_loss(batch["explicit"], batch["implicit"], model_ratings)
 
     def training_step(self, batch, batch_idx):
         ratings = self(batch)

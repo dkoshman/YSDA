@@ -12,6 +12,8 @@ parameters:
     value: 1.0e8
   n_batches_for_gradient_accumulation:
     value: 10
+  num_workers:
+    value: 4
   check_val_every_n_epoch:
     value: 3
   early_stopping:
@@ -63,4 +65,4 @@ parameters:
           momentum:
             min: 0.0
             max: 0.99
-sweep_id: 0jyeigbx
+sweep_id: s59xeh25
