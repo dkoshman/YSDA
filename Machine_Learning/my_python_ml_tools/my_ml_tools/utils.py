@@ -1,4 +1,32 @@
+import numpy as np
 import torch
+
+
+def free_cuda():
+    import gc as garbage_collector
+
+    garbage_collector.collect()
+    torch.cuda.empty_cache()
+
+
+def sparse_dense_multiply(sparse: torch.Tensor, dense: torch.Tensor):
+    if not sparse.is_sparse or dense.is_sparse:
+        raise ValueError("Incorrect tensor layouts")
+
+    indices = sparse._indices()
+    values = sparse._values() * dense[indices[0, :], indices[1, :]]
+    return torch.sparse_coo_tensor(indices, values, sparse.size(), device=sparse.device)
+
+
+def scipy_to_torch_sparse(scipy_sparse_csr_matrix, device="cpu"):
+    sparse = scipy_sparse_csr_matrix.tocoo()
+    torch_sparse_tensor = torch.sparse_coo_tensor(
+        indices=np.stack([sparse.row, sparse.col]),
+        values=sparse.data,
+        size=sparse.shape,
+        device=device,
+    )
+    return torch_sparse_tensor
 
 
 def reuse_shelved_object_or_construct(
@@ -24,22 +52,6 @@ def reuse_shelved_object_or_construct(
         file_dict["digest"] = digest
         file_dict["object"] = obj
         return obj
-
-
-def free_cuda():
-    import gc as garbage_collector
-
-    garbage_collector.collect()
-    torch.cuda.empty_cache()
-
-
-def sparse_dense_multiply(sparse: torch.Tensor, dense: torch.Tensor):
-    if not sparse.is_sparse or dense.is_sparse:
-        raise ValueError("Incorrect tensor layouts")
-
-    indices = sparse._indices()
-    values = sparse._values() * dense[indices[0, :], indices[1, :]]
-    return torch.sparse_coo_tensor(indices, values, sparse.size(), device=sparse.device)
 
 
 def timeit(func):

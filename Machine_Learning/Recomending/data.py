@@ -42,8 +42,12 @@ class SparseDataModule(pl.LightningDataModule):
         )
 
     def on_after_batch_transfer(self, batch, dataloader_idx):
-        batch["explicit"] = self.train_dataset.unpack_sparse_tensor(**batch["explicit"])
-        batch["implicit"] = self.train_dataset.unpack_sparse_tensor(**batch["implicit"])
+        batch["explicit"] = self.train_dataset.unpack_sparse_tensor(
+            **batch["explicit_sparse_kwargs"]
+        )
+        batch["implicit"] = self.train_dataset.unpack_sparse_tensor(
+            **batch["implicit_sparse_kwargs"]
+        )
         return batch
 
     def train_dataloader(self):
@@ -70,23 +74,17 @@ class GridSampler:
         return self.chunks_per_dim ** len(self.dataset_shape)
 
     def __iter__(self):
-        indices = [
-            torch.randperm(dimension_size) for dimension_size in self.dataset_shape
+        batch_indices_per_dimension = [
+            torch.randperm(dimension_size).chunk(self.chunks_per_dim)
+            for dimension_size in self.dataset_shape
         ]
-        indices = [
-            np.array(
-                [
-                    chunk.numpy()
-                    for chunk in dimension_indices.chunk(self.chunks_per_dim)
-                ]
-            )
-            for dimension_indices in indices
-        ]
-        iterator = itertools.product(*indices)
+        numpy_batches = [[j.numpy() for j in i] for i in batch_indices_per_dimension]
+        batch_indices_product = itertools.product(*numpy_batches)
         if not self.shuffle:
-            yield from iterator
+            yield from batch_indices_product
         else:
-            yield from np.random.permutation(list(iterator))
+            batch_indices_product = np.array(list(batch_indices_product), dtype=object)
+            yield from np.random.permutation(batch_indices_product)
 
 
 class SparseDataset(Dataset):
@@ -122,11 +120,12 @@ class SparseDataset(Dataset):
     @staticmethod
     def carve_sparse_matrix_and_pack(sparse_matrix, user_ids, item_ids):
         sparse_matrix = sparse_matrix[user_ids][:, item_ids].tocoo()
-        return dict(
+        torch_sparse_tensor_init_kwargs = dict(
             indices=np.stack([sparse_matrix.row, sparse_matrix.col]),
             values=sparse_matrix.data,
             size=sparse_matrix.shape,
         )
+        return torch_sparse_tensor_init_kwargs
 
     @staticmethod
     def unpack_sparse_tensor(*, indices, values, size):
@@ -136,15 +135,15 @@ class SparseDataset(Dataset):
 
     def __getitem__(self, indices):
         user_ids, item_ids = indices
-        explicit = self.carve_sparse_matrix_and_pack(
+        explicit_sparse_kwargs = self.carve_sparse_matrix_and_pack(
             self.explicit_feedback, user_ids, item_ids
         )
-        implicit = self.carve_sparse_matrix_and_pack(
+        implicit_sparse_kwargs = self.carve_sparse_matrix_and_pack(
             self.implicit_feedback, user_ids, item_ids
         )
         return dict(
-            explicit=explicit,
-            implicit=implicit,
+            explicit_sparse_kwargs=explicit_sparse_kwargs,
+            implicit_sparse_kwargs=implicit_sparse_kwargs,
             user_ids=user_ids,
             item_ids=item_ids,
         )

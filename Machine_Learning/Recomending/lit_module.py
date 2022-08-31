@@ -2,28 +2,19 @@ import numpy as np
 import pytorch_lightning as pl
 import torch
 
-from model import ProbabilityMatrixFactorization
-
 from my_ml_tools.utils import sparse_dense_multiply
 
 
 class LitProbabilityMatrixFactorization(pl.LightningModule):
     def __init__(
         self,
-        n_users,
+        model,
         n_items,
-        latent_dimension=10,
-        weight_decay=1e-3,
         optimizer_kwargs=None,
     ):
         super().__init__()
-        self.save_hyperparameters()
-        self.model = ProbabilityMatrixFactorization(
-            n_users=n_users,
-            n_items=n_items,
-            latent_dimension=latent_dimension,
-            regularization_lambda=weight_decay,
-        )
+        self.save_hyperparameters(ignore="model")
+        self.model = model
 
     def forward(self, batch):
         return self.model(user_ids=batch["user_ids"], item_ids=batch["item_ids"])
@@ -69,5 +60,4 @@ class LitProbabilityMatrixFactorization(pl.LightningModule):
             )
         else:
             raise ValueError("Unknown optimizer config.")
-
         return optimizer

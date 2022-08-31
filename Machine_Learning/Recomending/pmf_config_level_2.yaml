@@ -29,37 +29,39 @@ parameters:
   automatic_mixed_precision:
     parameters:
       amp_backend:
-        values: [ apex, native ]
+        value: native
       amp_level:
-        values: [ O1, O2 ]
+        value: O1
   stochastic_weight_averaging:
     parameters:
       enable:
         values: [ true, false ]
       swa_lrs:
         min: 1.0e-3
-        max: 1.0e-1
+        max: 1.0e-2
       swa_epoch_start:
         min: 10
-        max: 30
+        max: 15
       annealing_epochs:
-        min: 1
-        max: 10
+        value: 5
       annealing_strategy:
-        values: [ cos, linear ]
+        value: cos
   latent_dimension:
-    min: 5
-    max: 15
+    min: 10
+    max: 20
   weight_decay:
-    min: 1.0e-4
+    min: 1.0e-3
     max: 1.0e-2
   optimizer_kwargs:
     parameters:
       optimizer:
-        values: adam
+        value: sgd
       sgd:
         parameters:
           learning_rate:
-            min: 1.0e-3
-            max: 1.0e-2
-sweep_id: s59xeh25
+            min: 5.0e-4
+            max: 5.0e-3
+          momentum:
+            min: 0.9
+            max: 0.99
+sweep_id: 5ptrv6ws

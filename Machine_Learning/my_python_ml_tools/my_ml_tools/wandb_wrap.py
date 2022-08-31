@@ -1,6 +1,8 @@
-import argparse
 import sys
 import traceback
+
+from argparse import ArgumentParser
+from typing import Callable
 
 import wandb
 import yaml
@@ -9,19 +11,19 @@ from .utils import free_cuda
 
 
 class WandbCLIWrapper:
-    def __init__(self, train_function=None):
+    def __init__(self, train_function: Callable[[dict], None] = None):
         if train_function:
             self.main = train_function
 
-    def build_parser(self, default_parser):
+    def build_parser(self, default_parser: ArgumentParser) -> ArgumentParser:
         """Overwrite this method to extend default parser or build new one."""
         return default_parser
 
-    def debug_config(self, config: dict):
+    def debug_config(self, config: dict) -> dict:
         """Overwrite this method to change config for debugging."""
         return config
 
-    def initialize_sweep(self, config_file_path):
+    def initialize_sweep(self, config_file_path) -> str:
         """Returns sweep id if it is a field in config file, otherwise initializes new sweep."""
         config = self._read_config(config_file_path)
         sweep_id = config.get("sweep_id")
@@ -40,7 +42,7 @@ class WandbCLIWrapper:
 
     @property
     def _default_parser(self):
-        parser = argparse.ArgumentParser(
+        parser = ArgumentParser(
             description="Launch agent to explore the sweep provided by the yaml file"
         )
         parser.add_argument(
@@ -103,10 +105,10 @@ class WandbCLIWrapper:
 
         return wrapper
 
+    @_full_traceback
     def _main_wrapper(self):
         free_cuda()
         debug = self.cli_args.debug
-        # Without explicit project arg, the run is marked as 'uncategorized'
         with wandb.init(job_type="debug" if debug else "train") as wandb_run:
             config = dict(wandb_run.config)
             config.update(vars(self.cli_args))
@@ -114,6 +116,5 @@ class WandbCLIWrapper:
                 config = self.debug_config(config)
             self.main(config)
 
-    @_full_traceback
-    def main(self, config):
+    def main(self, config: dict) -> None:
         raise NotImplementedError
