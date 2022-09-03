@@ -1,4 +1,5 @@
 import pytorch_lightning as pl
+import wandb
 
 from pytorch_lightning.callbacks import (
     EarlyStopping,
@@ -91,7 +92,6 @@ class RecommendingWandbCLIWrapper(WandbCLIWrapper):
         amp_level = (
             amp_config["amp_level"] if amp_config["amp_backend"] == "apex" else None
         )
-
         self.trainer = pl.Trainer(
             logger=WandbLogger(),
             check_val_every_n_epoch=config["check_val_every_n_epoch"],
@@ -105,9 +105,20 @@ class RecommendingWandbCLIWrapper(WandbCLIWrapper):
         )
         return self.trainer
 
-    def debug_config(self, config):
-        config["check_val_every_n_epoch"] = 1
-        return config
+    # def debug_config(self, config):
+    #
+    #     if config["model"] == "probabilistic_matrix_factorization":
+    #         print("Overwriting config", file=open(2, "a", closefd=False))
+    #         config["check_val_every_n_epoch"] = 1
+    #         config["max_epochs"] = 1
+    #
+    #     return config
+
+    def on_fit_end(self):
+        checkpoint_path = self.trainer.checkpoint_callback.best_model_path
+        wandb.log(
+            {"best checkpoint path": wandb.Html(f"<span> {checkpoint_path} </span>")}
+        )
 
     def main(self, config):
         datamodule = self.build_datamodule(config)
@@ -115,6 +126,8 @@ class RecommendingWandbCLIWrapper(WandbCLIWrapper):
         lit_module = self.build_lightning_module(model, config)
         trainer = self.build_trainer(config)
         trainer.fit(lit_module, datamodule=datamodule)
+
+        self.on_fit_end()
 
 
 if __name__ == "__main__":

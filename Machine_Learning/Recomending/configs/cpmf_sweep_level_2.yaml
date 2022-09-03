@@ -1,11 +1,12 @@
 project: Recommending
+name: "Constrained PMF sweep level 2"
 method: bayes
 metric:
   goal: minimize
   name: val_loss
 parameters:
   model:
-    value: probabilistic_matrix_factorization
+    value: constrained_probabilistic_matrix_factorization
   max_epochs:
     value: 50
   batch_size:
@@ -25,41 +26,37 @@ parameters:
       min_delta:
         value: 1.0e-2
       patience:
-        value: 2
+        value: 3
   automatic_mixed_precision:
     parameters:
       amp_backend:
-        values: [ apex, native ]
-      amp_level:
-        values: [ O1, O2 ]
+        value: native
   stochastic_weight_averaging:
     parameters:
       enable:
-        values: [ true, false ]
+        value: true
       swa_lrs:
-        min: 1.0e-3
-        max: 1.0e-1
+        min: 1.0e-1
+        max: 1.0
       swa_epoch_start:
-        min: 10
-        max: 30
+        distribution: q_normal
+        mu: 5
+        sigma: 2
       annealing_epochs:
-        min: 1
-        max: 10
+        distribution: q_normal
+        mu: 3
+        sigma: 2
       annealing_strategy:
-        values: [ cos, linear ]
+        value: linear
   latent_dimension:
-    min: 5
-    max: 15
+    distribution: q_normal
+    mu: 10
+    sigma: 5
   weight_decay:
-    min: 1.0e-4
+    min: 1.0e-3
     max: 1.0e-2
   optimizer_kwargs:
     parameters:
       optimizer:
-        values: adam
-      sgd:
-        parameters:
-          learning_rate:
-            min: 1.0e-3
-            max: 1.0e-2
-sweep_id: s59xeh25
+        value: adam
+sweep_id: qgs6cb9s

@@ -13,7 +13,7 @@ class LitProbabilityMatrixFactorization(pl.LightningModule):
         optimizer_kwargs=None,
     ):
         super().__init__()
-        self.save_hyperparameters(ignore="model")
+        self.save_hyperparameters()
         self.model = model
 
     def forward(self, batch):

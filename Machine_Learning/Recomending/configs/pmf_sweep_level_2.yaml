@@ -1,4 +1,5 @@
 project: Recommending
+name: "PMF sweep level 2"
 method: bayes
 metric:
   goal: minimize

@@ -36,9 +36,9 @@ class WandbCLIWrapper:
         return sweep_id
 
     def _read_config(self, config_file_path):
-        sweep_config = yaml.safe_load(open(config_file_path))
-        self.project = sweep_config["project"]
-        return sweep_config
+        config = yaml.safe_load(open(config_file_path))
+        self.project = config["project"]
+        return config
 
     @property
     def _default_parser(self):
@@ -80,11 +80,18 @@ class WandbCLIWrapper:
 
     def launch_agent(self):
         args = self._parse_args()
+        if args.debug:
+            config = self._read_config(args.config)
+            config.update(vars(args))
+            config = self.debug_config(config)
+            with wandb.init(project=self.project, config=config):
+                return self.main(config)
+
         sweep_id = self.initialize_sweep(args.config)
         wandb.agent(
             project=self.project,
             sweep_id=sweep_id,
-            function=self._main_wrapper,
+            function=self._main_wrapper_for_agent,
             count=args.runs,
         )
 
@@ -106,14 +113,11 @@ class WandbCLIWrapper:
         return wrapper
 
     @_full_traceback
-    def _main_wrapper(self):
+    def _main_wrapper_for_agent(self):
         free_cuda()
-        debug = self.cli_args.debug
-        with wandb.init(job_type="debug" if debug else "train") as wandb_run:
+        with wandb.init() as wandb_run:
             config = dict(wandb_run.config)
             config.update(vars(self.cli_args))
-            if debug:
-                config = self.debug_config(config)
             self.main(config)
 
     def main(self, config: dict) -> None:
