@@ -1,0 +1,10 @@
+project: Recommending
+name: "SLIM debug run"
+model: slim
+batch_size: 100
+num_workers: 4
+l2_coefficient: 1.0
+l1_coefficient: 1.0e-3
+density: 1.0e-4
+patience: 1
+gpus: [1]

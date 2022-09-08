@@ -10,6 +10,19 @@ import yaml
 from .utils import free_cuda
 
 
+def _full_traceback(function):
+    """Enables full traceback, useful as wandb agent truncates it."""
+
+    def wrapper(*args, **kwargs):
+        try:
+            return function(*args, **kwargs)
+        except Exception as exception:
+            print(traceback.print_exc(), file=sys.stderr)
+            raise exception
+
+    return wrapper
+
+
 class WandbCLIWrapper:
     def __init__(self, train_function: Callable[[dict], None] = None):
         if train_function:
@@ -78,14 +91,16 @@ class WandbCLIWrapper:
         self.cli_args = args
         return args
 
-    def launch_agent(self):
-        args = self._parse_args()
+    def launch_agent(self, args=None):
+        if not args:
+            args = self._parse_args()
+
         if args.debug:
             config = self._read_config(args.config)
             config.update(vars(args))
             config = self.debug_config(config)
-            with wandb.init(project=self.project, config=config):
-                return self.main(config)
+            # with wandb.init(project=self.project, config=config):
+            return self.main(config)
 
         sweep_id = self.initialize_sweep(args.config)
         wandb.agent(
@@ -98,19 +113,6 @@ class WandbCLIWrapper:
     def __call__(self):
         """To enable use of this class as decorator."""
         self.launch_agent()
-
-    @staticmethod
-    def _full_traceback(function):
-        """Enables full traceback, useful as wandb agent truncates it."""
-
-        def wrapper(*args, **kwargs):
-            try:
-                return function(*args, **kwargs)
-            except Exception as exception:
-                print(traceback.print_exc(), file=sys.stderr)
-                raise exception
-
-        return wrapper
 
     @_full_traceback
     def _main_wrapper_for_agent(self):
