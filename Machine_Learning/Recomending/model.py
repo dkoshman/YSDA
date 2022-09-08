@@ -129,7 +129,6 @@ class SLIM(torch.nn.Module):
         explicit_feedback: scipy.sparse.csr.csr_matrix,
         l2_coefficient=1.0,
         l1_coefficient=1.0,
-        density=1e-4,
     ):
         super().__init__()
 
@@ -142,7 +141,6 @@ class SLIM(torch.nn.Module):
 
         self.l2_coefficient = l2_coefficient
         self.l1_coefficient = l1_coefficient
-        self.density = density
         self.n_items = explicit_feedback.shape[1]
 
         self.current_item_ids = None
@@ -173,14 +171,13 @@ class SLIM(torch.nn.Module):
         if self.current_item_ids is None:
             return
         # TODO: to device, bias, this
-        # torch.clip(self._dense_weight_slice, 0) ?
-        dense = self.dense_weight_slice.cpu().detach()
-        threshold = dense.quantile(1 - self.density)
-        dense[dense < threshold] = 0
-        sparse = dense.to_sparse_coo()
+        # torch.clip(self._dense_weight_slice, 0)
+        # threshold = dense.quantile(1 - self.density)
+        # dense[dense < threshold] = 0
+        sparse = torch.clip(self._dense_weight_slice, 0).cpu().detach().to_sparse_coo()
         self._sparse_values = torch.cat([self._sparse_values, sparse.values()])
         self._sparse_indices = torch.cat([self._sparse_indices, sparse.indices()], 1)
-
+        print(f"Density {len(sparse.values()) / torch.prod(sparse.shape).item()}")
         self.dense_weight_slice.data = torch.empty(0)
         self.current_item_ids = None
 
