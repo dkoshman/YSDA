@@ -1,0 +1,68 @@
+project: Recommending
+name: "PMF sweep level 2"
+method: bayes
+metric:
+  goal: minimize
+  name: val_loss
+parameters:
+  model:
+    value: probabilistic_matrix_factorization
+  max_epochs:
+    value: 50
+  batch_size:
+    value: 1.0e8
+  n_batches_for_gradient_accumulation:
+    value: 10
+  num_workers:
+    value: 4
+  check_val_every_n_epoch:
+    value: 3
+  early_stopping:
+    parameters:
+      monitor:
+        value: val_loss
+      mode:
+        value: min
+      min_delta:
+        value: 1.0e-2
+      patience:
+        value: 2
+  automatic_mixed_precision:
+    parameters:
+      amp_backend:
+        value: native
+      amp_level:
+        value: O1
+  stochastic_weight_averaging:
+    parameters:
+      enable:
+        values: [ true, false ]
+      swa_lrs:
+        min: 1.0e-3
+        max: 1.0e-2
+      swa_epoch_start:
+        min: 10
+        max: 15
+      annealing_epochs:
+        value: 5
+      annealing_strategy:
+        value: cos
+  latent_dimension:
+    min: 10
+    max: 20
+  weight_decay:
+    min: 1.0e-3
+    max: 1.0e-2
+  optimizer_kwargs:
+    parameters:
+      optimizer:
+        value: sgd
+      sgd:
+        parameters:
+          learning_rate:
+            min: 5.0e-4
+            max: 5.0e-3
+          momentum:
+            min: 0.9
+            max: 0.99
+sweep_id: 5ptrv6ws

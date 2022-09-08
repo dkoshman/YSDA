@@ -1,0 +1,59 @@
+project: Recommending
+name: "Constrained PMF sweep"
+method: bayes
+metric:
+  goal: minimize
+  name: val_loss
+parameters:
+  model:
+    value: constrained_probabilistic_matrix_factorization
+  max_epochs:
+    value: 50
+  batch_size:
+    value: 1.0e8
+  n_batches_for_gradient_accumulation:
+    value: 10
+  num_workers:
+    value: 4
+  check_val_every_n_epoch:
+    value: 3
+  early_stopping:
+    parameters:
+      monitor:
+        value: val_loss
+      mode:
+        value: min
+      min_delta:
+        value: 1.0e-2
+      patience:
+        value: 3
+  automatic_mixed_precision:
+    parameters:
+      amp_backend:
+        value: native
+  stochastic_weight_averaging:
+    parameters:
+      enable:
+        value: true
+      swa_lrs:
+        min: 1.0e-2
+        max: 1.0e-1
+      swa_epoch_start:
+        min: 5
+        max: 15
+      annealing_epochs:
+        min: 1
+        max: 10
+      annealing_strategy:
+        value: linear
+  latent_dimension:
+    min: 1
+    max: 10
+  weight_decay:
+    min: 1.0e-4
+    max: 1.0e-3
+  optimizer_kwargs:
+    parameters:
+      optimizer:
+        value: adam
+sweep_id: 24xd85ul

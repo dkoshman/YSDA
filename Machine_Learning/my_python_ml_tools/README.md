@@ -5,4 +5,3 @@ To install in editable mode, run
 
 or
 	poetry install
-
