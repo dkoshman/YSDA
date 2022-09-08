@@ -27,18 +27,19 @@ class SparseDataModule(pl.LightningDataModule):
         return SparseDataset(explicit_train, implicit_train)
 
     @staticmethod
-    def build_dataloader(dataset, batch_size):
+    def build_dataloader(dataset, batch_size, shuffle):
         sampler = GridSampler(
             dataset_shape=dataset.shape,
             approximate_batch_size=batch_size,
+            shuffle=shuffle,
         )
         return DataLoader(dataset=dataset, sampler=sampler, batch_size=None)
 
     def train_dataloader(self):
-        return self.build_dataloader(self.train_dataset, self.batch_size)
+        return self.build_dataloader(self.train_dataset, self.batch_size, shuffle=True)
 
     def val_dataloader(self):
-        return self.build_dataloader(self.val_dataset, self.batch_size)
+        return self.build_dataloader(self.val_dataset, self.batch_size, shuffle=False)
 
 
 class SparseDataset(Dataset):
@@ -111,7 +112,9 @@ class GridSampler:
 
     def __iter__(self):
         indices = [torch.randperm(i) for i in self.dataset_shape]
-        indices = [[j.numpy() for j in i.chunk(self.chunks_per_dim)] for i in indices]
+        indices = [
+            np.array([j.numpy() for j in i.chunk(self.chunks_per_dim)]) for i in indices
+        ]
         iterator = itertools.product(*indices)
         if not self.shuffle:
             return iterator
