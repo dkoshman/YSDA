@@ -1,0 +1,29 @@
+project: Recommending
+name: "SLIM debug run"
+model:
+  name: SLIM
+  l2_coefficient: 1.0
+  l1_coefficient: 1.0
+lightning_module:
+  name: LitSLIM
+  batch_size: 10
+  num_workers: 1
+optimizer:
+  name: Adam
+trainer:
+  accelerator: gpu
+  devices: [3]
+  reload_dataloaders_every_n_epochs: 1
+  fast_dev_run: false
+  enable_model_summary: false
+  val_check_interval: 10
+  log_every_n_steps: 1
+  default_root_dir: local
+  num_sanity_val_steps: 0
+  max_epochs: 2
+callbacks:
+  ConvenientCheckpointLogCallback: {}
+logger:
+  name: WandbLogger
+  save_dir: local
+  offline: true

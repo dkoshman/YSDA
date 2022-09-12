@@ -6,7 +6,7 @@ import my_ml_tools.models as models
 def test_weight_decay():
     t = torch.tensor([1, 2, 3.0], requires_grad=True)
     regularization_lambda = 0.1
-    models.weight_decay(t, regularization_lambda=regularization_lambda)
+    models.l2_regularization(t, regularization_lambda=regularization_lambda)
     t.sum().backward()
     assert (t.grad == t * regularization_lambda + 1).all()
 

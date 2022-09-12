@@ -6,7 +6,7 @@ class WeightDecayGradientHook:
         return grad.clone().detach() + self.decay
 
 
-def weight_decay(tensor, regularization_lambda):
+def l2_regularization(tensor, regularization_lambda):
     """Adds weight decay gradient hook to tensor corresponding to L2 loss"""
     if tensor.requires_grad:
         hook = WeightDecayGradientHook(tensor, regularization_lambda)
