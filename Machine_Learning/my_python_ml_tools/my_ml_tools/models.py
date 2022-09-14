@@ -1,14 +1,14 @@
-class WeightDecayGradientHook:
-    def __init__(self, weight, regularization_lambda):
-        self.decay = regularization_lambda * weight.detach().clone()
+class RegularizationGradientHook:
+    def __init__(self, tensor, l2_coefficient, l1_coefficient):
+        tensor = tensor.clone().detach()
+        self.decay = 2 * l2_coefficient * tensor + l1_coefficient * tensor.sign()
 
     def __call__(self, grad):
         return grad.clone().detach() + self.decay
 
 
-def l2_regularization(tensor, regularization_lambda):
-    """Adds weight decay gradient hook to tensor corresponding to L2 loss"""
+def register_regularization_hook(tensor, l2_coefficient, l1_coefficient=0):
+    """Adds weight decay gradient hook to tensor in place"""
     if tensor.requires_grad:
-        hook = WeightDecayGradientHook(tensor, regularization_lambda)
+        hook = RegularizationGradientHook(tensor, l2_coefficient, l1_coefficient)
         tensor.register_hook(hook)
-    return tensor

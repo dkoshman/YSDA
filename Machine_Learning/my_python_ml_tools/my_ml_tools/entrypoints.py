@@ -34,13 +34,58 @@ class ConfigDispenser:
 
     def debug_config(self, config: dict) -> dict:
         """Overwrite this method to change config for debugging."""
-        config["trainer"]["devices"] = None
-        config["trainer"]["accelerator"] = None
+        config["trainer"].update(
+            dict(
+                fast_dev_run=True,
+                devices=None,
+                accelerator=None,
+            )
+        )
+        config["lightning_module"]["num_workers"] = 1
+        del config["logger"]
         return config
 
     @staticmethod
     def is_sweep(config):
         return "method" in config and "parameters" in config
+
+    def insert_wandb_sweep_specific_keys(self, config, depth):
+        if depth > 1:
+            new_config = {}
+            for key, value in config.items():
+                new_config[key] = self.insert_wandb_sweep_specific_keys(
+                    value, depth - 1
+                )
+            return {"parameters": new_config}
+
+        if not isinstance(config, dict):
+            return {"value": config}
+        else:
+            return config
+
+    @staticmethod
+    def determine_config_depth(parameter_name):
+        if parameter_name in {
+            "model",
+            "optimizer",
+            "trainer",
+            "logger",
+            "lightning_module",
+        }:
+            return 2
+        elif parameter_name in {"callbacks"}:
+            return 3
+        else:
+            raise ValueError(f"Unknown parameter name {parameter_name}")
+
+    def preprocess_sweep_parameters(self, config):
+        config_parameters = config["parameters"]
+        for parameter_name, subconfig in config_parameters.items():
+            config_parameters[parameter_name] = self.insert_wandb_sweep_specific_keys(
+                config=subconfig,
+                depth=self.determine_config_depth(parameter_name),
+            )
+        return config
 
     def initialize_sweep(self, config, config_file_path):
         """Returns sweep id if it is a field in config, otherwise initializes new sweep."""
@@ -48,6 +93,7 @@ class ConfigDispenser:
         if sweep_id:
             print(f"Using sweep id {sweep_id} from config file", file=sys.stderr)
         else:
+            config = self.preprocess_sweep_parameters(config)
             sweep_id = wandb.sweep(config)
             yaml.safe_dump({"sweep_id": sweep_id}, open(config_file_path, "a"))
             print("Added sweep id to config file", file=sys.stderr)
@@ -77,7 +123,7 @@ class ConfigDispenser:
         )
         parser.add_argument(
             "gpu",
-            default=0,
+            default=None,
             type=int,
             help="Id of gpu to run on",
             nargs="?",
@@ -86,7 +132,7 @@ class ConfigDispenser:
             "--debug",
             "-d",
             action="store_true",
-            help="Run debug hooks and don't associate this run with the sweep",
+            help="Run debug hooks",
         )
         return parser
 
@@ -97,7 +143,7 @@ class ConfigDispenser:
         self.args = args
         return self.args
 
-    def __call__(self, **args):
+    def launch(self, **args):
         args = self.parse_args(args)
         config = self.read_config(args["config"])
 
@@ -112,7 +158,7 @@ class ConfigDispenser:
         else:
             self.dispatch_main(config)
 
-    launch = __call__
+    __call__ = launch
 
     @_full_traceback
     def _main_dispatch_wrapper_for_wandb_agent(self):
@@ -120,9 +166,20 @@ class ConfigDispenser:
             config = dict(wandb_run.config)
             self.dispatch_main(config)
 
+    def expand_string_configs(self, config):
+        for key, value in config.items():
+            if isinstance(value, str):
+                config[key] = yaml.safe_load(value)
+            elif isinstance(value, dict):
+                self.expand_string_configs(config[key])
+
     def dispatch_main(self, config):
+        self.expand_string_configs(config)
         if self.args.get("debug"):
             config = self.debug_config(config)
+        if gpu := self.args.get("gpu"):
+            config["trainer"]["accelerator"] = "gpu"
+            config["trainer"]["devices"] = [gpu]
         config.update(self.args)
         self.main(config)
 

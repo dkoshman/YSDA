@@ -5,25 +5,26 @@ model:
   l2_coefficient: 1.0
   l1_coefficient: 1.0
 lightning_module:
+  train_path: "local/train_explicit.npz"
+  val_path: "local/val_explicit.npz"
   name: LitSLIM
-  batch_size: 10
-  num_workers: 1
+  batch_size: 100
+  num_workers: 4
 optimizer:
   name: Adam
 trainer:
   accelerator: gpu
   devices: [3]
   reload_dataloaders_every_n_epochs: 1
-  fast_dev_run: false
+  accumulate_grad_batches: 1
   enable_model_summary: false
   val_check_interval: 10
   log_every_n_steps: 1
   default_root_dir: local
   num_sanity_val_steps: 0
-  max_epochs: 2
+  max_epochs: -1
 callbacks:
   ConvenientCheckpointLogCallback: {}
 logger:
   name: WandbLogger
   save_dir: local
-  offline: true

@@ -41,11 +41,9 @@ class SparseDatasetMixin:
 
 
 class SparseDataModuleMixin:
-    @property
-    def train_explicit(self, train_path="local/train_explicit.npz"):
+    def train_explicit(self, train_path):
         return scipy.sparse.load_npz(train_path).tocsr()
 
-    @property
     def val_explicit(self, val_path="local/val_explicit.npz"):
         return scipy.sparse.load_npz(val_path).tocsr()
 

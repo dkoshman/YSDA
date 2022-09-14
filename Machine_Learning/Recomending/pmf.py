@@ -7,7 +7,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from my_ml_tools.entrypoints import ConfigDispenser, ConfigConstructorBase
-from my_ml_tools.models import l2_regularization
+from my_ml_tools.models import register_regularization_hook
 from my_ml_tools.utils import sparse_dense_multiply
 
 from data import SparseDataModuleMixin, SparseDatasetMixin
@@ -56,7 +56,7 @@ class ProbabilityMatrixFactorization(torch.nn.Module):
         # not only those corresponding to user and item ids. Also it is important to add gradient
         # hooks after the forward calculations, otherwise decay messes with the model.
         for parameter in [user_weight, item_weight, user_bias, item_bias]:
-            l2_regularization(parameter, self.weight_decay)
+            register_regularization_hook(parameter, self.weight_decay)
 
         return rating
 
@@ -103,7 +103,9 @@ class ConstrainedProbabilityMatrixFactorization(ProbabilityMatrixFactorization):
         # Scale down regularization because item_rating_effect_weight is decayed
         # for each batch, whereas other parameters have only their slices decayed.
         scale_down = self.user_weight.shape[0] / len(user_ids)
-        l2_regularization(item_rating_effect_weight, self.weight_decay / scale_down)
+        register_regularization_hook(
+            item_rating_effect_weight, self.weight_decay / scale_down
+        )
 
         return rating
 

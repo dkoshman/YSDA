@@ -5,6 +5,7 @@ from my_ml_tools.utils import build_class
 
 class RecommenderMixin:
     def build_model(self, model_config, model_classes):
+        model_config = model_config.copy()
         model_name = model_config.pop("name")
         model = build_class(model_name, model_config, class_candidates=model_classes)
         return model

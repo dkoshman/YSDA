@@ -6,7 +6,8 @@ from torch.utils.data import DataLoader, Dataset
 
 from my_ml_tools.entrypoints import ConfigDispenser, ConfigConstructorBase
 from my_ml_tools.lightning import ConvenientCheckpointLogCallback
-from my_ml_tools.utils import scipy_to_torch_sparse
+from my_ml_tools.models import register_regularization_hook
+from my_ml_tools.utils import scipy_to_torch_sparse, StoppingMonitor
 
 from data import SparseDataModuleMixin, SparseDatasetMixin
 from lightning import RecommenderMixin
@@ -22,74 +23,98 @@ class SLIM(torch.nn.Module):
     ):
         super().__init__()
 
+        self.l2_coefficient = l2_coefficient
+        self.l1_coefficient = l1_coefficient
+        self.n_items = explicit_feedback.shape[1]
+
         self.register_buffer(
             name="explicit_feedback",
             tensor=scipy_to_torch_sparse(explicit_feedback),
         )
-
-        self._dense_weight_slice = torch.nn.parameter.Parameter(data=torch.empty(0))
-        self.sparse_weight = None
-        self.l2_coefficient = l2_coefficient
-        self.l1_coefficient = l1_coefficient
-        self.n_items = explicit_feedback.shape[1]
+        self.dense_weight_slice = torch.nn.parameter.Parameter(torch.empty(0))
+        # If buffer is initialized with None, it won't be saved in state dict.
+        # So upon loading checkpoint, you'll have to manually load this buffer,
+        # but there's no way around it yet because of limited sparse support.
+        self.register_buffer(name="sparse_weight", tensor=None)
 
         self._sparse_values = torch.empty(0)
         self._sparse_indices = torch.empty(0, dtype=torch.int32)
 
     def is_uninitialized(self):
-        return self._dense_weight_slice.numel() == 0
+        return self.dense_weight_slice.numel() == 0
 
     def init_dense_weight_slice(self, item_ids):
         dense_weight_slice = torch.empty(
-            self.n_items, len(item_ids), device=self._dense_weight_slice.device
+            self.n_items, len(item_ids), device=self.dense_weight_slice.device
         )
         torch.nn.init.xavier_normal_(dense_weight_slice)
         dense_weight_slice = dense_weight_slice.abs()
         dense_weight_slice[item_ids, torch.arange(len(item_ids))] = 0
-        self._dense_weight_slice.data = dense_weight_slice
+        self.dense_weight_slice = torch.nn.parameter.Parameter(dense_weight_slice)
 
-    def transform_dense_slice_to_sparse(self):
-        sparse = self._dense_weight_slice.cpu().detach().to_sparse_coo()
+    def transform_dense_slice_to_sparse(self, item_ids):
+        sparse = self.dense_weight_slice.cpu().detach().to_sparse_coo()
         self._sparse_values = torch.cat([self._sparse_values, sparse.values()])
-        self._sparse_indices = torch.cat([self._sparse_indices, sparse.indices()], 1)
+        rows, cols = sparse.indices()
+        cols = item_ids[cols]
+        indices = torch.stack([rows, cols])
+        self._sparse_indices = torch.cat([self._sparse_indices, indices], dim=1)
 
-        self._dense_weight_slice.data = torch.empty(
-            0, device=self._dense_weight_slice.device
-        )
+        self.dense_weight_slice = torch.nn.parameter.Parameter(torch.empty(0))
+
+        # Return density for logging.
         density = len(sparse.values()) / sparse.numel()
         return density
 
     def finalize(self):
-        assert self.sparse_weight is None, "Model already finalized."
-        sparse_weight = torch.sparse_coo_tensor(
+        if self.sparse_weight is not None:
+            raise RuntimeError("Model already finalized.")
+        self.sparse_weight = torch.sparse_coo_tensor(
             indices=self._sparse_indices,
             values=self._sparse_values,
             size=(self.n_items, self.n_items),
         ).to_sparse_csr()
-        del self.sparse_weight
-        self.register_buffer(name="sparse_weight", tensor=sparse_weight)
 
-    def get_dense_weight_slice(self, user_ids):
-        self._dense_weight_slice.data = torch.clip(self._dense_weight_slice, 0)
-        return self._dense_weight_slice.clone()[user_ids]
-
-    def add_regularization_hook(self, dense_weight_slice, item_ids):
-        if not dense_weight_slice.requires_grad:
-            return dense_weight_slice
-
-        hook = SLIMRegularizationGradientHook(
-            parameter=dense_weight_slice,
-            l2_coefficient=self.l2_coefficient,
-            l1_coefficient=self.l1_coefficient,
-            fixed_row_id_in_each_col=item_ids,
+    def clip_parameter(self):
+        self.dense_weight_slice = torch.nn.parameter.Parameter(
+            self.dense_weight_slice.clip(0)
         )
-        dense_weight_slice.register_hook(hook)
-        return dense_weight_slice
+
+    class SLIMHook:
+        def __init__(self, parameter, fixed_row_id_in_each_col):
+            self.fixed_row_id_in_each_col = fixed_row_id_in_each_col
+            self.parameter = parameter.clone().detach()
+
+        def soft_positive_regularization(self, grad):
+            grad[(self.parameter == 0) & (0 < grad)] = 0
+
+        def zero_parameter_diagonal_preservation(self, grad):
+            grad[
+                self.fixed_row_id_in_each_col,
+                torch.arange(len(self.fixed_row_id_in_each_col)),
+            ] = 0
+
+        def __call__(self, grad):
+            grad = grad.clone().detach()
+            self.soft_positive_regularization(grad)
+            self.zero_parameter_diagonal_preservation(grad)
+            return grad
+
+    def register_slim_hook(self, dense_weight_slice, item_ids):
+        if dense_weight_slice.requires_grad:
+            hook = self.SLIMHook(
+                parameter=dense_weight_slice,
+                fixed_row_id_in_each_col=item_ids,
+            )
+            dense_weight_slice.register_hook(hook)
 
     def training_forward(self, user_ids, item_ids):
-        dense_weight_slice = self.get_dense_weight_slice(user_ids)
+        dense_weight_slice = self.dense_weight_slice.clone()[user_ids]
         ratings = self.explicit_feedback @ dense_weight_slice
-        self.add_regularization_hook(dense_weight_slice, item_ids)
+        register_regularization_hook(
+            dense_weight_slice, self.l2_coefficient, self.l1_coefficient
+        )
+        self.register_slim_hook(dense_weight_slice, item_ids)
         return ratings
 
     def predicting_forward(self, user_ids, item_ids):
@@ -103,32 +128,6 @@ class SLIM(torch.nn.Module):
             return self.training_forward(user_ids, item_ids)
         else:
             return self.predicting_forward(user_ids, item_ids)
-
-
-class SLIMRegularizationGradientHook:
-    def __init__(
-        self, parameter, l2_coefficient, l1_coefficient, fixed_row_id_in_each_col
-    ):
-        self.fixed_row_id_in_each_col = fixed_row_id_in_each_col
-        self.parameter = parameter.clone().detach()
-        self.regularization = (
-            l2_coefficient * self.parameter + l1_coefficient * self.parameter.sign()
-        )
-
-    def soft_positive_regularization(self, grad):
-        grad[(self.parameter == 0) & (0 < grad)] = 0
-
-    def zero_parameter_diagonal_preservation(self, grad):
-        grad[
-            self.fixed_row_id_in_each_col,
-            torch.arange(len(self.fixed_row_id_in_each_col)),
-        ] = 0
-
-    def __call__(self, grad):
-        grad = grad.clone().detach() + self.regularization
-        self.soft_positive_regularization(grad)
-        self.zero_parameter_diagonal_preservation(grad)
-        return grad
 
 
 class SLIMDataset(SparseDatasetMixin, Dataset):
@@ -174,32 +173,14 @@ class SLIMSampler:
         yield from self.batch_indices
 
 
-class StoppingMonitor:
-    def __init__(self, patience, min_delta):
-        self.patience = patience
-        self.impatience = 0
-        self.min_delta = min_delta
-        self.lowest_loss = torch.inf
-
-    def is_time_to_stop(self, loss):
-        if loss < self.lowest_loss - self.min_delta:
-            self.lowest_loss = loss
-            self.impatience = 0
-            return False
-        self.impatience += 1
-        if self.impatience > self.patience:
-            self.impatience = 0
-            self.lowest_loss = torch.inf
-            return True
-        return False
-
-
 class LitSLIM(SparseDataModuleMixin, RecommenderMixin, pl.LightningModule):
     def __init__(
         self,
         *,
         model_config,
         optimizer_config,
+        train_path,
+        val_path,
         batch_size=100,
         num_workers=1,
         patience=0,
@@ -207,7 +188,9 @@ class LitSLIM(SparseDataModuleMixin, RecommenderMixin, pl.LightningModule):
     ):
         super().__init__()
         self.save_hyperparameters()
-        self.dataset = SLIMDataset(self.train_explicit, self.val_explicit)
+        self.dataset = SLIMDataset(
+            self.train_explicit(train_path), self.val_explicit(val_path)
+        )
         model_config["explicit_feedback"] = self.dataset.explicit_train
         self.model = self.build_model(model_config, model_classes=[SLIM])
 
@@ -237,7 +220,6 @@ class LitSLIM(SparseDataModuleMixin, RecommenderMixin, pl.LightningModule):
             self.trainer.should_stop = True
             yield {}
 
-        self.batch_is_fitted = False
         while not self.batch_is_fitted:
             yield self.current_batch
 
@@ -259,6 +241,9 @@ class LitSLIM(SparseDataModuleMixin, RecommenderMixin, pl.LightningModule):
         return loss
 
     def on_train_batch_start(self, batch, batch_idx):
+        if self.batch_is_fitted:
+            self.batch_is_fitted = False
+            return -1
         if self.model.is_uninitialized():
             self.model.init_dense_weight_slice(item_ids=batch["item_ids"])
 
@@ -267,6 +252,10 @@ class LitSLIM(SparseDataModuleMixin, RecommenderMixin, pl.LightningModule):
         loss = self.loss(batch["explicit_train"], ratings)
         self.log("train_loss", (loss / ratings.numel()) ** 0.5)
         return loss
+
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        self.model.clip_parameter()
+        self.trainer.optimizers = [self.configure_optimizers()]
 
     def validation_step(self, batch, batch_idx):
         ratings = self(**batch)
@@ -278,11 +267,15 @@ class LitSLIM(SparseDataModuleMixin, RecommenderMixin, pl.LightningModule):
         loss = validation_step_outputs[0]
         if self.stopping_monitor.is_time_to_stop(loss):
             self.batch_is_fitted = True
-            density = self.model.transform_dense_slice_to_sparse()
+            density = self.model.transform_dense_slice_to_sparse(
+                item_ids=self.current_batch["item_ids"]
+            )
             self.log("density", density)
 
     def on_fit_end(self):
         self.model.finalize()
+        self.trainer.save_checkpoint("slim_finalized.ckpt")
+        super().on_fit_end()
 
 
 class SLIMTrainer(ConfigConstructorBase):
@@ -296,11 +289,27 @@ class SLIMTrainer(ConfigConstructorBase):
         self.trainer.fit(self.lightning_module)
 
 
-@ConfigDispenser
+class SLIMConfigDispenser(ConfigDispenser):
+    def debug_config(self, config):
+        config["trainer"].update(
+            dict(
+                devices=None,
+                accelerator=None,
+            )
+        )
+        config["lightning_module"].update(
+            dict(
+                train_path="local/train_explicit_debug.npz",
+                val_path="local/val_explicit_debug.npz",
+            )
+        )
+        return config
+
+
+@SLIMConfigDispenser
 def main(config):
     SLIMTrainer(config).main()
 
 
 if __name__ == "__main__":
-    # TODO: Memory leak
     main()
