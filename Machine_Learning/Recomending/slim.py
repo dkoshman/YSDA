@@ -255,6 +255,7 @@ class LitSLIM(SparseDataModuleMixin, RecommenderMixin, pl.LightningModule):
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
         self.model.clip_parameter()
+        # Update parameters for optimization.
         self.trainer.optimizers = [self.configure_optimizers()]
 
     def validation_step(self, batch, batch_idx):

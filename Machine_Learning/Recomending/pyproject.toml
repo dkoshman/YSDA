@@ -14,6 +14,9 @@ torch = "^1.12.1"
 pytorch-lightning = "^1.7.5"
 wandb = "^0.13.2"
 my-ml-tools = {path = "../my_python_ml_tools", develop = true}
+einops = "^0.4.1"
+numba = "^0.56.2"
+pandas = "^1.4.4"
 
 
 [build-system]
