@@ -71,3 +71,39 @@ def timeit(func):
             )
 
     return _time_it
+
+
+def build_class(
+    class_name, class_kwargs=None, class_candidates=(), modules_to_try_to_import_from=()
+):
+    class_kwargs = class_kwargs or {}
+    for cls in class_candidates:
+        if cls.__name__ == class_name:
+            return cls(**class_kwargs)
+    for module in modules_to_try_to_import_from:
+        if cls := getattr(module, class_name, False):
+            return cls(**class_kwargs)
+    raise ValueError(
+        f"Class {class_name} not found in classes {class_candidates}\n"
+        f"or modules{modules_to_try_to_import_from}"
+    )
+
+
+class StoppingMonitor:
+    def __init__(self, patience, min_delta):
+        self.patience = patience
+        self.impatience = 0
+        self.min_delta = min_delta
+        self.lowest_loss = torch.inf
+
+    def is_time_to_stop(self, loss):
+        if loss < self.lowest_loss - self.min_delta:
+            self.lowest_loss = loss
+            self.impatience = 0
+            return False
+        self.impatience += 1
+        if self.impatience > self.patience:
+            self.impatience = 0
+            self.lowest_loss = torch.inf
+            return True
+        return False
