@@ -1,3 +1,5 @@
+from typing import Literal
+
 import einops
 import numba
 import numpy as np
@@ -75,6 +77,8 @@ class BayesianPMF:
             if step > self.burn_in_steps:
                 self.step_explicit_normal_distribution_means.append(step_mean)
 
+        self.finalize()
+
     def step(self):
         user_hyperparameters = self.sample_hyperparameters(self.user_features)
         item_hyperparameters = self.sample_hyperparameters(self.item_features)
@@ -83,13 +87,13 @@ class BayesianPMF:
             self.item_features,
             self.implicit,
             self.alpha_x_implicit_x_explicit,
-            **user_hyperparameters
+            **user_hyperparameters,
         )
         item_features = self.sample_features(
             self.user_features,
             self.implicit.T.tocsr(),
             self.alpha_x_implicit_x_explicit.T.tocsr(),
-            **item_hyperparameters
+            **item_hyperparameters,
         )
 
         self.user_features = user_features
@@ -193,13 +197,36 @@ class BayesianPMF:
             means[i] = mean
             variances[i] = var
 
-    def aggregate_predictive_rating(self):
-        # Try taking the mode of the gaussian mixture, plot it
+    def finalize(self):
+        self.step_explicit_normal_distribution_means = np.array(
+            self.step_explicit_normal_distribution_means
+        )
+
+    def aggregate_prediction_mean(self, user_ids):
         return einops.reduce(
-            np.array(self.step_explicit_normal_distribution_means),
+            self.step_explicit_normal_distribution_means[:, user_ids, :],
             "step user item -> user item",
             "mean",
         )
 
-    def recommend(self, user_ids):
-        return self.aggregate_predictive_rating()[user_ids]
+    def aggregate_prediction_mode_approximation(self, user_ids):
+        # Caution: very memory hungry
+        means = torch.from_numpy(
+            self.step_explicit_normal_distribution_means[:, user_ids, :]
+        )
+        normal = torch.distributions.Normal(loc=means, scale=self.alpha**-0.5)
+        pdfs_at_means = normal.log_prob(
+            einops.repeat(means, f"step user item -> step {means.shape[0]} user item")
+        )
+        step_ids_with_highest_mean_pdf = torch.logsumexp(pdfs_at_means, dim=0).argmax(0)
+        mode_means = torch.gather(means, 0, step_ids_with_highest_mean_pdf[None])[0]
+        return mode_means
+
+    def recommend(self, user_ids, aggregation_method: Literal["mean", "mode"] = "mode"):
+        # TODO: plot the gaussian mixture, run sweep
+        if aggregation_method == "mean":
+            return self.aggregate_prediction_mean(user_ids)
+        elif aggregation_method == "mode":
+            return self.aggregate_prediction_mode_approximation(user_ids)
+        else:
+            raise ValueError(f"Unknown aggregation method {aggregation_method}")
