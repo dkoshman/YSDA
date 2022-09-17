@@ -19,6 +19,7 @@ class BayesianPMF:
         features_hyper_precision_coefficient,
     ):
         """See https://www.cs.toronto.edu/~amnih/papers/bpmf.pdf
+        https://en.wikipedia.org/wiki/Markov_chain_Monte_Carlo
         https://en.wikipedia.org/wiki/Normal-Wishart_distribution"""
 
         self.explicit = explicit

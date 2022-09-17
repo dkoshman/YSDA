@@ -6,6 +6,7 @@ model:
   weight_decay: 1.0e-3
 lightning_module:
   name: LitProbabilityMatrixFactorization
+  loss: personalized_ranking_loss
   batch_size: 1.0e+8
   num_workers: 4
 optimizer:

@@ -1,3 +1,5 @@
+from typing import Literal
+
 import itertools
 
 import numpy as np
@@ -29,10 +31,18 @@ def _build_bias(*dimensions):
 class ProbabilityMatrixFactorization(torch.nn.Module):
     """predicted rating = user_factors @ item_factors, with bias and L2 regularization"""
 
-    def __init__(self, n_users, n_items, latent_dimension, weight_decay):
+    def __init__(
+        self,
+        n_users,
+        n_items,
+        latent_dimension,
+        weight_decay,
+        pass_through_sigmoid=False,
+    ):
         super().__init__()
 
         self.weight_decay = weight_decay
+        self.pass_through_sigmoid = pass_through_sigmoid
 
         self.user_weight = _build_weight(n_users, latent_dimension)
         self.user_bias = _build_bias(n_users, 1)
@@ -62,7 +72,8 @@ class ProbabilityMatrixFactorization(torch.nn.Module):
 
     def forward(self, user_ids, item_ids):
         rating = self.linear_forward(user_ids, item_ids)
-        rating = self.sigmoid(rating)
+        if self.pass_through_sigmoid:
+            rating = self.sigmoid(rating)
         return rating
 
 
@@ -183,12 +194,18 @@ class LitProbabilityMatrixFactorization(
     SparseDataModuleMixin, RecommenderMixin, pl.LightningModule
 ):
     def __init__(
-        self, *, model_config, optimizer_config, batch_size=10e8, num_workers=1
+        self,
+        *,
+        model_config,
+        optimizer_config,
+        loss=Literal["implicit_aware_sparse_loss", "personalized_ranking_loss"],
+        batch_size=10e8,
+        num_workers=1,
     ):
         super().__init__()
         self.save_hyperparameters()
-        self.train_dataset = self.build_dataset(self.train_explicit)
-        self.val_dataset = self.build_dataset(self.val_explicit)
+        self.train_dataset = self.build_dataset(self.train_explicit())
+        self.val_dataset = self.build_dataset(self.val_explicit())
         self.model = self.build_model(
             model_config,
             model_classes=[
@@ -229,12 +246,51 @@ class LitProbabilityMatrixFactorization(
     def val_dataloader(self):
         return self.build_dataloader(self.val_dataset, shuffle=False)
 
+    def loss(self, explicit, implicit, model_ratings):
+        if self.hparams["loss"] == "implicit_aware_sparse_loss":
+            return self.implicit_aware_sparse_loss(explicit, implicit, model_ratings)
+        elif self.hparams["loss"] == "personalized_ranking_loss":
+            return self.personalized_ranking_loss(explicit, implicit, model_ratings)
+        else:
+            raise ValueError(f"Unknown loss {self.hparams['loss']}")
+
     @staticmethod
-    def loss(explicit, implicit, model_ratings):
-        """Loss = 1/|Explicit| * \sum_{ij}Implicit_{ij} * (Explicit_{ij} - ModelRating_{ij})^2"""
+    def implicit_aware_sparse_loss(explicit, implicit, model_ratings):
+        """Loss = 1/|Explicit| * \\sum_{ij}Implicit_{ij} * (Explicit_{ij} - ModelRating_{ij})^2"""
         error = model_ratings - explicit
         error = sparse_dense_multiply(sparse_dense_multiply(implicit, error), error)
         loss = torch.sparse.sum(error) / error._values().numel()
+        return loss
+
+    @staticmethod
+    def personalized_ranking_loss(explicit, implicit, model_ratings):
+        """
+        Loss from Bayesian Personalized Ranking paper.
+        Caution: this implementation is pretty slow.
+        """
+        implicit = implicit.coalesce()
+        n_users, n_items = implicit.size()
+        item_ids = torch.arange(n_items)
+        items_mask = torch.full((n_items,), True)
+        criterion = 0
+        ids_of_users_who_rated_something = implicit._indices()[0].unique()
+        for user_id in ids_of_users_who_rated_something:
+            implicit_user_feedback = implicit[user_id]
+            liked_item_ids = implicit_user_feedback._indices().squeeze()
+            items_mask[:] = True
+            items_mask[liked_item_ids] = False
+            uninteracted_item_ids = item_ids[items_mask]
+
+            predicted_user_ratings = model_ratings[user_id]
+
+            user_ranking_correctness_criterion = (
+                predicted_user_ratings[liked_item_ids, None]
+                - predicted_user_ratings[uninteracted_item_ids]
+            ).sum()
+
+            criterion += user_ranking_correctness_criterion
+
+        loss = -criterion
         return loss
 
     def forward(self, **batch):
