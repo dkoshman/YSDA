@@ -4,14 +4,14 @@ import torch
 
 from torch.utils.data import DataLoader, Dataset
 
-from my_ml_tools.entrypoints import ConfigDispenser, ConfigConstructorBase
+from my_ml_tools.entrypoints import ConfigConstructorBase
 from my_ml_tools.lightning import ConvenientCheckpointLogCallback
 from my_ml_tools.models import register_regularization_hook
 from my_ml_tools.utils import scipy_to_torch_sparse, StoppingMonitor
 
 from data import SparseDataModuleMixin, SparseDatasetMixin
 from lightning import RecommenderMixin
-from utils import torch_sparse_slice
+from utils import torch_sparse_slice, RecommendingConfigDispenser
 
 
 class SLIM(torch.nn.Module):
@@ -60,7 +60,9 @@ class SLIM(torch.nn.Module):
         indices = torch.stack([rows, cols])
         self._sparse_indices = torch.cat([self._sparse_indices, indices], dim=1)
 
-        self.dense_weight_slice = torch.nn.parameter.Parameter(torch.empty(0))
+        self.dense_weight_slice = torch.nn.parameter.Parameter(
+            torch.empty(0, device=self.dense_weight_slice.device)
+        )
 
         # Return density for logging.
         density = len(sparse.values()) / sparse.numel()
@@ -290,24 +292,7 @@ class SLIMTrainer(ConfigConstructorBase):
         self.trainer.fit(self.lightning_module)
 
 
-class SLIMConfigDispenser(ConfigDispenser):
-    def debug_config(self, config):
-        config["trainer"].update(
-            dict(
-                devices=None,
-                accelerator=None,
-            )
-        )
-        config["lightning_module"].update(
-            dict(
-                train_path="local/train_explicit_debug.npz",
-                val_path="local/val_explicit_debug.npz",
-            )
-        )
-        return config
-
-
-@SLIMConfigDispenser
+@RecommendingConfigDispenser
 def main(config):
     SLIMTrainer(config).main()
 

@@ -1,12 +1,12 @@
 project: Recommending
-name: "PMF debug run"
+name: "PMF run"
 model:
   name: ProbabilityMatrixFactorization
   latent_dimension: 10
   weight_decay: 1.0e-3
 lightning_module:
   name: LitProbabilityMatrixFactorization
-  loss: personalized_ranking_loss
+  loss: implicit_aware_sparse_loss
   batch_size: 1.0e+8
   num_workers: 4
 optimizer:
@@ -18,11 +18,12 @@ trainer:
   default_root_dir: local
   check_val_every_n_epoch: 3
   amp_backend: native
+  log_every_n_steps: 1
 callbacks:
   EarlyStopping:
     monitor: val_loss
     mode: min
-    min_delta: 1.0e-2
+    min_delta: 0
     patience: 2
   GradientAccumulationScheduler:
     scheduling: {0: 10}
@@ -31,6 +32,7 @@ callbacks:
     swa_epoch_start: 10
     annealing_epochs: 5
     annealing_strategy: cos
+  ConvenientCheckpointLogCallback: {}
 logger:
   name: WandbLogger
   save_dir: local
