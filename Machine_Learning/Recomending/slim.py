@@ -9,12 +9,24 @@ from my_ml_tools.lightning import ConvenientCheckpointLogCallback
 from my_ml_tools.models import register_regularization_hook
 from my_ml_tools.utils import scipy_to_torch_sparse, StoppingMonitor
 
-from data import SparseDataModuleMixin, SparseDatasetMixin
-from lightning import RecommenderMixin
-from utils import torch_sparse_slice, RecommendingConfigDispenser
+from utils import (
+    RecommenderMixin,
+    RecommendingConfigDispenser,
+    SparseDataModuleMixin,
+    SparseDatasetMixin,
+    torch_sparse_slice,
+)
 
 
 class SLIM(torch.nn.Module):
+    """
+    The fitted model has sparse matrix W of shape [n_items, n_items],
+    which it uses to predict ratings for users with feedback matrix
+    A of shape [n_users, n_items] by calculating AW. It performs well,
+    it's parameters are interpretable, and it performs inference quickly
+    due to sparsity. It may be beneficial to add biases to this implementation.
+    """
+
     def __init__(
         self,
         explicit_feedback: scipy.sparse.csr_matrix,
@@ -83,6 +95,16 @@ class SLIM(torch.nn.Module):
         )
 
     class SLIMHook:
+        """
+        Gradient hook intended to clip gradient to enforce the positive
+        parameter values and zero diagonal regularization restrictions.
+        It would be easier to clip values after optimizer step, but then
+        it would mess up optimizer's running gradient mean estimation
+        and parameter weighting. We still need to clip parameters after
+        the step though as the gradient step may still make positive
+        parameters negative.
+        """
+
         def __init__(self, parameter, fixed_row_id_in_each_col):
             self.fixed_row_id_in_each_col = fixed_row_id_in_each_col
             self.parameter = parameter.clone().detach()

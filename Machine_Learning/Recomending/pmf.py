@@ -14,9 +14,13 @@ from my_ml_tools.lightning import ConvenientCheckpointLogCallback
 from my_ml_tools.models import register_regularization_hook
 from my_ml_tools.utils import sparse_dense_multiply
 
-from data import SparseDataModuleMixin, SparseDatasetMixin
-from lightning import RecommenderMixin
-from utils import torch_sparse_slice, RecommendingConfigDispenser
+from utils import (
+    RecommenderMixin,
+    RecommendingConfigDispenser,
+    SparseDataModuleMixin,
+    SparseDatasetMixin,
+    torch_sparse_slice,
+)
 
 
 def _build_weight(*dimensions):
@@ -164,6 +168,11 @@ class PMFDataset(SparseDatasetMixin, Dataset):
 
 
 class GridSampler:
+    """
+    Splits user ids and item ids into chunks, and uses
+    cartesian product of these chunked ids to generate batches.
+    """
+
     def __init__(self, dataset_shape, approximate_batch_size, shuffle=True):
         self.dataset_shape = dataset_shape
         self.chunks_per_dim = (
@@ -283,26 +292,18 @@ class LitProbabilityMatrixFactorization(
         loss = torch.sparse.sum(error) / error._values().numel()
         return loss
 
-    def _personalized_ranking_loss(self, explicit, implicit, model_ratings):
+    def personalized_ranking_loss_memory_efficient(
+        self, explicit, implicit, model_ratings
+    ):
         """
         Loss from Bayesian Personalized Ranking paper.
-        Caution: this implementation is pretty slow.
+        Caution: this implementation is pretty slow,
+        but straightforward and uses less memory.
         """
         implicit = implicit.coalesce()
         ids_of_users_who_rated_something = implicit._indices()[0].unique()
-        from collections import Counter
-
-        self.log("n_batch ratings", implicit._values().numel())
-        self.log(
-            "n_users who rated something", ids_of_users_who_rated_something.numel()
-        )
         if ids_of_users_who_rated_something.numel() == 0:
             return None
-
-        c = Counter(implicit._indices()[0].cpu().numpy())
-        self.log("max item ratings", c.most_common(1)[0][1])
-        self.log("batch n_users", implicit.size()[0])
-        self.log("batch n_items", implicit.size()[1])
 
         n_users, n_items = implicit.size()
         item_ids = torch.arange(n_items)

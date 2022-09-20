@@ -15,12 +15,37 @@ class BayesianPMF:
         n_feature_dimensions,
         burn_in_steps,
         keeper_steps,
-        predictive_explicit_precision,
-        features_hyper_precision_coefficient,
+        predictive_explicit_precision=1,
+        features_hyper_precision_coefficient=1,
     ):
-        """See https://www.cs.toronto.edu/~amnih/papers/bpmf.pdf
+        """
+        This model approximates not just a single point estimate in parameter space,
+        but a whole distribution, therefore optimizing over hyperparameter space.
+        It accomplishes this by MCMC sampling to estimate intractable integral
+        that represents the probability of observing the train data:
+            P(X) = \\int P(X|Z)P(Z)dZ \\approx \\sum_i^n P(X|Z_i) / n
+        where Z_i are sampled from some prior distribution, and uses it to maximize P(Z|X):
+            P(Z|X) = P(X|Z)P(Z) / P(X)
+        In the end though we still need a single estimate point, which
+        is usually the mean or the mode of distribution P(Z|X).
+
+        See https://www.cs.toronto.edu/~amnih/papers/bpmf.pdf
         https://en.wikipedia.org/wiki/Markov_chain_Monte_Carlo
-        https://en.wikipedia.org/wiki/Normal-Wishart_distribution"""
+        https://en.wikipedia.org/wiki/Normal-Wishart_distribution
+
+        :param explicit: sparse matrix with explicit feedback
+        :param n_feature_dimensions: size of latent dimension
+        :param burn_in_steps: first samples are usually pretty biased,
+        so we skip them in hopes that after that model has substantially converged
+        :param keeper_steps: the steps after burn in to run for
+        :param predictive_explicit_precision: the shared precision of normal distributions
+        (whose means will be saved in step_explicit_normal_distribution_means),
+        which comprise the uniformly weighted mixture that is the estimation of
+        P(Y|X)=f(Z)P(Z|X), where Y=f(z) are the predicted ratings
+        :param features_hyper_precision_coefficient: hyper-hyperparameters precision
+        distribution, the higher it is, the more regularized the model will be;
+        it corresponds to lambda in the last wiki link
+        """
 
         self.explicit = explicit
         self.implicit = explicit != 0
@@ -46,7 +71,7 @@ class BayesianPMF:
         self.item_features = self.init_item_features()
 
         # The output of the model – means of normal distributions
-        # with precision $predictive_explicit_precision$, the mixture
+        # with precision predictive_explicit_precision, the mixture
         # of which is the estimated distribution of explicit feedback.
         self.step_explicit_normal_distribution_means = []
 
@@ -67,9 +92,11 @@ class BayesianPMF:
         )
 
     def init_user_features(self):
+        """Override this method if you want to finetune a fitted MF model."""
         return self.init_features(self.n_users)
 
     def init_item_features(self):
+        """Override this method if you want to finetune a fitted MF model."""
         return self.init_features(self.n_items)
 
     def fit(self):
@@ -223,8 +250,7 @@ class BayesianPMF:
         mode_means = torch.gather(means, 0, step_ids_with_highest_mean_pdf[None])[0]
         return mode_means
 
-    def recommend(self, user_ids, aggregation_method: Literal["mean", "mode"] = "mode"):
-        # TODO: plot the gaussian mixture, run sweep
+    def recommend(self, user_ids, aggregation_method: Literal["mean", "mode"] = "mean"):
         if aggregation_method == "mean":
             return self.aggregate_prediction_mean(user_ids)
         elif aggregation_method == "mode":

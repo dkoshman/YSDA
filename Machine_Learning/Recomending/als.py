@@ -7,44 +7,84 @@ import torch
 from tqdm.auto import tqdm
 from typing_extensions import Literal
 
+from my_ml_tools.utils import build_class
+
+from utils import RecommendingConfigDispenser
+
 
 class ALS:
-    def __init__(self, epochs=10, latent_dimension_size=10, regularization_lambda=1e-2):
+    def __init__(
+        self,
+        implicit_feedback: scipy.sparse.csr_matrix,
+        epochs=10,
+        latent_dimension_size=10,
+        regularization_lambda=1e-2,
+        confidence_alpha=40,
+    ):
+        if set(implicit_feedback.data) != {1}:
+            raise ValueError(
+                "This als implementation works only with binary implicit feedback"
+            )
+
         self.epochs = epochs
-        self.latent_dimension_size = latent_dimension_size
         self.regularization_lambda = regularization_lambda
+
+        self.preference = implicit_feedback
+        self.confidence_minus_1 = implicit_feedback * confidence_alpha
+        self.confidence_minus_1.eliminate_zeros()
+        self.confidence_x_preference = (
+            self.confidence_minus_1.multiply(implicit_feedback) + implicit_feedback
+        )
+
+        self.user_factors = self.parameter_init(
+            implicit_feedback.shape[0], latent_dimension_size
+        )
+        self.item_factors = self.parameter_init(
+            implicit_feedback.shape[1], latent_dimension_size
+        )
 
     @staticmethod
     def parameter_init(*dimensions):
         return np.random.randn(*dimensions).astype(np.float32)
 
-    def init(self, n_users, n_items):
-        self.user_factors = self.parameter_init(n_users, self.latent_dimension_size)
-        self.item_factors = self.parameter_init(n_items, self.latent_dimension_size)
+    def fit(self):
+        for epoch in tqdm(range(self.epochs), "Alternating"):
+            self.least_squares_optimization_with_fixed_factors(fixed="items")
+            self.least_squares_optimization_with_fixed_factors(fixed="users")
 
-    def check_feedback(self, feedback):
-        if (feedback < 0).sum():
-            raise ValueError(
-                "This als implementation works only with non negative feedback"
-            )
+    def least_squares_optimization_with_fixed_factors(
+        self, fixed=Literal["users", "items"]
+    ):
+        kwargs = self.preprocess_optimization_args(fixed=fixed)
+        self.analytic_optimum_dispatcher(**kwargs)
 
-    def from_implicit_feedback(self, feedback, confidence_alpha=40):
-        preference = feedback > 0
-        self.preference = preference
-        self.confidence_minus_1 = feedback * confidence_alpha
-        self.confidence_minus_1.eliminate_zeros()
-        self.confidence_x_preference = (
-            self.confidence_minus_1.multiply(preference) + preference
-        )
+    def preprocess_optimization_args(self, *, fixed):
+        if fixed == "items":
+            X = self.user_factors
+            Y = self.item_factors
+            sparse_iterator = self.sparse_iterator()
+        elif fixed == "users":
+            X = self.item_factors
+            Y = self.user_factors
+            sparse_iterator = self.sparse_iterator(transpose=True)
+        else:
+            raise ValueError
+        return dict(X=X, Y=Y, sparse_iterator=sparse_iterator, fixed=fixed)
 
-    def from_explicit_feedback(self, feedback):
-        raise NotImplementedError(
-            "Confidence and confidence - 1 might not be sparse,"
-            "need to provide a way to efficiently compute for"
-            " concrete instance of feedback."
-        )
-        preference = feedback > 0
-        confidence_minus_1 = feedback - 1
+    def analytic_optimum_dispatcher(self, X, Y, sparse_iterator):
+        """This implementation and the next helper method are left here mainly for
+        completeness's sake, for more efficient and less convoluted implementation see ALSJIT."""
+        lambda_I = self.regularization_lambda * np.eye(Y.shape[1])
+        YtY_plus_lambdaI = Y.T @ Y + lambda_I
+
+        for row_id, col_indices, cm1, cp in sparse_iterator:
+            if col_indices.size == 0:
+                X[row_id] = 0
+                continue
+
+            y = Y[col_indices]
+            YtCY_plus_lambdaI = (y.T * cm1) @ y + YtY_plus_lambdaI
+            X[row_id] = np.linalg.inv(YtCY_plus_lambdaI) @ (y.T @ cp)
 
     def sparse_iterator(self, transpose=False):
         confidence_minus_1 = self.confidence_minus_1
@@ -66,62 +106,6 @@ class ALS:
         for ptr_id, (ind_begin, ind_end) in enumerate(zip(indptr, indptr[1:])):
             ind_slice = slice(ind_begin, ind_end)
             yield ptr_id, indices[ind_slice], cm1_data[ind_slice], cp_data[ind_slice]
-
-    def least_squares_optimization_with_fixed_factors(
-        self,
-        fixed=Literal["users", "items"],
-    ):
-        kwargs = self.preprocess_optimization_args(fixed=fixed)
-        self.analytic_optimum_dispatcher(**kwargs)
-
-    def preprocess_optimization_args(self, *, fixed):
-        if fixed == "items":
-            X = self.user_factors
-            Y = self.item_factors
-            sparse_iterator = self.sparse_iterator()
-
-        elif fixed == "users":
-            X = self.item_factors
-            Y = self.user_factors
-            sparse_iterator = self.sparse_iterator(transpose=True)
-
-        else:
-            raise ValueError
-
-        return dict(X=X, Y=Y, sparse_iterator=sparse_iterator, fixed=fixed)
-
-    def analytic_optimum_dispatcher(self, X, Y, sparse_iterator):
-        lambda_I = self.regularization_lambda * np.eye(Y.shape[1])
-        YtY_plus_lambdaI = Y.T @ Y + lambda_I
-
-        for row_id, col_indices, cm1, cp in sparse_iterator:
-            if col_indices.size == 0:
-                X[row_id] = 0
-                continue
-
-            y = Y[col_indices]
-            YtCY_plus_lambdaI = (y.T * cm1) @ y + YtY_plus_lambdaI
-            X[row_id] = np.linalg.inv(YtCY_plus_lambdaI) @ (y.T @ cp)
-
-    def fit(
-        self,
-        feedback: scipy.sparse.csr.csr_matrix,
-        kind: Literal["implicit", "explicit"] = "implicit",
-    ):
-        self.check_feedback(feedback)
-
-        if kind == "implicit":
-            self.from_implicit_feedback(feedback)
-        elif kind == "explicit":
-            self.from_explicit_feedback(feedback)
-        else:
-            raise ValueError
-
-        self.init(*feedback.shape)
-
-        for epoch in tqdm(range(self.epochs), "Alternating"):
-            self.least_squares_optimization_with_fixed_factors(fixed="items")
-            self.least_squares_optimization_with_fixed_factors(fixed="users")
 
     def topk_recommendations(self, user_ids, topk):
         user_factors = torch.tensor(self.user_factors[user_ids], device="cuda")
@@ -205,7 +189,7 @@ class ALS:
         return recommendations, explanations
 
 
-class ALS_jit(ALS):
+class ALSJIT(ALS):
     def __init__(self, *args, num_threads=8, **kwargs):
         super().__init__(*args, **kwargs)
         numba.config.THREADING_LAYER = "threadsafe"
@@ -214,18 +198,12 @@ class ALS_jit(ALS):
     def preprocess_optimization_args(self, **kwargs):
         kwargs = super().preprocess_optimization_args(**kwargs)
 
-        X = kwargs["X"]
-        Y = kwargs["Y"]
-        fixed = kwargs["fixed"]
-
-        if fixed == "items":
+        if kwargs["fixed"] == "items":
             confidence_minus_1 = self.confidence_minus_1
             confidence_x_preference = self.confidence_x_preference
-
-        elif fixed == "users":
+        elif kwargs["fixed"] == "users":
             confidence_minus_1 = self.confidence_minus_1.tocsc()
             confidence_x_preference = self.confidence_x_preference.tocsc()
-
         else:
             raise ValueError("Unknown fixed value")
 
@@ -234,6 +212,8 @@ class ALS_jit(ALS):
         indices = confidence_minus_1.indices
         indptr = confidence_minus_1.indptr
 
+        X = kwargs["X"]
+        Y = kwargs["Y"]
         lambda_I = self.regularization_lambda * np.eye(Y.shape[1], dtype=np.float32)
         YtY_plus_lambdaI = Y.T @ Y + lambda_I
 
@@ -267,12 +247,17 @@ class ALS_jit(ALS):
             X[row_id] = np.linalg.inv(YtCY_plus_lambdaI).astype(np.float32) @ (y.T @ cp)
 
 
-class ALS_biased_jit(ALS_jit):
-    def init(self, n_users, n_items):
+class ALSJITBiased(ALSJIT):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self.bias = self.parameter_init(1)
-        self.user_factors = self.parameter_init(n_users, self.latent_dimension_size + 2)
+        self.user_factors = self.parameter_init(
+            self.user_factors.shape[0], self.user_factors.shape[1] + 2
+        )
         self.user_factors[:, 0] = 1
-        self.item_factors = self.parameter_init(n_items, self.latent_dimension_size + 2)
+        self.item_factors = self.parameter_init(
+            self.item_factors.shape[0], self.item_factors.shape[1] + 2
+        )
         self.item_factors[:, 1] = 1
 
     def preprocess_optimization_args(self, **kwargs):
@@ -281,9 +266,10 @@ class ALS_biased_jit(ALS_jit):
 
         if fixed == "items":
             X_constant_latent_index = 0
-
         elif fixed == "users":
             X_constant_latent_index = 1
+        else:
+            raise ValueError("Unknown fixed value")
 
         YtY_plus_lambdaI = kwargs["YtY_plus_lambdaI"]
         YtY_plus_lambdaI[
@@ -352,3 +338,29 @@ class ALS_biased_jit(ALS_jit):
 
     def explain_recommendations(self, user_ids, item_ids, ratings):
         raise NotImplementedError("Need to add bias to existing implementation")
+
+
+class ALSConfigDispenser(RecommendingConfigDispenser):
+    def debug_config(self, config):
+        config = super().debug_config(config)
+        return config
+
+
+@ALSConfigDispenser
+def main(config):
+    model_config = config["model"]
+    model_name = model_config.pop("name")
+    model_config.update(
+        implicit_feedback=scipy.sparse.load_npz(config["train_explicit"]).tocsr() > 0
+    )
+    model = build_class(
+        class_name=model_name,
+        class_kwargs=model_config,
+        class_candidates=[ALS, ALSJIT, ALSJITBiased],
+    )
+    model.fit()
+    # TODO: log metrics
+
+
+if __name__ == "__main__":
+    main()
