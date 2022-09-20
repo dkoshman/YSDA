@@ -2,6 +2,8 @@ import numpy as np
 import scipy.sparse
 import torch
 
+from my_ml_tools.entrypoints import ConfigDispenser
+
 
 def slice_sparse_matrix(sparse_matrix, row_ids, col_ids) -> dict:
     if torch.is_tensor(sparse_matrix):
@@ -40,3 +42,20 @@ def torch_sparse_slice(sparse_matrix, row_ids=None, col_ids=None, device=None):
     return unpack_sparse_tensor(
         **slice_sparse_matrix(sparse_matrix, row_ids, col_ids), device=device
     )
+
+
+class RecommendingConfigDispenser(ConfigDispenser):
+    def debug_config(self, config):
+        config["trainer"].update(
+            dict(
+                devices=None,
+                accelerator=None,
+            )
+        )
+        config["lightning_module"].update(
+            dict(
+                train_path="local/train_explicit_debug.npz",
+                val_path="local/val_explicit_debug.npz",
+            )
+        )
+        return config
