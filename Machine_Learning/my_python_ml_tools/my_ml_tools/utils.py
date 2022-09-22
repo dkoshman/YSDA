@@ -74,7 +74,10 @@ def timeit(func):
 
 
 def build_class(
-    class_name, class_kwargs=None, class_candidates=(), modules_to_try_to_import_from=()
+    class_name,
+    class_kwargs=None,
+    class_candidates=None,
+    modules_to_try_to_import_from=(),
 ):
     class_kwargs = class_kwargs or {}
     for cls in class_candidates:

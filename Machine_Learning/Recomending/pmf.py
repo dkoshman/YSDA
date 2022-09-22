@@ -15,6 +15,7 @@ from my_ml_tools.models import register_regularization_hook
 from my_ml_tools.utils import sparse_dense_multiply
 
 from utils import (
+    MovieLens,
     RecommenderMixin,
     RecommendingConfigDispenser,
     SparseDataModuleMixin,
@@ -202,134 +203,78 @@ class GridSampler:
             yield from np.random.permutation(batch_indices_product)
 
 
-class LitProbabilityMatrixFactorization(
-    SparseDataModuleMixin, RecommenderMixin, pl.LightningModule
-):
+class MovieLensDataModule(pl.LightningDataModule):
     def __init__(
         self,
-        *,
-        model_config,
-        optimizer_config,
-        loss=Literal["implicit_aware_sparse_loss", "personalized_ranking_loss"],
-        confidence_in_rating_quality=0.9,
+        data_folder,
         batch_size=10e8,
         num_workers=1,
-        train_path,
-        val_path,
-        memory_upper_bound=1e8,
+        train_explicit_feedback_file=None,
+        val_explicit_feedback_file=None,
+        test_explicit_feedback_file=None,
     ):
         """
-        Module based on matrix factorization models.
-        :param model_config: config dict for the core model
-        :param optimizer_config: config dict for optimizer
-        :param loss: name of one of available loss functions
-        :param confidence_in_rating_quality: probability that
-        item with best rating is more relevant than unrated item
         :param batch_size: number of user-item pairs in a batch
         :param num_workers: number of workers for dataloaders
-        :param train_path: path to .npz file of scipy sparse matrix containing
-        train explicit feedback with rows corresponding to users and columns to items
-        :param val_path: path to .npz file of validation explicit feedback
-        :param memory_upper_bound: O(n) bound on size of tensor that can fit in the memory
         """
         super().__init__()
         self.save_hyperparameters()
-        self.train_dataset = self.build_dataset(self.train_explicit(train_path))
-        self.val_dataset = self.build_dataset(self.val_explicit(val_path))
-        self.model = self.build_model(
-            model_config,
-            model_classes=[
-                ProbabilityMatrixFactorization,
-                ConstrainedProbabilityMatrixFactorization,
-            ],
-        )
+        self.movielens = MovieLens(data_folder)
 
-    def build_model(self, model_config, model_classes):
-        model_config["n_users"] = self.train_dataset.shape[0]
-        model_config["n_items"] = self.train_dataset.shape[1]
-        if model_config["name"] == "ConstrainedProbabilityMatrixFactorization":
-            model_config["implicit_feedback"] = self.train_dataset.implicit_feedback
-        return super().build_model(model_config, model_classes)
-
-    @staticmethod
-    def build_dataset(explicit_feedback):
+    def build_dataloader(self, filename, shuffle):
+        explicit_feedback = self.movielens.explicit_feedback_matrix(filename)
         implicit_feedback = explicit_feedback > 0
-        return PMFDataset(explicit_feedback, implicit_feedback)
-
-    def build_dataloader(self, dataset, shuffle):
+        dataset = PMFDataset(explicit_feedback, implicit_feedback)
         sampler = GridSampler(
             dataset_shape=dataset.shape,
             approximate_batch_size=self.hparams["batch_size"],
             shuffle=shuffle,
         )
-        return DataLoader(
+        dataloader = DataLoader(
             dataset=dataset,
             sampler=sampler,
             batch_size=None,
             num_workers=self.hparams["num_workers"],
             pin_memory=self.hparams["num_workers"] > 1,
         )
+        return dataloader
 
     def train_dataloader(self):
-        return self.build_dataloader(self.train_dataset, shuffle=True)
+        return self.build_dataloader(
+            self.hparams["train_explicit_feedback_file"], shuffle=True
+        )
 
     def val_dataloader(self):
-        return self.build_dataloader(self.val_dataset, shuffle=False)
+        return self.build_dataloader(
+            self.hparams["val_explicit_feedback_file"], shuffle=False
+        )
 
-    def loss(self, explicit, implicit, model_ratings):
-        if self.hparams["loss"] == "implicit_aware_sparse_loss":
-            return self.implicit_aware_sparse_loss(explicit, implicit, model_ratings)
-        elif self.hparams["loss"] == "personalized_ranking_loss":
-            return self.personalized_ranking_loss(explicit, implicit, model_ratings)
-        else:
-            raise ValueError(f"Unknown loss {self.hparams['loss']}")
+    def test_dataloader(self):
+        return self.build_dataloader(
+            self.hparams["test_explicit_feedback_file"], shuffle=False
+        )
 
-    @staticmethod
-    def implicit_aware_sparse_loss(explicit, implicit, model_ratings):
+
+class ImplicitAwareSparseLoss:
+    def __call__(self, explicit, implicit, model_ratings):
         """Loss = 1/|Explicit| * \\sum_{ij}Implicit_{ij} * (Explicit_{ij} - ModelRating_{ij})^2"""
         error = model_ratings - explicit
         error = sparse_dense_multiply(sparse_dense_multiply(implicit, error), error)
         loss = torch.sparse.sum(error) / error._values().numel()
         return loss
 
-    def personalized_ranking_loss_memory_efficient(
-        self, explicit, implicit, model_ratings
-    ):
+
+class PersonalizedRankingLoss:
+    def __init__(self, confidence_in_rating_quality=0.9, memory_upper_bound=1e8):
         """
-        Loss from Bayesian Personalized Ranking paper.
-        Caution: this implementation is pretty slow,
-        but straightforward and uses less memory.
+        Ranking based loss inspired by Bayesian Personalized Ranking paper.
+
+        :param confidence_in_rating_quality: probability that item with best rating
+        is more relevant than an unrated item
+        :param memory_upper_bound: O(n) bound on size of tensor that can fit in the memory
         """
-        implicit = implicit.coalesce()
-        ids_of_users_who_rated_something = implicit._indices()[0].unique()
-        if ids_of_users_who_rated_something.numel() == 0:
-            return None
-
-        n_users, n_items = implicit.size()
-        item_ids = torch.arange(n_items)
-        items_mask = torch.full((n_items,), True)
-        criterion = 0
-        for i, user_id in enumerate(ids_of_users_who_rated_something):
-            implicit_user_feedback = implicit[user_id]
-            liked_item_ids = implicit_user_feedback._indices().squeeze()
-            items_mask[:] = True
-            items_mask[liked_item_ids] = False
-            uninteracted_item_ids = item_ids[items_mask]
-
-            predicted_user_ratings = model_ratings[user_id]
-
-            user_ranking_correctness_criterion = -torch.log1p(
-                torch.exp(
-                    -(
-                        predicted_user_ratings[liked_item_ids, None]
-                        - predicted_user_ratings[uninteracted_item_ids]
-                    )
-                )
-            ).mean()
-            criterion += user_ranking_correctness_criterion
-
-        loss = -criterion / len(ids_of_users_who_rated_something)
-        return loss
+        self.confidence_in_rating_quality = confidence_in_rating_quality
+        self.memory_upper_bound = memory_upper_bound
 
     @staticmethod
     def pairwise_difference(left, right):
@@ -346,13 +291,11 @@ class LitProbabilityMatrixFactorization(
         """
         Given two rating matrices A, B of shape (n_users, n_items),
         returns matrix C of shape (n_users, n_items, n_items) such that
-        C[u, i, j] = Probability({ user u prefers item A[u, i] over B[u, j] })
+        C[u, i, j] = Probability({user u prefers item A[u, i] over B[u, j]})
         """
-        scaling_coefficient = self.hparams[
-            "confidence_in_rating_quality"
-        ] / torch.sigmoid(
-            torch.tensor([1], device=ratings_of_supposedly_better_items.device)
-        )
+        scaling_coefficient = self.confidence_in_rating_quality * (1 + np.e**-1)
+        # Now P(item with rating 1 is more relevant than unrated item) =
+        # = scaling_coefficient * sigmoid(1 - 0) = confidence_in_rating_quality
         return scaling_coefficient * torch.sigmoid(
             self.pairwise_difference(
                 ratings_of_supposedly_better_items, ratings_of_supposedly_worse_items
@@ -458,11 +401,10 @@ class LitProbabilityMatrixFactorization(
             unrated_items_model_ratings,
         )
 
-    def personalized_ranking_loss(self, explicit, _implicit, model_ratings):
-        """Ranking based loss inspired by Bayesian Personalized Ranking paper."""
+    def __call__(self, *, explicit, model_ratings, implicit=None):
         explicit = explicit.coalesce()
         if explicit._values().numel() == 0:
-            return None
+            return 0
 
         (
             explicit_dense_cutout,
@@ -506,47 +448,129 @@ class LitProbabilityMatrixFactorization(
 
         return loss
 
+
+class PersonalizedRankingLossMemoryEfficient(PersonalizedRankingLoss):
+    """
+    Loss from Bayesian Personalized Ranking paper.
+    Caution: this implementation is pretty slow,
+    but straightforward and uses less memory.
+    """
+
+    def __call__(self, *, explicit, model_ratings, implicit=None):
+        implicit = implicit.coalesce()
+        ids_of_users_who_rated_something = implicit._indices()[0].unique()
+        if ids_of_users_who_rated_something.numel() == 0:
+            return None
+
+        n_users, n_items = implicit.size()
+        item_ids = torch.arange(n_items)
+        items_mask = torch.full((n_items,), True)
+        criterion = 0
+        for i, user_id in enumerate(ids_of_users_who_rated_something):
+            implicit_user_feedback = implicit[user_id]
+            liked_item_ids = implicit_user_feedback._indices().squeeze()
+            items_mask[:] = True
+            items_mask[liked_item_ids] = False
+            uninteracted_item_ids = item_ids[items_mask]
+
+            predicted_user_ratings = model_ratings[user_id]
+
+            user_ranking_correctness_criterion = -torch.log1p(
+                torch.exp(
+                    -(
+                        predicted_user_ratings[liked_item_ids, None]
+                        - predicted_user_ratings[uninteracted_item_ids]
+                    )
+                )
+            ).mean()
+            criterion += user_ranking_correctness_criterion
+
+        loss = -criterion / len(ids_of_users_who_rated_something)
+        return loss
+
+
+class LitProbabilityMatrixFactorization(RecommenderMixin, pl.LightningModule):
+    def __init__(self, model_config, optimizer_config, loss_config):
+        super().__init__()
+        self.save_hyperparameters()
+        self.model = self.build_model()
+        self.loss = self.build_loss()
+
+    def build_model(self):
+        model_config = self.hparams["model_config"].copy()
+        model_candidates = [
+            ProbabilityMatrixFactorization,
+            ConstrainedProbabilityMatrixFactorization,
+        ]
+        model_config["n_users"] = self.train_explicit_feedback.shape[0]
+        model_config["n_items"] = self.train_explicit_feedback.shape[1]
+        if model_config["name"] == "ConstrainedProbabilityMatrixFactorization":
+            model_config["implicit_feedback"] = self.train_explicit_feedback
+        return super().build_class(model_config, model_candidates)
+
+    def build_loss(self):
+        loss = super().build_class(
+            class_config=self.hparams["loss_config"],
+            class_candidates=[
+                ImplicitAwareSparseLoss,
+                PersonalizedRankingLoss,
+                PersonalizedRankingLossMemoryEfficient,
+            ],
+        )
+        return loss
+
     def forward(self, **batch):
         return self.model(
             user_ids=batch.get("user_ids", slice(None)),
             item_ids=batch.get("item_ids", slice(None)),
         )
 
-    def training_step(self, batch, batch_idx):
+    def common_step(self, batch, name):
         ratings = self(**batch)
-        loss = self.loss(batch["explicit"], batch["implicit"], ratings)
-        self.log("train_loss", 0 if loss is None else loss)
+        loss = self.loss(
+            explicit=batch["explicit"],
+            implicit=batch["implicit"],
+            model_ratings=ratings,
+        )
+        self.log(f"{name}_loss", loss)
         return loss
+
+    def training_step(self, batch, batch_idx):
+        return self.common_step(batch, "train")
 
     def validation_step(self, batch, batch_idx):
-        ratings = self(**batch)
-        loss = self.loss(batch["explicit"], batch["implicit"], ratings)
-        self.log("val_loss", 0 if loss is None else loss)
-        return loss
+        return self.common_step(batch, "val")
+
+    def test_step(self, batch, batch_idx):
+        return self.common_step(batch, "test")
+
+    def predict_step(self, batch, batch_idx, dataloader_idx=0):
+        return self.common_step(batch, "predict")
 
 
-class PMFTrainer(ConfigConstructorBase):
-    def lightning_module_candidates(self):
-        return [LitProbabilityMatrixFactorization]
-
-    def callback_class_candidates(self):
-        return [ConvenientCheckpointLogCallback]
-
+class PMFDispatcher(ConfigConstructorBase):
     def main(self):
-        self.trainer.fit(self.lightning_module)
+        lightning_module = self.build_lightning_module(
+            [LitProbabilityMatrixFactorization]
+        )
+        datamodule = self.build_datamodule([MovieLensDataModule])
+        trainer = self.build_trainer()
+        trainer.fit(lightning_module, datamodule=datamodule)
+
+    def test(self):
+        ...
 
 
 class PMFConfigDispenser(RecommendingConfigDispenser):
     def debug_config(self, config):
         config = super().debug_config(config)
         config["lightning_module"].update(dict(batch_size=1e6))
-        config["trainer"].update(dict(accelerator="gpu", devices=[1], max_epochs=500))
         return config
 
 
 @PMFConfigDispenser
 def main(config):
-    PMFTrainer(config).main()
+    PMFDispatcher(config).main()
 
 
 if __name__ == "__main__":

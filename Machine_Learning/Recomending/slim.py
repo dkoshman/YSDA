@@ -213,7 +213,7 @@ class LitSLIM(SparseDataModuleMixin, RecommenderMixin, pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
         self.dataset = SLIMDataset(
-            self.train_explicit(train_path), self.val_explicit(val_path)
+            self.train_explicit(train_path), self.explicit_feedback(val_path)
         )
         model_config["explicit_feedback"] = self.dataset.explicit_train
         self.model = self.build_model(model_config, model_classes=[SLIM])

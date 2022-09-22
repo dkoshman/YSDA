@@ -204,48 +204,41 @@ class Hooker:
 
 
 class ConfigConstructorBase(abc.ABC):
+    """
+    Example of intended class usage:
+
+    def main(self):
+          lightning_module = self.build_lightning_module(type("MyLightningModuleClass"))
+          datamodule = self.build_datamodule(type("MyDatamodule"))
+          trainer = self.build_trainer()
+          trainer.fit(lightning_module, datamodule=datamodule)
+          trainer.test(lightning_module, datamodule=datamodule)
+    """
+
     def __init__(self, config):
         super().__init__()
-        self.config = config
-        self.lightning_module = self.build_lightning_module()
-        self.callbacks = self.build_callbacks()
-        self.logger = self.build_logger()
-        self.trainer = self.build_trainer()
+        self.config = config.copy()
 
-    @abc.abstractmethod
-    def lightning_module_candidates(self) -> list[type]:
-        ...
-
-    def callback_class_candidates(self) -> list[type]:
-        return []
-
-    def build_lightning_module(self):
-        lightning_classes = self.lightning_module_candidates()
+    def build_lightning_module(self, lightning_candidates):
         lightning_config = self.config["lightning_module"]
         lightning_name = lightning_config.pop("name")
         lightning_config["model_config"] = self.config["model"]
         lightning_config["optimizer_config"] = self.config["optimizer"]
+        return build_class(lightning_name, lightning_config, lightning_candidates)
 
-        for lightning_class in lightning_classes:
-            if lightning_name == lightning_class.__name__:
-                lightning_module = lightning_class(**lightning_config)
-                break
-        else:
-            raise ValueError(
-                f"Lightning module {lightning_name} not found among classes:\n"
-                f"{lightning_classes}"
-            )
-        return lightning_module
+    def build_datamodule(self, datamodule_candidates):
+        datamodule_config = self.config["datamodule"]
+        datamodule_name = datamodule_config.pop("name")
+        return build_class(datamodule_name, datamodule_config, datamodule_candidates)
 
-    def build_callbacks(self):
-        callback_classes = self.callback_class_candidates()
+    def build_callbacks(self, callback_candidates=()) -> dict:
         callbacks = {}
         if callbacks_config := self.config.get("callbacks"):
             for callback_name, single_callback_config in callbacks_config.items():
                 callbacks[callback_name] = build_class(
                     callback_name,
                     single_callback_config,
-                    class_candidates=callback_classes,
+                    class_candidates=callback_candidates,
                     modules_to_try_to_import_from=[pl.callbacks],
                 )
         return callbacks
@@ -259,11 +252,10 @@ class ConfigConstructorBase(abc.ABC):
             )
             return logger
 
-    def build_trainer(self):
-        trainer_config = self.config["trainer"]
+    def build_trainer(self, callback_candidates=()):
         trainer = pl.Trainer(
-            **trainer_config,
-            callbacks=list(self.callbacks.values()),
-            logger=self.logger,
+            **self.config["trainer"],
+            callbacks=list(self.build_callbacks(callback_candidates).values()),
+            logger=self.build_logger(),
         )
         return trainer
