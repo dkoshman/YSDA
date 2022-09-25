@@ -1,6 +1,6 @@
 [tool.poetry]
-name = "my_ml_tools"
-description = "my package for building and training models"
+name = "my_tools"
+description = "My package for machine learning tasks."
 version = "0.1.0"
 authors = ["Dima Koshman <koshmandk@yandex.ru>"]
 

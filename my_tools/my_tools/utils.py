@@ -1,3 +1,6 @@
+import sys
+import traceback
+
 import numpy as np
 import torch
 
@@ -73,19 +76,13 @@ def timeit(func):
     return _time_it
 
 
-def build_class(
-    class_name,
-    class_kwargs=None,
-    class_candidates=None,
-    modules_to_try_to_import_from=(),
-):
-    class_kwargs = class_kwargs or {}
+def get_class(class_name, class_candidates=None, modules_to_try_to_import_from=()):
     for cls in class_candidates:
         if cls.__name__ == class_name:
-            return cls(**class_kwargs)
+            return cls
     for module in modules_to_try_to_import_from:
         if cls := getattr(module, class_name, False):
-            return cls(**class_kwargs)
+            return cls
     raise ValueError(
         f"Class {class_name} not found in classes {class_candidates}\n"
         f"or modules{modules_to_try_to_import_from}"
@@ -110,3 +107,16 @@ class StoppingMonitor:
             self.lowest_loss = torch.inf
             return True
         return False
+
+
+def full_traceback(function):
+    """Enables full traceback, useful as wandb agent truncates it."""
+
+    def wrapper(*args, **kwargs):
+        try:
+            return function(*args, **kwargs)
+        except Exception as exception:
+            print(traceback.print_exc(), file=sys.stderr)
+            raise exception
+
+    return wrapper

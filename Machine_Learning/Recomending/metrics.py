@@ -1,6 +1,9 @@
 import einops
 import numpy as np
 import pandas as pd
+import pytorch_lightning
+import torch
+import wandb
 
 from numba import njit
 
@@ -44,11 +47,11 @@ def binary_relevance(relevant_pairs, recommendee_user_ids, recommendations):
     [user_id, item_id] pair is in relevant_pairs.
     """
     relevant_pairs = set([(i, j) for (i, j) in relevant_pairs])
-    binary_relevance = np.empty_like(recommendations, dtype=bool)
+    relevance = np.empty_like(recommendations, dtype=bool)
     for i, (user, items) in enumerate(zip(recommendee_user_ids, recommendations)):
         for j, item in enumerate(items):
-            binary_relevance[i, j] = (user, item) in relevant_pairs
-    return binary_relevance
+            relevance[i, j] = (user, item) in relevant_pairs
+    return relevance
 
 
 @njit
@@ -174,12 +177,22 @@ def jit_surpisal(item_ids, self_information_per_item, recommendations):
     return np.mean(recommendations_information)
 
 
-def surprisal(relevant_pairs, recommendations):
+def surprisal(recommendations, relevant_pairs=None, items_information=None):
     """
     Computes average normalized self information for each recommended item.
     The higher the surprisal, the more specific recommendations the model gives.
+
+    :param recommendations: recommended item ids per user
+    :param relevant_pairs: if passed, it should contain ALL the relevant pairs
+    containing recommended items
+    :param items_information: precomputed items self information
     """
-    items_information = normalized_items_self_information(relevant_pairs)
+    if items_information is None:
+        if relevant_pairs is None:
+            raise ValueError(
+                "Either relevant_pairs or items_information must be passed."
+            )
+        items_information = normalized_items_self_information(relevant_pairs)
     return jit_surpisal(
         item_ids=items_information.index.to_numpy(),
         self_information_per_item=items_information.values,
@@ -202,49 +215,54 @@ def normalized_discounted_cumulative_gain(relevance, n_relevant_items_per_user):
     return np.mean(dcg / (ideal_dcg + 1e-8))
 
 
-class RecommendingMetrics:
+class RecommendingMetricsCallback(pytorch_lightning.callbacks.Callback):
     def __init__(self, relevant_pairs, k=10, invalid_item_mark=-1):
         """
-        Class for recommendation metrics
-        :param relevant_pairs: pandas.DataFrame with columns "user_id", "item_id"
-        corresponding to relevant_pairs
+        :param relevant_pairs: numpy array of shape [n_pairs, 2] containing
+        [user_id, item_id] pairs where items are relevant to users
         :param k: metrics will be calculated based on top k recommendations
         """
-        self.relevant_pairs = relevant_pairs
         self.k = k
-        self.invalid_item_mark = invalid_item_mark
+        self.items_information = normalized_items_self_information(relevant_pairs)
+        self.all_items = self.items_information.index.numpy()
+        self.unique_recommended_items = np.empty(0, dtype=np.int32)
+        self.metric_names = ["hitrate", "ndcg", "map", "surprisal", "coverage"]
+        for metric_name in self.metric_names:
+            wandb.define_metric(metric_name, summary="mean")
 
-    def calculate_metrics(self, recommendations):
-        """
-        Return all metrics for the given recommendations
-        :param recommendations: pandas.DataFrame with user ids in index and
-        recommended item ids in rows in order corresponding to relevance; null
-        item ids should be encoded as -1
-        :return: pandas.Series with metric names in index and metric values
-        """
-        recommendations = recommendations.iloc[:, : self.k].astype(np.int32)
+    def on_test_batch_end(
+        self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx
+    ):
+        user_ids = batch["user_ids"]
+        ratings = outputs["ratings"]
+        explicit = batch["explicit"].to_sparse_coo()
 
-        user_recomendees = recommendations.index.to_numpy()
+        ratings, recommendations = torch.topk(input=ratings, k=self.k)
+        relevant_pairs = explicit.indices().T
+        n_relevant_items_per_user = torch.sparse.sum(explicit.bool().int(), 1).values()
 
-        recommendations = self.mark_duplicate_recommended_items_as_invalid_except_first(
-            recommendations.values, self.invalid_item_mark
+        recommendations = recommendations.cpu().numpy()
+        user_ids = user_ids.cpu().numpy()
+        n_relevant_items_per_user = n_relevant_items_per_user.cpu().numpy()
+
+        relevance = binary_relevance(relevant_pairs, user_ids, recommendations)
+        pl_module.log("hitrate", hitrate(relevance))
+        pl_module.log(
+            "ndcg",
+            normalized_discounted_cumulative_gain(relevance, n_relevant_items_per_user),
+        )
+        pl_module.log(
+            "map", mean_average_precision(relevance, n_relevant_items_per_user)
+        )
+        pl_module.log(
+            "surprisal", surprisal(relevance, items_information=self.items_information)
+        )
+        self.unique_recommended_items = np.union1d(
+            self.unique_recommended_items, recommendations
         )
 
-        relevance = self.binary_relevance(
-            self.relevant_pairs.values,
-            user_recomendees,
-            recommendations,
+    def on_test_end(self, trainer, pl_module):
+        coverage = len(np.set1d(self.unique_recommended_items, self.all_items)) / len(
+            self.all_items
         )
-
-        results = pd.Series(
-            {
-                "mnap": self.normalized_average_precision(
-                    user_recomendees, relevance
-                ).mean(),
-                "hitrate": self.hitrate(relevance).mean(),
-                "mrr": self.reciprocal_rank(relevance).mean(),
-                "coverage": self.coverage(recommendations),
-                "surprisal": self.surprisal(recommendations).mean(),
-            }
-        )
-        return results
+        pl_module.log("coverage", coverage)

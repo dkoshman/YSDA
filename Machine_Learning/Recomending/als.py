@@ -7,7 +7,7 @@ import torch
 from tqdm.auto import tqdm
 from typing_extensions import Literal
 
-from my_ml_tools.utils import build_class
+from my_tools.utils import get_class
 
 from utils import RecommendingConfigDispenser
 
@@ -353,11 +353,10 @@ def main(config):
     model_config.update(
         implicit_feedback=scipy.sparse.load_npz(config["train_explicit"]).tocsr() > 0
     )
-    model = build_class(
-        class_name=model_name,
-        class_kwargs=model_config,
-        class_candidates=[ALS, ALSJIT, ALSJITBiased],
+    Model = get_class(
+        class_name=model_name, class_candidates=[ALS, ALSJIT, ALSJITBiased]
     )
+    model = Model(model_config)
     model.fit()
     # TODO: log metrics
 

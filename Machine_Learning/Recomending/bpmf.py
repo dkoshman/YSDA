@@ -251,9 +251,10 @@ class BayesianPMF:
         return mode_means
 
     def recommend(self, user_ids, aggregation_method: Literal["mean", "mode"] = "mean"):
-        if aggregation_method == "mean":
-            return self.aggregate_prediction_mean(user_ids)
-        elif aggregation_method == "mode":
-            return self.aggregate_prediction_mode_approximation(user_ids)
-        else:
-            raise ValueError(f"Unknown aggregation method {aggregation_method}")
+        match aggregation_method:
+            case "mean":
+                return self.aggregate_prediction_mean(user_ids)
+            case "mode":
+                return self.aggregate_prediction_mode_approximation(user_ids)
+            case _:
+                raise ValueError(f"Unknown aggregation method {aggregation_method}")

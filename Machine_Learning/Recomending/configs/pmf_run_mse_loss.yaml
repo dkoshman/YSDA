@@ -1,3 +1,5 @@
+pmf_run_mse_loss:
+  yaml:
 project: Recommending
 name: "PMF run"
 model:

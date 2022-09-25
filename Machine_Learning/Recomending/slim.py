@@ -4,10 +4,10 @@ import torch
 
 from torch.utils.data import DataLoader, Dataset
 
-from my_ml_tools.entrypoints import ConfigConstructorBase
-from my_ml_tools.lightning import ConvenientCheckpointLogCallback
-from my_ml_tools.models import register_regularization_hook
-from my_ml_tools.utils import scipy_to_torch_sparse, StoppingMonitor
+from my_tools.entrypoints import ConfigConstructorBase
+from my_tools.lightning import ConvenientCheckpointLogCallback
+from my_tools.models import register_regularization_hook
+from my_tools.utils import scipy_to_torch_sparse, StoppingMonitor
 
 from utils import (
     RecommenderMixin,
@@ -183,20 +183,6 @@ class SLIMDataset(SparseDatasetMixin, Dataset):
         )
 
 
-class SLIMSampler:
-    def __init__(self, n_items, batch_size, shuffle=True):
-        self.n_items = n_items
-        self.batch_size = batch_size
-        indices = torch.randperm(n_items) if shuffle else torch.arange(n_items)
-        self.batch_indices = torch.split(indices, batch_size)
-
-    def __len__(self):
-        return len(self.batch_indices)
-
-    def __iter__(self):
-        yield from self.batch_indices
-
-
 class LitSLIM(SparseDataModuleMixin, RecommenderMixin, pl.LightningModule):
     def __init__(
         self,
@@ -225,7 +211,7 @@ class LitSLIM(SparseDataModuleMixin, RecommenderMixin, pl.LightningModule):
 
     @property
     def dataloader(self):
-        sampler = SLIMSampler(
+        sampler = BatchSampler(
             n_items=len(self.dataset), batch_size=self.hparams["batch_size"]
         )
         dataloader = DataLoader(

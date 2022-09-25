@@ -6,7 +6,18 @@ authors = ["dkoshman <dkoshman@nes.ru>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.9"
+python = ">=3.10,<3.12"
+numpy = "^1.23.3"
+pandas = "^1.5.0"
+scipy = "^1.9.1"
+torch = {url = "https://download.pytorch.org/whl/cu113/torch-1.12.1%2Bcu113-cp310-cp310-linux_x86_64.whl"}
+sklearn = "^0.0"
+wandb = "^0.13.3"
+my-tools = {path = "my_tools", develop = true}
+black = {extras = ["d"], version = "^22.8.0"}
+pytorch-lightning = "^1.7.7"
+einops = "^0.4.1"
+numba = "^0.56.2"
 
 
 [build-system]
