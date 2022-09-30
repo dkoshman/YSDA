@@ -1,11 +1,19 @@
+import string
+from typing import Literal
+
 import einops
 import numpy as np
 import pandas as pd
 import pytorch_lightning
+import scipy
 import torch
 import wandb
 
 from numba import njit
+from scipy.sparse import csr_matrix
+
+from Machine_Learning.Recomending.data import MovieLens
+from Machine_Learning.Recomending.utils import scipy_coo_to_torch_sparse
 
 
 def relevant_pairs_to_frame(relevant_pairs):
@@ -47,7 +55,7 @@ def binary_relevance(relevant_pairs, recommendee_user_ids, recommendations):
     [user_id, item_id] pair is in relevant_pairs.
     """
     relevant_pairs = set([(i, j) for (i, j) in relevant_pairs])
-    relevance = np.empty_like(recommendations, dtype=bool)
+    relevance = np.zeros_like(recommendations)
     for i, (user, items) in enumerate(zip(recommendee_user_ids, recommendations)):
         for j, item in enumerate(items):
             relevance[i, j] = (user, item) in relevant_pairs
@@ -90,8 +98,13 @@ def hitrate(relevance):
     :param relevance: boolean array of shape [n_users, n_items], representing
     relevant recommendations per user.
     """
-    hits_per_user = einops.reduce(relevance, "user relevance -> relevance", np.any)
+    hits_per_user = einops.reduce(relevance, "user relevance -> user", np.any)
     return np.mean(hits_per_user)
+
+
+def accuracy(relevance):
+    """Average proportion of relevant recommendations."""
+    return np.mean(relevance)
 
 
 def mean_reciprocal_rank(relevance):
@@ -118,6 +131,17 @@ def number_of_all_relevant_items_per_user(relevant_pairs, recommendee_user_ids):
     )
 
 
+def recall(relevance, n_relevant_items_per_user):
+    """
+    Proportion of retrieved relevant items among all
+    known to be relevant for each user.
+    Very sensitive to size of recommendations.
+    """
+    return np.mean(
+        einops.reduce(relevance, "user item -> user", "sum") / n_relevant_items_per_user
+    )
+
+
 def mean_average_precision(relevance, n_relevant_items_per_user):
     """
     This metric represents average proportion of relevant items at every possible cutoff.
@@ -131,7 +155,10 @@ def mean_average_precision(relevance, n_relevant_items_per_user):
     n_relevant_items_at_k = np.cumsum(relevance, axis=1)
     precision_at_k = np.einsum("i j, j -> i j", n_relevant_items_at_k, reciprocal_ranks)
     average_precision = np.einsum(
-        "i j, i j, i -> i", precision_at_k, relevance, 1 / n_relevant_items_per_user
+        "i j, i j, i -> i",
+        precision_at_k,
+        relevance,
+        1 / np.maximum(n_relevant_items_per_user, 1e-8),
     )
     return np.mean(average_precision)
 
@@ -147,7 +174,7 @@ def coverage(recommendations, all_possible_item_ids):
     :param all_possible_item_ids: array or set with all item_ids from training dataset
     """
     all_items = set(all_possible_item_ids)
-    return len(set(recommendations.flat()) & all_items) / len(all_items)
+    return len(set(recommendations.flat) & all_items) / len(all_items)
 
 
 def normalized_items_self_information(relevant_pairs):
@@ -170,10 +197,11 @@ def normalized_items_self_information(relevant_pairs):
 @njit
 def jit_surpisal(item_ids, self_information_per_item, recommendations):
     self_information = {i: j for i, j in zip(item_ids, self_information_per_item)}
-    recommendations_information = np.empty_like(recommendations, dtype=np.float32)
+    recommendations_information = np.zeros_like(recommendations, dtype=np.float32)
     for i, row in enumerate(recommendations):
         for j, item_id in enumerate(row):
-            recommendations_information[i, j] = self_information.get(item_id, 0)
+            if item_id in self_information:
+                recommendations_information[i, j] = self_information[item_id]
     return np.mean(recommendations_information)
 
 
@@ -210,59 +238,228 @@ def discounted_cumulative_gain(relevance):
 def normalized_discounted_cumulative_gain(relevance, n_relevant_items_per_user):
     """General front-heavy measure of ranking effectiveness."""
     dcg = discounted_cumulative_gain(relevance)
-    ideal_relevance = np.arange(relevance.shape[0]) < n_relevant_items_per_user[:, None]
+    ideal_relevance = np.arange(relevance.shape[1]) < n_relevant_items_per_user[:, None]
     ideal_dcg = discounted_cumulative_gain(ideal_relevance)
     return np.mean(dcg / (ideal_dcg + 1e-8))
 
 
-class RecommendingMetricsCallback(pytorch_lightning.callbacks.Callback):
-    def __init__(self, relevant_pairs, k=10, invalid_item_mark=-1):
-        """
-        :param relevant_pairs: numpy array of shape [n_pairs, 2] containing
-        [user_id, item_id] pairs where items are relevant to users
-        :param k: metrics will be calculated based on top k recommendations
-        """
+class RecommendingMetrics:
+    def __init__(self, explicit_feedback: csr_matrix, k=10):
+        self.explicit_feedback = explicit_feedback
         self.k = k
-        self.items_information = normalized_items_self_information(relevant_pairs)
-        self.all_items = self.items_information.index.numpy()
+
+        explicit_feedback = explicit_feedback.tocoo()
+        self.relevant_pairs = np.stack([explicit_feedback.row, explicit_feedback.col]).T
+        self.items_information = normalized_items_self_information(self.relevant_pairs)
+        self.all_items = self.items_information.index.to_numpy()
         self.unique_recommended_items = np.empty(0, dtype=np.int32)
-        self.metric_names = ["hitrate", "ndcg", "map", "surprisal", "coverage"]
-        for metric_name in self.metric_names:
-            wandb.define_metric(metric_name, summary="mean")
+        self.n_relevant_items_per_user = (explicit_feedback > 0).sum(axis=1).A1
 
-    def on_test_batch_end(
-        self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx
-    ):
-        user_ids = batch["user_ids"]
-        ratings = outputs["ratings"]
-        explicit = batch["explicit"].to_sparse_coo()
+    def atk_suffix(self, dictionary):
+        if self.k is None:
+            return dictionary
+        else:
+            return {key + "@" + str(self.k): v for key, v in dictionary.items()}
 
-        ratings, recommendations = torch.topk(input=ratings, k=self.k)
-        relevant_pairs = explicit.indices().T
-        n_relevant_items_per_user = torch.sparse.sum(explicit.bool().int(), 1).values()
+    def torch_batch_metrics(self, user_ids, ratings):
+        if self.k is None:
+            recommendations = torch.argsort(ratings, descending=True)
+        else:
+            values, recommendations = torch.topk(input=ratings, k=self.k)
 
-        recommendations = recommendations.cpu().numpy()
-        user_ids = user_ids.cpu().numpy()
-        n_relevant_items_per_user = n_relevant_items_per_user.cpu().numpy()
-
-        relevance = binary_relevance(relevant_pairs, user_ids, recommendations)
-        pl_module.log("hitrate", hitrate(relevance))
-        pl_module.log(
-            "ndcg",
-            normalized_discounted_cumulative_gain(relevance, n_relevant_items_per_user),
+        metrics = self.batch_metrics(
+            *[i.to("cpu", torch.int32).numpy() for i in [user_ids, recommendations]]
         )
-        pl_module.log(
-            "map", mean_average_precision(relevance, n_relevant_items_per_user)
+        return self.atk_suffix(metrics)
+
+    def batch_metrics(self, user_ids, recommendations):
+        relevance = binary_relevance(self.relevant_pairs, user_ids, recommendations)
+        n_relevant_items_per_user = self.n_relevant_items_per_user[user_ids]
+        self.update_coverage(recommendations)
+        metrics = dict(
+            hitrate=hitrate(
+                relevance=relevance,
+            ),
+            accuracy=accuracy(
+                relevance=relevance,
+            ),
+            recall=recall(
+                relevance=relevance,
+                n_relevant_items_per_user=n_relevant_items_per_user,
+            ),
+            ndcg=normalized_discounted_cumulative_gain(
+                relevance=relevance,
+                n_relevant_items_per_user=n_relevant_items_per_user,
+            ),
+            map=mean_average_precision(
+                relevance=relevance,
+                n_relevant_items_per_user=n_relevant_items_per_user,
+            ),
+            mrr=mean_reciprocal_rank(
+                relevance=relevance,
+            ),
+            surprisal=surprisal(
+                recommendations=recommendations,
+                items_information=self.items_information,
+            ),
         )
-        pl_module.log(
-            "surprisal", surprisal(relevance, items_information=self.items_information)
-        )
+        return metrics
+
+    def update_coverage(self, recommendations):
         self.unique_recommended_items = np.union1d(
             self.unique_recommended_items, recommendations
         )
 
-    def on_test_end(self, trainer, pl_module):
-        coverage = len(np.set1d(self.unique_recommended_items, self.all_items)) / len(
-            self.all_items
+    def finalize_coverage(self):
+        coverage = len(
+            np.intersect1d(self.unique_recommended_items, self.all_items)
+        ) / len(self.all_items)
+        self.unique_recommended_items = np.empty(0, dtype=np.int32)
+        return self.atk_suffix(dict(coverage=coverage))
+
+
+class RecommendingMetricsCallback(pytorch_lightning.callbacks.Callback):
+    def __init__(self, directory, k=10):
+        movielens = MovieLens(directory)
+        explicit_feedback = movielens.explicit_feedback_scipy_csr("u.data")
+        if isinstance(k, int):
+            k = [k]
+        self.metrics = [RecommendingMetrics(explicit_feedback, kk) for kk in k]
+
+    @staticmethod
+    def test_prefix(metrics_dict):
+        return {"test_" + k: v for k, v in metrics_dict.items()}
+
+    def on_test_batch_end(
+        self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx
+    ):
+        self.log_batch(
+            user_ids=batch["user_ids"], ratings=pl_module(**batch), kind="test"
         )
-        pl_module.log("coverage", coverage)
+
+    def on_validation_batch_end(
+        self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx
+    ):
+        self.log_batch(
+            user_ids=batch["user_ids"], ratings=pl_module(**batch), kind="val"
+        )
+
+    def log_batch(self, user_ids, ratings, kind: Literal["val", "test"]):
+        for atk_metric in self.metrics:
+            metrics = atk_metric.torch_batch_metrics(user_ids=user_ids, ratings=ratings)
+            if kind == "test":
+                metrics = self.test_prefix(metrics)
+                for metric_name in metrics:
+                    wandb.define_metric(metric_name, summary="mean")
+            wandb.log(metrics)
+
+    def on_test_epoch_end(self, trainer=None, pl_module=None):
+        self.epoch_end(kind="test")
+
+    def on_validation_epoch_end(self, trainer=None, pl_module=None):
+        self.epoch_end(kind="val")
+
+    def epoch_end(self, kind: Literal["val", "test"]):
+        for atk_metric in self.metrics:
+            if len(atk_metric.unique_recommended_items):
+                metrics = atk_metric.finalize_coverage()
+                if kind == "test":
+                    metrics = self.test_prefix(metrics)
+                    for metric_name in metrics:
+                        wandb.define_metric(metric_name, summary="mean")
+                wandb.log(metrics)
+
+
+class RecommendingIMDBCallback(pytorch_lightning.callbacks.Callback):
+    def __init__(
+        self,
+        path_to_imdb_ratings_csv="local/my_imdb_ratings.csv",
+        path_to_movielens_folder="local/ml-100k",
+        k=10,
+    ):
+        imdb = ImdbRatings(path_to_imdb_ratings_csv, path_to_movielens_folder)
+        self.explicit_feedback = imdb.explicit_feedback_torch()
+        self.item_df = imdb.movielens["u.item"]
+        self.k = k
+
+    def on_test_epoch_end(self, trainer=None, pl_module=None):
+        recommendations = pl_module.recommend(
+            users_explicit_feedback=self.explicit_feedback, k=self.k
+        )
+        self.log_recommendation(recommendations.cpu().numpy())
+
+    def on_validation_epoch_end(self, trainer=None, pl_module=None):
+        recommendations = pl_module.recommend(
+            users_explicit_feedback=self.explicit_feedback, k=self.k
+        )
+        self.log_recommendation(recommendations.cpu().numpy())
+
+    def log_recommendation(self, recommendations):
+        recommendations += 1
+        for i, recs in enumerate(recommendations):
+            items_description = self.item_df.loc[recs]
+            imdb_urls = "https://www.imdb.com/find?q=" + items_description[
+                "movie title"
+            ].str.split("(").str[0].str.replace(r"\s+", "+", regex=True)
+            items_description = pd.concat(
+                [items_description["movie title"], imdb_urls], axis="columns"
+            )
+            wandb.log(
+                {
+                    f"recommended_items_user_{i}": wandb.Table(
+                        dataframe=items_description.T
+                    )
+                }
+            )
+
+
+class ImdbRatings:
+    def __init__(
+        self,
+        path_to_imdb_ratings_csv="local/my_imdb_ratings.csv",
+        path_to_movielens_folder="local/ml-100k",
+    ):
+        self.path_to_imdb_ratings_csv = path_to_imdb_ratings_csv
+        self.movielens = MovieLens(path_to_movielens_folder)
+
+    @property
+    def imdb_ratings(self):
+        return pd.read_csv(self.path_to_imdb_ratings_csv)
+
+    @staticmethod
+    def normalize_titles(titles):
+        titles = (
+            titles.str.lower()
+            .str.normalize("NFC")
+            .str.replace(f"[{string.punctuation}]", "", regex=True)
+            .str.replace("the", "")
+            .str.replace(r"\s+", " ", regex=True)
+            .str.strip()
+        )
+        return titles
+
+    def explicit_feedback_scipy(self):
+        imdb_ratings = self.imdb_ratings
+        imdb_ratings["Title"] = self.normalize_titles(imdb_ratings["Title"])
+        imdb_ratings["Your Rating"] = (imdb_ratings["Your Rating"] + 1) // 2
+
+        movielens_titles = self.movielens["u.item"]["movie title"]
+        movielens_titles = self.normalize_titles(movielens_titles.str.split("(").str[0])
+
+        liked_items_ids = []
+        liked_items_ratings = []
+        for title, rating in zip(imdb_ratings["Title"], imdb_ratings["Your Rating"]):
+            for movie_id, ml_title in movielens_titles.items():
+                if title == ml_title:
+                    liked_items_ids.append(movie_id - 1)
+                    liked_items_ratings.append(rating)
+
+        data = liked_items_ids
+        row = np.zeros(len(liked_items_ids))
+        col = np.array(liked_items_ids)
+        shape = (1, self.movielens.shape[1])
+        explicit_feedback = scipy.sparse.coo_matrix((data, (row, col)), shape=shape)
+        return explicit_feedback
+
+    def explicit_feedback_torch(self):
+        return scipy_coo_to_torch_sparse(self.explicit_feedback_scipy())

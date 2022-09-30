@@ -1,29 +1,21 @@
-import pytorch_lightning as pl
 import torch
 
 from my_tools.entrypoints import ConfigConstructorBase
-from my_tools.lightning import ConvenientCheckpointLogCallback
 from my_tools.models import register_regularization_hook
 
-from data import MovieLensDataModule
-from loss import (
-    ImplicitAwareSparseLoss,
-    PersonalizedRankingLoss,
-    PersonalizedRankingLossMemoryEfficient,
-)
-from utils import (
-    build_bias,
-    build_weight,
-    MovielensTester,
-    MovielensTuner,
+from data import MovieLensDataModule, SparseDataset
+from entrypoints import (
+    MovielensMain,
+    RecommenderBase,
+    MovielensDispatcher,
     RecommendingConfigDispenser,
-    RecommenderMixin,
-    torch_sparse_slice,
 )
+from my_tools.utils import build_class
+from utils import build_bias, build_weight, torch_sparse_slice
 
 
 class ProbabilityMatrixFactorization(torch.nn.Module):
-    """predicted rating = user_factors @ item_factors, with bias and L2 regularization"""
+    """Predicted_rating = user_factors @ item_factors, with bias and L2 regularization"""
 
     def __init__(
         self,
@@ -31,24 +23,22 @@ class ProbabilityMatrixFactorization(torch.nn.Module):
         n_items,
         latent_dimension,
         weight_decay,
-        pass_through_sigmoid=False,
     ):
         super().__init__()
-
         self.weight_decay = weight_decay
-        self.pass_through_sigmoid = pass_through_sigmoid
-
         self.user_weight = build_weight(n_users, latent_dimension)
         self.user_bias = build_bias(n_users, 1)
-
         self.item_weight = build_weight(n_items, latent_dimension)
         self.item_bias = build_bias(n_items, 1)
-
         self.bias = torch.nn.Parameter(torch.zeros(1))
 
-        self.sigmoid = torch.nn.Sigmoid()
+    def forward(self, user_ids=None, item_ids=None):
+        if user_ids is None:
+            user_ids = slice(None)
 
-    def linear_forward(self, user_ids, item_ids):
+        if item_ids is None:
+            item_ids = slice(None)
+
         user_weight = self.user_weight[user_ids]
         user_bias = self.user_bias[user_ids]
         item_weight = self.item_weight[item_ids]
@@ -57,17 +47,11 @@ class ProbabilityMatrixFactorization(torch.nn.Module):
         rating = user_weight @ item_weight.T + user_bias + item_bias.T + self.bias
 
         # Need to add regularization here because otherwise optimizer will decay all weights,
-        # not only those corresponding to user and item ids. Also it is important to add gradient
+        # not only those corresponding to user and item ids. Also, it is important to add gradient
         # hooks after the forward calculations, otherwise decay messes with the model.
         for parameter in [user_weight, item_weight, user_bias, item_bias]:
             register_regularization_hook(parameter, self.weight_decay)
 
-        return rating
-
-    def forward(self, user_ids, item_ids):
-        rating = self.linear_forward(user_ids, item_ids)
-        if self.pass_through_sigmoid:
-            rating = self.sigmoid(rating)
         return rating
 
 
@@ -86,7 +70,13 @@ class ConstrainedProbabilityMatrixFactorization(ProbabilityMatrixFactorization):
             1 / (implicit_feedback.sum(axis=1) + 1e-8)
         ).tocsr()
 
-    def forward(self, user_ids, item_ids):
+    def forward(self, user_ids=None, item_ids=None):
+        if user_ids is None:
+            user_ids = slice(None)
+
+        if item_ids is None:
+            item_ids = slice(None)
+
         # Need to clone to avoid gradient hook accumulation on same tensor and subsequent memory leak
         item_rating_effect_weight = self.item_rating_effect_weight.clone()
 
@@ -99,10 +89,8 @@ class ConstrainedProbabilityMatrixFactorization(ProbabilityMatrixFactorization):
             users_implicit_feedback @ item_rating_effect_weight
         )
 
-        rating = super().linear_forward(user_ids, item_ids)
+        rating = super().forward(user_ids, item_ids)
         rating += user_weights_offset_caused_by_their_ratings @ item_weight.T
-        if self.pass_through_sigmoid:
-            rating = self.sigmoid(rating)
 
         # Scale down regularization because item_rating_effect_weight is decayed
         # for each batch, whereas other parameters have only their slices decayed.
@@ -110,45 +98,44 @@ class ConstrainedProbabilityMatrixFactorization(ProbabilityMatrixFactorization):
         register_regularization_hook(
             item_rating_effect_weight, self.weight_decay / scale_down
         )
-
         return rating
 
 
-class LitProbabilityMatrixFactorization(RecommenderMixin, pl.LightningModule):
-    def __init__(self, model_config, optimizer_config, loss_config):
-        super().__init__()
-        self.save_hyperparameters()
-        self.model = self.build_model()
-        self.loss = self.build_loss()
+class PMFDataModule(MovieLensDataModule):
+    def train_dataloader(self):
+        if (explicit := self.train_explicit) is not None:
+            return self.build_dataloader(
+                SparseDataset(explicit), sampler_type="grid", shuffle=True
+            )
 
+    def val_dataloader(self):
+        if (explicit := self.val_explicit) is not None:
+            return self.build_dataloader(SparseDataset(explicit), sampler_type="user")
+
+    def test_dataloader(self):
+        if (explicit := self.test_explicit) is not None:
+            return self.build_dataloader(SparseDataset(explicit), sampler_type="user")
+
+
+class LitProbabilityMatrixFactorization(RecommenderBase):
     def build_model(self):
-        model_config = self.hparams["model_config"].copy()
+        model_config = self.hparams["model_config"]
         model_candidates = [
             ProbabilityMatrixFactorization,
             ConstrainedProbabilityMatrixFactorization,
         ]
-        model_config["n_users"] = self.train_explicit_feedback.shape[0]
-        model_config["n_items"] = self.train_explicit_feedback.shape[1]
+
         if model_config["name"] == "ConstrainedProbabilityMatrixFactorization":
-            model_config["implicit_feedback"] = self.train_explicit_feedback
-        return super().build_class(model_config, model_candidates)
+            model_config = model_config.copy()
+            model_config["implicit_feedback"] = self.train_explicit > 0
 
-    def build_loss(self):
-        loss = super().build_class(
-            class_config=self.hparams["loss_config"],
-            class_candidates=[
-                ImplicitAwareSparseLoss,
-                PersonalizedRankingLoss,
-                PersonalizedRankingLossMemoryEfficient,
-            ],
+        model = build_class(
+            class_candidates=model_candidates,
+            n_users=self.train_explicit.shape[0],
+            n_items=self.train_explicit.shape[1],
+            **model_config,
         )
-        return loss
-
-    def forward(self, **batch):
-        return self.model(
-            user_ids=batch.get("user_ids", slice(None)),
-            item_ids=batch.get("item_ids", slice(None)),
-        )
+        return model
 
     def common_step(self, batch):
         ratings = self(**batch)
@@ -170,46 +157,20 @@ class LitProbabilityMatrixFactorization(RecommenderMixin, pl.LightningModule):
         return loss
 
     def test_step(self, batch, batch_idx):
-        ratings = self(**batch)
-        return dict(ratings=ratings)
+        pass
 
 
-class PMFDispatcher(ConfigConstructorBase):
-    def main(self):
-        lightning_module = self.build_lightning_module(
-            [LitProbabilityMatrixFactorization]
-        )
-        datamodule = self.build_datamodule([MovieLensDataModule])
-        trainer = self.build_trainer()
-        trainer.fit(lightning_module, datamodule=datamodule)
-        # if test is not None
-        trainer.test(lightning_module, datamodule=datamodule)
+class PMFDispatcher(MovielensDispatcher):
+    def lightning_candidates(self):
+        return (LitProbabilityMatrixFactorization,)
+
+    def datamodule_candidates(self):
+        return (PMFDataModule,)
 
 
-class PMFTuner(PMFDispatcher, MovielensTuner):
-    pass
-
-
-class PMFTester(PMFDispatcher, MovielensTester):
-    pass
-
-
-class PMFConfigDispenser(RecommendingConfigDispenser):
-    def debug_config(self, config):
-        config = super().debug_config(config)
-        config["lightning_module"].update(dict(batch_size=1e6))
-        return config
-
-
-@PMFConfigDispenser
+@RecommendingConfigDispenser
 def main(config):
-    match stage := config["stage"]:
-        case "tune":
-            PMFTuner(config).main()
-        case "test":
-            PMFTester(config).test()
-        case _:
-            raise ValueError(f"Unknown stage {stage}.")
+    PMFDispatcher(config).dispatch()
 
 
 if __name__ == "__main__":

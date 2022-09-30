@@ -1,4 +1,14 @@
+import einops
 import torch
+import wandb
+
+from my_tools.utils import sparse_dense_multiply
+
+
+class MSELoss:
+    def __call__(self, explicit, model_ratings):
+        loss = ((explicit.to_dense() - model_ratings) ** 2).sum()
+        return loss
 
 
 class ImplicitAwareSparseLoss:
@@ -6,20 +16,25 @@ class ImplicitAwareSparseLoss:
         """Loss = 1/|Explicit| * \\sum_{ij}Implicit_{ij} * (Explicit_{ij} - ModelRating_{ij})^2"""
         error = model_ratings - explicit
         error = sparse_dense_multiply(sparse_dense_multiply(implicit, error), error)
-        loss = torch.sparse.sum(error) / error._values().numel()
+        loss = torch.sparse.sum(error) / error.values().numel()
         return loss
 
 
 class PersonalizedRankingLoss:
-    def __init__(self, confidence_in_rating_quality=0.9, memory_upper_bound=1e8):
+    def __init__(
+        self, max_rating, confidence_in_rating_quality=0.9, memory_upper_bound=1e8
+    ):
         """
         Ranking based loss inspired by Bayesian Personalized Ranking paper.
 
+        :param max_rating: maximum value on the ratings scale
         :param confidence_in_rating_quality: probability that item with best rating
         is more relevant than an unrated item
         :param memory_upper_bound: O(n) bound on size of tensor that can fit in the memory
         """
-        self.confidence_in_rating_quality = confidence_in_rating_quality
+        self.scaling_coefficient = confidence_in_rating_quality * (
+            1 + torch.e**-max_rating
+        )
         self.memory_upper_bound = memory_upper_bound
 
     @staticmethod
@@ -35,18 +50,18 @@ class PersonalizedRankingLoss:
         self, ratings_of_supposedly_better_items, ratings_of_supposedly_worse_items
     ):
         """
-        Given two rating matrices A, B of shape (n_users, n_items),
-        returns matrix C of shape (n_users, n_items, n_items) such that
-        C[u, i, j] = Probability({user u prefers item A[u, i] over B[u, j]})
+        Given two rating matrices A, B of shape (n_users, n_items) corresponding
+        to the same users, returns matrix C of shape (n_users, n_items, n_items)
+        such that C[u, i, j] = Probability({user u prefers item A[u, i] over B[u, j]})
         """
-        scaling_coefficient = self.confidence_in_rating_quality * (1 + np.e**-1)
         # Now P(item with rating 1 is more relevant than unrated item) =
         # = scaling_coefficient * sigmoid(1 - 0) = confidence_in_rating_quality
-        return scaling_coefficient * torch.sigmoid(
+        probability = torch.sigmoid(
             self.pairwise_difference(
                 ratings_of_supposedly_better_items, ratings_of_supposedly_worse_items
             )
         )
+        return self.scaling_coefficient * probability
 
     @staticmethod
     def kl_divergence(
@@ -97,16 +112,17 @@ class PersonalizedRankingLoss:
         return kl_divergence + complementary_kl_divergence
 
     def get_dense_and_unrated_splits(self, explicit):
-        users_who_rated_something = explicit._indices()[0].unique()
-        rated_items, counts = explicit._indices()[1].unique(return_counts=True)
+        users_who_rated_something = explicit.indices()[0].unique()
+        rated_items, counts = explicit.indices()[1].unique(return_counts=True)
 
         n_users, n_items = explicit.size()
-        discriminant = n_items**2 - 4 * self.hparams["memory_upper_bound"] / n_users
+        discriminant = n_items**2 - 4 * self.memory_upper_bound / n_users
         if discriminant > 0:
             n_rated_items_upper_bound = (n_items - discriminant**0.5) // 2
             if len(rated_items) > n_rated_items_upper_bound:
-                self.log(
-                    "n_clipped_items", len(rated_items) - n_rated_items_upper_bound
+                n_clipped_items = len(rated_items) - n_rated_items_upper_bound
+                wandb.log(
+                    {"number of clipped items because of memory bound": n_clipped_items}
                 )
                 rated_items = rated_items[
                     counts.argsort(descending=True)[:n_rated_items_upper_bound]
@@ -122,10 +138,6 @@ class PersonalizedRankingLoss:
     def split_explicit_feedback_and_ratings_into_dense_and_unrated(
         self, explicit, model_ratings
     ):
-        assert (
-            explicit._values().min() >= 0 and explicit._values().max() <= 1
-        ), "Explicit feedback is not normalized."
-
         (
             users_who_rated_something,
             rated_items,
@@ -148,8 +160,8 @@ class PersonalizedRankingLoss:
         )
 
     def __call__(self, *, explicit, model_ratings, implicit=None):
-        explicit = explicit.coalesce()
-        if explicit._values().numel() == 0:
+        explicit = explicit.to_sparse_coo().coalesce()
+        if explicit.values().numel() == 0:
             return 0
 
         (
@@ -178,20 +190,20 @@ class PersonalizedRankingLoss:
         dense_cutout_mask[
             :, (arange := torch.arange(dense_cutout_mask.shape[-1])), arange
         ] = False
-        rated_unrated_mask = einops.repeat(
-            unrated_items_in_dense_cutout,
-            f"user item -> user item {unrated_items_model_ratings.shape[1]}",
-        )
-
         assert dense_cutout_mask.shape == dense_cutout_kl_divergence.shape
-        assert rated_unrated_mask.shape == rated_unrated_kl_divergence.shape
+        loss = (dense_cutout_mask * dense_cutout_kl_divergence).sum()
+        n_items_contributing_to_loss = dense_cutout_mask.sum()
 
-        loss = (dense_cutout_mask * dense_cutout_kl_divergence).sum() + (
-            rated_unrated_mask * rated_unrated_kl_divergence
-        ).sum()
+        if n_unrated_items := unrated_items_model_ratings.shape[1]:
+            rated_unrated_mask = einops.repeat(
+                unrated_items_in_dense_cutout,
+                f"user item -> user item {n_unrated_items}",
+            )
+            assert rated_unrated_mask.shape == rated_unrated_kl_divergence.shape
+            loss += (rated_unrated_mask * rated_unrated_kl_divergence).sum()
+            n_items_contributing_to_loss += rated_unrated_mask.sum()
 
-        loss /= dense_cutout_mask.sum() + rated_unrated_mask.sum()
-
+        loss /= n_items_contributing_to_loss
         return loss
 
 
@@ -204,7 +216,7 @@ class PersonalizedRankingLossMemoryEfficient(PersonalizedRankingLoss):
 
     def __call__(self, *, explicit, model_ratings, implicit=None):
         implicit = implicit.coalesce()
-        ids_of_users_who_rated_something = implicit._indices()[0].unique()
+        ids_of_users_who_rated_something = implicit.indices()[0].unique()
         if ids_of_users_who_rated_something.numel() == 0:
             return None
 
@@ -214,7 +226,7 @@ class PersonalizedRankingLossMemoryEfficient(PersonalizedRankingLoss):
         criterion = 0
         for i, user_id in enumerate(ids_of_users_who_rated_something):
             implicit_user_feedback = implicit[user_id]
-            liked_item_ids = implicit_user_feedback._indices().squeeze()
+            liked_item_ids = implicit_user_feedback.indices().squeeze()
             items_mask[:] = True
             items_mask[liked_item_ids] = False
             uninteracted_item_ids = item_ids[items_mask]

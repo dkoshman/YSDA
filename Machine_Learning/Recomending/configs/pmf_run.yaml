@@ -1,16 +1,20 @@
-pmf_run_mse_loss:
-  yaml:
 project: Recommending
 name: "PMF run"
 model:
   name: ProbabilityMatrixFactorization
   latent_dimension: 10
   weight_decay: 1.0e-3
+loss:
+  name: PersonalizedRankingLoss
+datamodule:
+  name: PMFDataModule
+  directory: local/ml-100k
+  batch_size: 100
+  num_workers: 0
+metrics:
+  k: [10, 20]
 lightning_module:
   name: LitProbabilityMatrixFactorization
-  loss: implicit_aware_sparse_loss
-  batch_size: 1.0e+8
-  num_workers: 4
 optimizer:
   name: Adam
 trainer:
@@ -18,7 +22,7 @@ trainer:
   accelerator: gpu
   devices: [0]
   default_root_dir: local
-  check_val_every_n_epoch: 3
+  check_val_every_n_epoch: 5
   amp_backend: native
   log_every_n_steps: 1
 callbacks:
@@ -34,7 +38,6 @@ callbacks:
     swa_epoch_start: 10
     annealing_epochs: 5
     annealing_strategy: cos
-  ConvenientCheckpointLogCallback: {}
 logger:
   name: WandbLogger
   save_dir: local

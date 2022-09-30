@@ -1,0 +1,19 @@
+project: Recommending
+name: "BPMF run"
+model:
+  name: BayesianPMF
+  n_feature_dimensions: 10
+  burn_in_steps: 10
+  keeper_steps: 10
+  predictive_explicit_precision: 1
+  features_hyper_precision_coefficient: 1
+datamodule:
+  name: MovieLensDataModule
+  directory: local/ml-100k
+  batch_size: 100
+  num_workers: 4
+metrics:
+  k: [10, 20]
+logger:
+  name: WandbLogger
+  save_dir: local

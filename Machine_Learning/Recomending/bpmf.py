@@ -5,7 +5,18 @@ import numba
 import numpy as np
 import scipy
 import torch
+
+from my_tools.entrypoints import ConfigConstructorBase
 from tqdm.auto import tqdm
+
+from data import MovieLensDataModule
+from entrypoints import (
+    RecommendingConfigDispenser,
+    MovielensDispatcher,
+    MovielensTester,
+    Recommender,
+)
+from metrics import RecommendingMetricsCallback, RecommendingIMDBCallback
 
 
 class BayesianPMF:
@@ -250,7 +261,7 @@ class BayesianPMF:
         mode_means = torch.gather(means, 0, step_ids_with_highest_mean_pdf[None])[0]
         return mode_means
 
-    def recommend(self, user_ids, aggregation_method: Literal["mean", "mode"] = "mean"):
+    def __call__(self, user_ids, aggregation_method: Literal["mean", "mode"] = "mean"):
         match aggregation_method:
             case "mean":
                 return self.aggregate_prediction_mean(user_ids)
@@ -258,3 +269,80 @@ class BayesianPMF:
                 return self.aggregate_prediction_mode_approximation(user_ids)
             case _:
                 raise ValueError(f"Unknown aggregation method {aggregation_method}")
+
+
+class BPMFDispatcher(ConfigConstructorBase):
+    def main(self):
+        self.datamodule = self.build_datamodule([MovieLensDataModule])
+        self.model = self.build_class(
+            class_candidates=[BayesianPMF],
+            explicit=self.datamodule.train_explicit,
+            **self.config["model"],
+        )
+        self.model.fit()
+        self.callbacks = self.build_callbacks()
+        self.epoch("val")
+        self.epoch("test")
+
+    def epoch(self, kind: Literal["val", "test"]):
+        match kind:
+            case "val":
+                dataloader = self.datamodule.val_dataloader()
+            case "test":
+                dataloader = self.datamodule.test_dataloader()
+            case _:
+                raise ValueError(f"Unknown epoch type {kind}")
+
+        metrics_callbacks = filter(
+            lambda x: isinstance(x, RecommendingMetricsCallback),
+            self.callbacks.values(),
+        )
+        imdb_callbacks = filter(
+            lambda x: isinstance(x, RecommendingIMDBCallback), self.callbacks.values()
+        )
+
+        if dataloader:
+            for batch in dataloader:
+                user_ids = batch["user_ids"]
+                ratings = self.model(user_ids=user_ids.numpy())
+                for callback in metrics_callbacks:
+                    callback.log_batch(
+                        user_ids=user_ids, ratings=torch.from_numpy(ratings)
+                    )
+
+            for callback in metrics_callbacks:
+                match kind:
+                    case "val":
+                        callback.on_validation_epoch_end()
+                    case "test":
+                        callback.on_test_epoch_end()
+
+            for callback in imdb_callbacks:
+                recommender = Recommender(self.datamodule.train_explicit, self.model)
+                recommendations = recommender(
+                    users_explicit_feedback=callback.explicit_feedback
+                )
+                callback.log_recommendation(recommendations)
+
+
+class BPMFTuner(BPMFDispatcher, MovielensDispatcher):
+    pass
+
+
+class BPMFTester(BPMFDispatcher, MovielensTester):
+    pass
+
+
+@RecommendingConfigDispenser
+def main(config):
+    match stage := config["stage"]:
+        case "tune":
+            BPMFTuner(config).tune()
+        case "test":
+            BPMFTester(config).test()
+        case _:
+            raise ValueError(f"Unknown stage {stage}.")
+
+
+if __name__ == "__main__":
+    main()

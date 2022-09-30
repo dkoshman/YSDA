@@ -1,6 +1,7 @@
 import functools
 import itertools
 import os
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -9,6 +10,7 @@ import torch
 
 from scipy.sparse import coo_matrix, csr_matrix
 from torch.utils.data import Dataset, DataLoader
+
 from utils import torch_sparse_slice
 
 
@@ -16,28 +18,13 @@ class SparseDataset(Dataset):
     def __init__(
         self,
         explicit_feedback: csr_matrix,
-        normalize=True,
-        lower_outlier_quantile=0,
-        upper_outlier_quantile=1,
+        normalize=False,
     ):
         self.explicit_feedback = explicit_feedback
         if normalize:
-            self.explicit_feedback = self.normalize_feedback(
-                explicit_feedback, lower_outlier_quantile, upper_outlier_quantile
+            self.explicit_feedback = (
+                self.explicit_feedback / self.explicit_feedback.max()
             )
-
-    @staticmethod
-    def normalize_feedback(
-        feedback: csr_matrix, lower_outlier_quantile=0, upper_outlier_quantile=1
-    ):
-        """Clip outliers and project values to the [0, 1] interval."""
-        data = feedback.data
-        lower = np.quantile(data, lower_outlier_quantile)
-        upper = np.quantile(data, upper_outlier_quantile)
-        data = np.clip(data, lower, upper)
-        data = (data - lower) / (upper - lower)
-        feedback.data = data
-        return feedback
 
     def __len__(self):
         return self.explicit_feedback.shape[0]
@@ -46,11 +33,14 @@ class SparseDataset(Dataset):
     def shape(self):
         return self.explicit_feedback.shape
 
-    def __getitem__(self, user_ids, item_ids=None):
+    def __getitem__(self, indices):
         """
         Here's where implicit feedback is implicitly generated from explicit feedback.
         For datasets where only implicit feedback is available, override this logic.
         """
+        user_ids = indices.get("user_ids")
+        item_ids = indices.get("item_ids")
+
         explicit = torch_sparse_slice(self.explicit_feedback, user_ids, item_ids)
         implicit = explicit.bool().int()
         return dict(
@@ -62,6 +52,7 @@ class SparseDataset(Dataset):
 
     @staticmethod
     def pack_sparse_tensor(torch_sparse):
+        torch_sparse = torch_sparse.coalesce()
         sparse_kwargs = dict(
             indices=torch_sparse.indices(),
             values=torch_sparse.values(),
@@ -78,20 +69,9 @@ class SparseDataset(Dataset):
         return batch
 
 
-class SparseDataModuleMixin:
-    def on_after_batch_transfer(self, batch, dataloader_idx=0):
-        """
-        Need to manually pack and then unpack sparse torch matrices because
-        they are unsupported in Dataloaders as of the moment of writing.
-        """
-        return SparseDataset.unpack_sparse_kwargs_to_torch_sparse_coo(batch)
-
-
-class BatchSampler:
-    def __init__(self, n_items, batch_size, shuffle=True):
-        self.n_items = n_items
-        self.batch_size = batch_size
-        indices = torch.randperm(n_items) if shuffle else torch.arange(n_items)
+class Sampler:
+    def __init__(self, size, batch_size, shuffle=True):
+        indices = torch.randperm(size) if shuffle else torch.arange(size)
         self.batch_indices = torch.split(indices, batch_size)
 
     def __len__(self):
@@ -99,6 +79,16 @@ class BatchSampler:
 
     def __iter__(self):
         yield from self.batch_indices
+
+
+class UserSampler(Sampler):
+    def __iter__(self):
+        yield from ({"user_ids": i} for i in super().__iter__())
+
+
+class ItemSampler(Sampler):
+    def __iter__(self):
+        yield from ({"item_ids": i} for i in super().__iter__())
 
 
 class GridSampler:
@@ -135,32 +125,118 @@ class GridSampler:
         yield from ({"user_ids": i[0], "item_ids": i[1]} for i in batch_indices_product)
 
 
+class MovieLensDataModule(pytorch_lightning.LightningDataModule):
+    def __init__(
+        self,
+        directory,
+        train_explicit_file=None,
+        val_explicit_file=None,
+        test_explicit_file=None,
+        batch_size=1000,
+        num_workers=1,
+    ):
+        super().__init__()
+        self.common_dataloader_params = dict(
+            num_workers=num_workers, pin_memory=num_workers > 1, batch_size=None
+        )
+        self.movielens = MovieLens(directory)
+        self.n_users, self.n_items = self.movielens.shape
+        self.save_hyperparameters(ignore="movielens")
+
+    @property
+    def train_explicit(self):
+        if file := self.hparams["train_explicit_file"]:
+            return self.movielens.explicit_feedback_scipy_csr(file)
+
+    @property
+    def val_explicit(self):
+        if file := self.hparams["val_explicit_file"]:
+            return self.movielens.explicit_feedback_scipy_csr(file)
+
+    @property
+    def test_explicit(self):
+        if file := self.hparams["test_explicit_file"]:
+            return self.movielens.explicit_feedback_scipy_csr(file)
+
+    def build_dataloader(
+        self,
+        dataset=None,
+        sampler_type: Literal["grid", "user", "item"] = "user",
+        shuffle=False,
+    ):
+        if dataset is None:
+            return
+
+        match sampler_type:
+            case "grid":
+                batch_size = int(
+                    self.hparams["batch_size"] ** 2
+                    * dataset.shape[1]
+                    / dataset.shape[0]
+                )
+                sampler = GridSampler(
+                    dataset_shape=dataset.shape,
+                    approximate_batch_size=batch_size,
+                    shuffle=shuffle,
+                )
+            case "user":
+                sampler = UserSampler(
+                    size=dataset.shape[0],
+                    batch_size=self.hparams["batch_size"],
+                    shuffle=shuffle,
+                )
+            case "item":
+                sampler = ItemSampler(
+                    size=dataset.shape[1],
+                    batch_size=self.hparams["batch_size"],
+                    shuffle=shuffle,
+                )
+            case _:
+                ValueError(f"Unknown sampler type{sampler_type}")
+
+        dataloader = DataLoader(
+            dataset=dataset,
+            sampler=sampler,
+            **self.common_dataloader_params,
+        )
+        return dataloader
+
+    def on_after_batch_transfer(self, batch, dataloader_idx=0):
+        """
+        Need to manually pack and then unpack sparse torch matrices because
+        they are unsupported in Dataloaders as of the moment of writing.
+        """
+        return SparseDataset.unpack_sparse_kwargs_to_torch_sparse_coo(batch)
+
+
 class MovieLens:
-    def __init__(self, path_to_movielens_folder):
+    def __init__(self, path_to_movielens_folder="local/ml-100k"):
         self.path_to_movielens_folder = path_to_movielens_folder
 
-    def __getitem__(self, key):
-        match key:
+    def __getitem__(self, filename):
+        match filename:
             case "u.info":
                 return self.read(
-                    filename=key,
+                    filename=filename,
                     names=["quantity", "index"],
                     index_col="index",
                     sep=" ",
                 )
             case "u.genre":
-                return self.read(filename=key, names=["name", "id"], index_col="id")
+                return self.read(
+                    filename=filename, names=["name", "id"], index_col="id"
+                )
             case "u.occupation":
-                return self.read(filename=key, names=["occupation"])
+                return self.read(filename=filename, names=["occupation"])
             case "u.user":
                 return self.read(
-                    filename=key,
+                    filename=filename,
                     names=["user id", "age", "gender", "occupation", "zip code"],
                     index_col="user id",
                 )
             case "u.item":
                 return self.read(
-                    filename=key,
+                    filename=filename,
                     names=[
                         "movie id",
                         "movie title",
@@ -190,25 +266,26 @@ class MovieLens:
                     index_col="movie id",
                     encoding_errors="backslashreplace",
                 )
-        if key in ["u.data"] + [
+        if filename in ["u.data"] + [
             i + j
             for i in ["u1", "u2", "u3", "u4", "u5", "ua", "ub"]
             for j in [".base", ".test"]
         ]:
             return self.read(
-                filename=key,
+                filename=filename,
                 names=["user_id", "item_id", "rating", "timestamp"],
                 sep="\t",
                 dtype="int32",
             )
+        raise ValueError(f"File {filename} not found.")
 
     def read(self, filename, sep="|", header=None, **kwargs):
         path = os.path.join(self.path_to_movielens_folder, filename)
         dataframe = pd.read_csv(path, sep=sep, header=header, **kwargs)
         return dataframe.squeeze()
 
-    @functools.lru_cache
     @property
+    @functools.cache
     def shape(self):
         info = self["u.info"]
         return info["users"], info["items"]
@@ -220,74 +297,3 @@ class MovieLens:
         col_ids = dataframe["item_id"].to_numpy() - 1
         explicit_feedback = coo_matrix((data, (row_ids, col_ids)), shape=self.shape)
         return explicit_feedback.tocsr()
-
-    def sparse_dataset(self, name, **kwargs):
-        explicit = self.explicit_feedback_scipy_csr(name)
-        return SparseDataset(explicit, **kwargs)
-
-
-class MovieLensDataModule(SparseDataModuleMixin, pytorch_lightning.LightningDataModule):
-    def __init__(
-        self,
-        data_folder,
-        batch_size=10e8,
-        num_workers=1,
-        train_explicit_feedback_file=None,
-        val_explicit_feedback_file=None,
-        test_explicit_feedback_file=None,
-        val_dataset_fraction=0.1,
-    ):
-        super().__init__()
-        self.common_dataloader_params = dict(
-            num_workers=self.hparams["num_workers"],
-            pin_memory=self.hparams["num_workers"] > 1,
-        )
-        self.save_hyperparameters()
-        self.movielens = MovieLens(data_folder)
-
-    #     self.train_dataset, self.val_dataset = self.maybe_split_train_dataset()
-    #
-    # def maybe_split_train_dataset(self):
-    #     train_dataset = self.movielens.sparse_dataset(
-    #         self.hparams["train_explicit_feedback_file"]
-    #     )
-    #     if (val_file := self.hparams["val_explicit_feedback_file"]) is not None:
-    #         val_dataset = self.movielens.sparse_dataset(val_file)
-    #         return train_dataset, val_dataset
-    #
-    #     val_fraction = self.hparams["val_dataset_fraction"]
-    #     return torch.utils.data.random_split(
-    #         train_dataset, [(n := len(train_dataset)) - (m := int(val_fraction * n)), m]
-    #     )
-
-    def grid_dataloader(self, filename):
-        dataset = self.movielens.sparse_dataset(filename)
-        batch_size = (
-            self.hparams["batch_size"] * np.prod(dataset.shape) / dataset.shape[0]
-        )
-        sampler = GridSampler(
-            dataset_shape=dataset.shape,
-            approximate_batch_size=batch_size,
-            shuffle=True,
-        )
-        dataloader = DataLoader(
-            dataset=dataset, batch_sampler=sampler, **self.common_dataloader_params
-        )
-        return dataloader
-
-    def user_wise_dataloader(self, filename):
-        dataset = self.movielens.sparse_dataset(filename)
-        sampler = BatchSampler(len(dataset), self.hparams["batch_size"])
-        dataloader = DataLoader(
-            dataset=dataset, batch_sampler=sampler, **self.common_dataloader_params
-        )
-        return dataloader
-
-    def train_dataloader(self):
-        return self.grid_dataloader(self.hparams["train_explicit_feedback_file"])
-
-    def val_dataloader(self):
-        return self.user_wise_dataloader(self.hparams["val_explicit_feedback_file"])
-
-    def test_dataloader(self):
-        return self.user_wise_dataloader(self.hparams["test_explicit_feedback_file"])

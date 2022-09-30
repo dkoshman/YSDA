@@ -8,7 +8,7 @@ import pytorch_lightning as pl
 import wandb
 import yaml
 
-from my_tools.utils import get_class, full_traceback
+from my_tools.utils import full_traceback, build_class
 
 
 class WandbSweepDispatcher:
@@ -86,18 +86,10 @@ class WandbSweepDispatcher:
     @staticmethod
     def determine_config_depth(parameter):
         """How many insertions of "parameters" keys to perform for each config section."""
-        if parameter in {
-            "model",
-            "optimizer",
-            "trainer",
-            "logger",
-            "lightning_module",
-        }:
-            return 2
-        elif parameter in {"callbacks"}:
+        if parameter in {"callbacks"}:
             return 3
         else:
-            raise ValueError(f"Unknown parameter name {parameter}")
+            return 2
 
     def dispatch(self):
         wandb.agent(
@@ -161,7 +153,14 @@ class ConfigDispenser:
             )
         )
         config["lightning_module"]["num_workers"] = 1
-        # del config["logger"]
+        del config["logger"]
+        return config
+
+    def update_config(self, config: dict) -> dict:
+        """
+        Overwrite this method to modify config before it gets dispensed.
+        It isn't called when performing a sweep for consistency between runs.
+        """
         return config
 
     @property
@@ -215,6 +214,7 @@ class ConfigDispenser:
             config["trainer"]["accelerator"] = "gpu"
             config["trainer"]["devices"] = [gpu]
         config.update(args)
+        config = self.update_config(config)
         self.main(config)
 
     __call__ = launch
@@ -244,51 +244,73 @@ class ConfigConstructorBase(abc.ABC):
         super().__init__()
         self.config = config.copy()
 
-    @abc.abstractmethod
+    @property
+    def build_class(self):
+        return build_class
+
     def main(self):
-        """Example of intended class usage."""
-        lightning_module = self.build_lightning_module(type("MyLightningModuleClass"))
-        datamodule = self.build_datamodule(type("MyDatamodule"))
+        """Example implementation, feel free to override."""
+        lightning_module = self.build_lightning_module()
+        datamodule = self.build_datamodule()
         trainer = self.build_trainer()
         trainer.fit(lightning_module, datamodule=datamodule)
         trainer.test(lightning_module, datamodule=datamodule)
 
-    def build_lightning_module(self, lightning_candidates):
+    def lightning_candidates(self):
+        return ()
+
+    def datamodule_candidates(self):
+        return ()
+
+    def callback_candidates(self):
+        return ()
+
+    def build_lightning_module(self, lightning_candidates=()):
+        lightning_candidates = list(lightning_candidates) + list(
+            self.lightning_candidates()
+        )
         lightning_config = self.config["lightning_module"]
-        lightning_name = lightning_config.pop("name")
-        LightningModule = get_class(lightning_name, lightning_candidates)
-        lightning_module = LightningModule(
-            model_config=self.config["model"],
-            optimizer_config=self.config["optimizer"],
+        lightning_module = self.build_class(
+            class_candidates=lightning_candidates,
             **lightning_config,
+            model_config=self.config["model"],
+            loss_config=self.config["loss"],
+            optimizer_config=self.config["optimizer"],
         )
         return lightning_module
 
-    def build_datamodule(self, datamodule_candidates):
-        datamodule_config = self.config["datamodule"]
-        datamodule_name = datamodule_config.pop("name")
-        Datamodule = get_class(datamodule_name, datamodule_candidates)
-        datamodule = Datamodule(**datamodule_config)
+    def build_datamodule(self, datamodule_candidates=()):
+        datamodule_candidates = list(datamodule_candidates) + list(
+            self.datamodule_candidates()
+        )
+        datamodule = self.build_class(
+            class_candidates=datamodule_candidates, **self.config["datamodule"]
+        )
         return datamodule
 
     def build_callbacks(self, callback_candidates=()) -> dict:
+        callback_candidates = list(callback_candidates) + list(
+            self.callback_candidates()
+        )
         callbacks = {}
         if callbacks_config := self.config.get("callbacks"):
             for callback_name, single_callback_config in callbacks_config.items():
-                Callback = get_class(
-                    callback_name,
+                callback = self.build_class(
                     class_candidates=callback_candidates,
-                    modules_to_try_to_import_from=[pl.callbacks],
+                    modules=[pl.callbacks],
+                    **single_callback_config,
+                    name=callback_name,
                 )
-                callbacks[callback_name] = Callback(**single_callback_config)
+                callbacks[callback_name] = callback
         return callbacks
 
     def build_logger(self):
         if logger_config := self.config.get("logger"):
-            logger_config["project"] = self.config.get("project")
-            logger_name = logger_config.pop("name")
-            Logger = get_class(logger_name, modules_to_try_to_import_from=[pl.loggers])
-            logger = Logger(**logger_config)
+            logger = self.build_class(
+                modules=[pl.loggers],
+                **logger_config,
+                project=self.config.get("project"),
+            )
             return logger
 
     def build_trainer(self, callback_candidates=()):

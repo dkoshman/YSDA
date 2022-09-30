@@ -27,7 +27,9 @@ class OptimizerBuilder:
             case "adam":
                 optimizer = torch.optim.Adam(module.parameters(), lr=initial_lr)
             case "sgd_with_momentum":
-                optimizer = torch.optim.SGD(module.parameters(), lr=initial_lr, momentum=0.9)
+                optimizer = torch.optim.SGD(
+                    module.parameters(), lr=initial_lr, momentum=0.9
+                )
             case _:
                 raise RuntimeError(f"Invalid optimizer '{self.optimizer_name}'")
 
@@ -36,19 +38,18 @@ class OptimizerBuilder:
                 scheduler = None
             case "cosine":
                 scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                    optimizer,
-                    T_0=10
+                    optimizer, T_0=10
                 )
             case "cycle":
                 scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                    optimizer,
-                    max_lr=self.max_lr,
-                    total_steps=30
+                    optimizer, max_lr=self.max_lr, total_steps=30
                 )
             case "lambda":
                 scheduler = torch.optim.lr_scheduler.LambdaLR(
                     optimizer,
-                    lr_lambda=LRLambda(num_parameters=sum(p.numel() for p in module.parameters())),
+                    lr_lambda=LRLambda(
+                        num_parameters=sum(p.numel() for p in module.parameters())
+                    ),
                 )
             case _:
                 raise RuntimeError(f"Invalid scheduler '{self.scheduler_name}'")

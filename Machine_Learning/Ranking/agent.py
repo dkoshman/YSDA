@@ -50,7 +50,10 @@ class Agent:
                     hidden_dimensions=[len(data["vectorizer"].vocabulary_)]
                     + config.hidden_dimensions,
                     head_dimensions=[
-                        1 + data["train_dataset"][0]["pairwise_numeric_features"].shape[-1]
+                        1
+                        + data["train_dataset"][0]["pairwise_numeric_features"].shape[
+                            -1
+                        ]
                     ]
                     + config.head_dimensions,
                 )

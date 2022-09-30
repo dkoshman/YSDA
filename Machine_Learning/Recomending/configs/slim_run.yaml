@@ -4,17 +4,27 @@ model:
   name: SLIM
   l2_coefficient: 1.0
   l1_coefficient: 1.0
-lightning_module:
-  train_path: "local/train_explicit.npz"
-  val_path: "local/val_explicit.npz"
-  name: LitSLIM
+loss:
+  name: PersonalizedRankingLoss
+  max_rating: 5
+datamodule:
+  name: SLIMDataModule
+  directory: local/ml-100k
   batch_size: 100
-  num_workers: 4
+  num_workers: 0
+callbacks:
+  SLIMRecommendingIMDBCallback:
+    path_to_imdb_ratings_csv: "local/my_imdb_ratings.csv"
+    path_to_movielens_folder: "local/ml-100k"
+    k: 10
+  SLIMRecommendingMetricsCallback:
+    directory: "local/ml-100k"
+    k: [10, 20]
+lightning_module:
+  name: LitSLIM
 optimizer:
   name: Adam
 trainer:
-  accelerator: gpu
-  devices: [3]
   reload_dataloaders_every_n_epochs: 1
   accumulate_grad_batches: 1
   enable_model_summary: false
@@ -23,8 +33,6 @@ trainer:
   default_root_dir: local
   num_sanity_val_steps: 0
   max_epochs: -1
-callbacks:
-  ConvenientCheckpointLogCallback: {}
 logger:
   name: WandbLogger
   save_dir: local

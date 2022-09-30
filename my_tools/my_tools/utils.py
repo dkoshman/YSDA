@@ -76,7 +76,7 @@ def timeit(func):
     return _time_it
 
 
-def get_class(class_name, class_candidates=None, modules_to_try_to_import_from=()):
+def get_class(class_name, class_candidates=(), modules_to_try_to_import_from=()):
     for cls in class_candidates:
         if cls.__name__ == class_name:
             return cls
@@ -87,6 +87,16 @@ def get_class(class_name, class_candidates=None, modules_to_try_to_import_from=(
         f"Class {class_name} not found in classes {class_candidates}\n"
         f"or modules{modules_to_try_to_import_from}"
     )
+
+
+def build_class(class_candidates=(), modules=(), **kwargs):
+    class_name = kwargs.pop("name")
+    cls = get_class(
+        class_name,
+        class_candidates=class_candidates,
+        modules_to_try_to_import_from=modules,
+    )
+    return cls(**kwargs)
 
 
 class StoppingMonitor:
