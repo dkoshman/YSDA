@@ -1,3 +1,5 @@
+import copy
+
 import numpy as np
 import scipy
 import torch
@@ -9,10 +11,16 @@ import metrics
 import pmf
 import slim
 
-CONFIG_BASE = dict(
-    config_path="configs/config_for_testing.yaml",
-    logger=dict(name="WandbLogger", offline=True, anonymous=True, save_dir="local"),
-)
+
+def get_config_base():
+    config_base = dict(
+        config_path="configs/config_for_testing.yaml",
+        logger=dict(name="WandbLogger", offline=True, anonymous=True, save_dir="local"),
+        datamodule=dict(
+            name="MovieLensDataModule", directory="local/ml-100k", batch_size=100
+        ),
+    )
+    return copy.deepcopy(config_base)
 
 
 def test_mark_duplicate_recommended_items_as_invalid():
@@ -109,98 +117,86 @@ def test_normalized_discounted_cumulative_gain():
 
 
 def test_slim():
-    slim.main(
-        **CONFIG_BASE,
-        model=dict(name="SLIM"),
-        datamodule=dict(name="SLIMDataModule", directory="local/ml-100k"),
-        lightning_module=dict(name="LitSLIM"),
-    )
+    config = get_config_base()
+    config["datamodule"]["name"] = "SLIMDataModule"
+    slim.main(**config, model=dict(name="SLIM"), lightning_module=dict(name="LitSLIM"))
 
 
 def test_pmf():
+    config = get_config_base()
+    config["datamodule"]["name"] = "PMFDataModule"
     pmf.main(
-        **CONFIG_BASE,
+        **config,
         model=dict(name="ProbabilityMatrixFactorization"),
-        datamodule=dict(name="PMFDataModule", directory="local/ml-100k"),
         lightning_module=dict(name="LitProbabilityMatrixFactorization"),
     )
 
 
 def test_als():
     for als_name in ["ALS", "ALSjit", "ALSjitBiased"]:
-        als.main(
-            **CONFIG_BASE,
-            model=dict(name=als_name),
-            datamodule=dict(name="MovieLensDataModule", directory="local/ml-100k"),
+        als.main(**get_config_base(), model=dict(name=als_name))
+
+
+def test_RecommendingMetrics():
+    k = 10
+    for _ in range(10):
+        explicit = np.random.choice(
+            a=5, size=(1000, 100), p=[0.90, 0.01, 0.02, 0.03, 0.04]
         )
+        explicit = scipy.sparse.coo_matrix(explicit).tocsr()
+        recommending_metrics_atk = metrics.RecommendingMetrics(explicit, k=k)
+        recommending_metrics = metrics.RecommendingMetrics(explicit, k=None)
+
+        for _ in range(10):
+            n_users = 100
+            user_ids = torch.tensor(
+                np.random.choice(explicit.shape[0], size=n_users, replace=False)
+            )
+            ratings = torch.tensor(np.random.randn(n_users, explicit.shape[1]))
+            metrics_dict_atk = recommending_metrics_atk.torch_batch_metrics(
+                user_ids, ratings
+            )
+            metrics_dict_atk = {k.split("@")[0]: v for k, v in metrics_dict_atk.items()}
+            metrics_dict = recommending_metrics.torch_batch_metrics(user_ids, ratings)
+
+            target = torch.tensor((explicit[user_ids] > 0).toarray())
+            assert np.isclose(
+                metrics_dict_atk["hitrate"],
+                np.mean(
+                    [
+                        tm.functional.retrieval_hit_rate(preds=r, target=t, k=k)
+                        for r, t in zip(ratings, target)
+                    ]
+                ),
+            )
+            assert np.isclose(
+                metrics_dict["map"],
+                np.mean(
+                    [
+                        tm.functional.retrieval_average_precision(preds=r, target=t)
+                        for r, t in zip(ratings, target)
+                    ]
+                ),
+            )
+            assert np.isclose(
+                metrics_dict["mrr"],
+                np.mean(
+                    [
+                        tm.functional.retrieval_reciprocal_rank(preds=r, target=t)
+                        for r, t in zip(ratings, target)
+                    ]
+                ),
+            )
+            assert np.isclose(
+                metrics_dict_atk["ndcg"],
+                np.mean(
+                    [
+                        tm.functional.retrieval_normalized_dcg(preds=r, target=t, k=k)
+                        for r, t in zip(ratings, target)
+                    ]
+                ),
+            )
 
 
-#
-#
-# def test_RecommendingMetrics():
-#     k = 10
-#     for _ in range(10):
-#         explicit = np.random.choice(
-#             a=5, size=(1000, 100), p=[0.90, 0.01, 0.02, 0.03, 0.04]
-#         )
-#         explicit = scipy.sparse.coo_matrix(explicit).tocsr()
-#         recommending_metrics_atk = metrics.RecommendingMetrics(explicit, k=k)
-#         recommending_metrics = metrics.RecommendingMetrics(explicit, k=None)
-#
-#         for _ in range(10):
-#             n_users = 100
-#             user_ids = torch.tensor(
-#                 np.random.choice(explicit.shape[0], size=n_users, replace=False)
-#             )
-#             ratings = torch.tensor(np.random.randn(n_users, explicit.shape[1]))
-#             metrics_dict_atk = recommending_metrics_atk.torch_batch_metrics(
-#                 user_ids, ratings
-#             )
-#             metrics_dict_atk = {k.split("@")[0]: v for k, v in metrics_dict_atk.items()}
-#             metrics_dict = recommending_metrics.torch_batch_metrics(user_ids, ratings)
-#
-#             target = torch.tensor((explicit[user_ids] > 0).toarray())
-#             assert np.isclose(
-#                 metrics_dict_atk["hitrate"],
-#                 np.mean(
-#                     [
-#                         tm.functional.retrieval_hit_rate(preds=r, target=t, k=k)
-#                         for r, t in zip(ratings, target)
-#                     ]
-#                 ),
-#             )
-#             assert np.isclose(
-#                 metrics_dict["map"],
-#                 np.mean(
-#                     [
-#                         tm.functional.retrieval_average_precision(preds=r, target=t)
-#                         for r, t in zip(ratings, target)
-#                     ]
-#                 ),
-#             )
-#             assert np.isclose(
-#                 metrics_dict["mrr"],
-#                 np.mean(
-#                     [
-#                         tm.functional.retrieval_reciprocal_rank(preds=r, target=t)
-#                         for r, t in zip(ratings, target)
-#                     ]
-#                 ),
-#             )
-#             assert np.isclose(
-#                 metrics_dict_atk["ndcg"],
-#                 np.mean(
-#                     [
-#                         tm.functional.retrieval_normalized_dcg(preds=r, target=t, k=k)
-#                         for r, t in zip(ratings, target)
-#                     ]
-#                 ),
-#             )
-#
-#
-# def test_bpmf():
-#     bpmf.main(
-#         **CONFIG_BASE,
-#         datamodule=dict(name="MovieLensDataModule", directory="local/ml-100k"),
-#         model=dict(name="BayesianPMF"),
-#     )
+def test_bpmf():
+    bpmf.main(**get_config_base(), model=dict(name="BayesianPMF"))
