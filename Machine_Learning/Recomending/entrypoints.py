@@ -1,17 +1,18 @@
 import abc
-from abc import ABC
+from typing import Literal
 
 import numpy as np
 import pytorch_lightning as pl
 import torch
 import wandb
 
-from Machine_Learning.Recomending.data import MovieLensDataModule
-from my_tools.entrypoints import ConfigConstructorBase, ConfigDispenser
+from my_tools.entrypoints import ConfigConstructorBase
 from my_tools.utils import build_class
 
 import losses
-from metrics import RecommendingMetricsCallback, RecommendingIMDBCallback, ImdbRatings
+
+from data import MovieLensDataModule
+from metrics import RecommendingMetricsCallback, RecommendingIMDBCallback
 from nearest_neighbours import NearestNeighbours
 
 
@@ -93,7 +94,7 @@ class Recommender:
             similar_ratings = self.model(user_ids=similar_users)
             if isinstance(similar_ratings, np.ndarray):
                 similar_ratings = torch.from_numpy(similar_ratings).to(torch.float32)
-            ratings[i] = similar_ratings.T @ similarity
+            ratings[i] = similar_ratings.transpose(0, 1) @ similarity
         return ratings
 
     def __call__(
@@ -130,58 +131,53 @@ class Recommender:
         return recommendations
 
 
-class RecommendingConfigDispenser(ConfigDispenser):
-    def parser(self, parser):
-        parser.add_argument(
-            "--stage",
-            "-s",
-            default="tune",
-            type=str,
-            help="One of: tune, test.",
-            nargs="?",
-        )
-        return parser
-
-    def update_config(self, config: dict) -> dict:
-        if "trainer" in config:
-            config["trainer"].update(devices=None, accelerator=None)
-        return config
-
-
 class MovielensDispatcher(ConfigConstructorBase, abc.ABC):
+    def __init__(self, config):
+        if "callbacks" not in config:
+            config["callbacks"] = {}
+        config["callbacks"].update(
+            RecommendingIMDBCallback=dict(
+                path_to_imdb_ratings_csv="local/my_imdb_ratings.csv",
+                path_to_movielens_folder="local/ml-100k",
+                k=10,
+            ),
+            RecommendingMetricsCallback=dict(directory="local/ml-100k", k=[10, 20]),
+        )
+        super().__init__(config)
+
     def datamodule_candidates(self):
         return (MovieLensDataModule,)
 
     def callback_candidates(self):
         return RecommendingIMDBCallback, RecommendingMetricsCallback
 
-    def test_datasets_iter(self):
-        for i in [2, 3, 4, 5]:
-            self.config["datamodule"].update(
-                dict(
-                    train_explicit_file=f"u{i}.base",
-                    test_explicit_file=f"u{i}.test",
-                    # tmp before other early stopping is implemented
-                    val_explicit_file=f"u{i}.test",
-                )
-            )
-            yield
-
     def update_tune_data(self):
         self.config["datamodule"].update(
             dict(
                 train_explicit_file="u1.base",
                 val_explicit_file="u1.test",
+                test_explicit_file="u1.test",
             )
         )
 
     def tune(self):
         self.update_tune_data()
         if wandb.run is None and self.config.get("logger") is not None:
-            with wandb.init(project=self.config["project"], config=self.config):
+            with wandb.init(project=self.config.get("project"), config=self.config):
                 return self.main()
         else:
             return self.main()
+
+    def test_datasets_iter(self):
+        for i in [2, 3, 4, 5]:
+            self.config["datamodule"].update(
+                dict(
+                    train_explicit_file=f"u{i}.base",
+                    val_explicit_file=f"u{i}.base",
+                    test_explicit_file=f"u{i}.test",
+                )
+            )
+            yield
 
     def test(self):
         with wandb.init(project=self.config["project"], config=self.config):
@@ -189,10 +185,62 @@ class MovielensDispatcher(ConfigConstructorBase, abc.ABC):
                 self.main()
 
     def dispatch(self):
-        match stage := self.config.get("stage"):
-            case "tune":
-                self.tune()
+        if self.config.get("stage") == "test":
+            self.test()
+        else:
+            self.tune()
+
+
+class NonLightningDispatcher(MovielensDispatcher):
+    def build_model(self):
+        raise NotImplementedError
+
+    def main(self):
+        self.datamodule = self.build_datamodule([MovieLensDataModule])
+        self.model = self.build_model()
+        self.callbacks = self.build_callbacks()
+
+        self.model.fit()
+        self.log("val")
+        self.log("test")
+
+    def log(self, kind: Literal["val", "test"]):
+        match kind:
+            case "val":
+                dataloader = self.datamodule.val_dataloader()
             case "test":
-                self.test()
+                dataloader = self.datamodule.test_dataloader()
             case _:
-                raise ValueError(f"Unknown stage {stage}.")
+                raise ValueError(f"Unknown epoch type {kind}")
+
+        metrics_callbacks = filter(
+            lambda x: isinstance(x, RecommendingMetricsCallback),
+            self.callbacks.values(),
+        )
+        imdb_callbacks = filter(
+            lambda x: isinstance(x, RecommendingIMDBCallback),
+            self.callbacks.values(),
+        )
+
+        if dataloader:
+            for batch in dataloader:
+                user_ids = batch["user_ids"]
+                ratings = self.model(user_ids=user_ids.numpy())
+                for callback in metrics_callbacks:
+                    callback.log_batch(
+                        user_ids=user_ids, ratings=torch.from_numpy(ratings), kind=kind
+                    )
+
+            for callback in metrics_callbacks:
+                match kind:
+                    case "val":
+                        callback.on_validation_epoch_end()
+                    case "test":
+                        callback.on_test_epoch_end()
+
+            for callback in imdb_callbacks:
+                recommender = Recommender(self.datamodule.train_explicit, self.model)
+                recommendations = recommender(
+                    users_explicit_feedback=callback.explicit_feedback
+                )
+                callback.log_recommendation(recommendations)

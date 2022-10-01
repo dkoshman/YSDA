@@ -1,0 +1,8 @@
+loss:
+  name: MSELoss
+optimizer:
+  name: Adam
+trainer:
+  fast_dev_run: true
+  default_root_dir: local
+  enable_progress_bar: false

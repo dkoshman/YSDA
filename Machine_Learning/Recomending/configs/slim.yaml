@@ -1,23 +1,25 @@
 project: Recommending
 name: "SLIM debug run"
+#stage: test
 model:
   name: SLIM
-  l2_coefficient: 1.0
-  l1_coefficient: 1.0
+  l2_coefficient: 1.0e-4
+  l1_coefficient: 1.0e-4
 loss:
-  name: PersonalizedRankingLoss
-  max_rating: 5
+  name: MSELoss
+#  name: PersonalizedRankingLoss
+#  max_rating: 5
 datamodule:
   name: SLIMDataModule
   directory: local/ml-100k
   batch_size: 100
   num_workers: 0
 callbacks:
-  SLIMRecommendingIMDBCallback:
+  RecommendingIMDBCallback:
     path_to_imdb_ratings_csv: "local/my_imdb_ratings.csv"
     path_to_movielens_folder: "local/ml-100k"
     k: 10
-  SLIMRecommendingMetricsCallback:
+  RecommendingMetricsCallback:
     directory: "local/ml-100k"
     k: [10, 20]
 lightning_module:
@@ -25,10 +27,12 @@ lightning_module:
 optimizer:
   name: Adam
 trainer:
+  accelerator: gpu
+  devices: [2]
   reload_dataloaders_every_n_epochs: 1
   accumulate_grad_batches: 1
   enable_model_summary: false
-  val_check_interval: 10
+  limit_val_batches: 0
   log_every_n_steps: 1
   default_root_dir: local
   num_sanity_val_steps: 0

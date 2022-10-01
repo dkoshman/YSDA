@@ -15,16 +15,8 @@ from utils import torch_sparse_slice
 
 
 class SparseDataset(Dataset):
-    def __init__(
-        self,
-        explicit_feedback: csr_matrix,
-        normalize=False,
-    ):
+    def __init__(self, explicit_feedback: csr_matrix):
         self.explicit_feedback = explicit_feedback
-        if normalize:
-            self.explicit_feedback = (
-                self.explicit_feedback / self.explicit_feedback.max()
-            )
 
     def __len__(self):
         return self.explicit_feedback.shape[0]
@@ -133,11 +125,13 @@ class MovieLensDataModule(pytorch_lightning.LightningDataModule):
         val_explicit_file=None,
         test_explicit_file=None,
         batch_size=1000,
-        num_workers=1,
+        num_workers=0,
     ):
         super().__init__()
         self.common_dataloader_params = dict(
-            num_workers=num_workers, pin_memory=num_workers > 1, batch_size=None
+            num_workers=num_workers,
+            pin_memory=isinstance(num_workers, int) and num_workers > 1,
+            batch_size=None,
         )
         self.movielens = MovieLens(directory)
         self.n_users, self.n_items = self.movielens.shape
@@ -207,6 +201,20 @@ class MovieLensDataModule(pytorch_lightning.LightningDataModule):
         they are unsupported in Dataloaders as of the moment of writing.
         """
         return SparseDataset.unpack_sparse_kwargs_to_torch_sparse_coo(batch)
+
+    def train_dataloader(self):
+        if (explicit := self.train_explicit) is not None:
+            return self.build_dataloader(
+                SparseDataset(explicit), sampler_type="user", shuffle=True
+            )
+
+    def val_dataloader(self):
+        if (explicit := self.val_explicit) is not None:
+            return self.build_dataloader(SparseDataset(explicit), sampler_type="user")
+
+    def test_dataloader(self):
+        if (explicit := self.test_explicit) is not None:
+            return self.build_dataloader(SparseDataset(explicit), sampler_type="user")
 
 
 class MovieLens:

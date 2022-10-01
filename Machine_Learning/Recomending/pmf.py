@@ -1,15 +1,10 @@
 import torch
 
-from my_tools.entrypoints import ConfigConstructorBase
-from my_tools.models import register_regularization_hook
-
 from data import MovieLensDataModule, SparseDataset
-from entrypoints import (
-    MovielensMain,
-    RecommenderBase,
-    MovielensDispatcher,
-    RecommendingConfigDispenser,
-)
+from entrypoints import RecommenderBase, MovielensDispatcher
+
+from my_tools.entrypoints import ConfigDispenser
+from my_tools.models import register_regularization_hook
 from my_tools.utils import build_class
 from utils import build_bias, build_weight, torch_sparse_slice
 
@@ -21,8 +16,8 @@ class ProbabilityMatrixFactorization(torch.nn.Module):
         self,
         n_users,
         n_items,
-        latent_dimension,
-        weight_decay,
+        latent_dimension=10,
+        weight_decay=1.0e-3,
     ):
         super().__init__()
         self.weight_decay = weight_decay
@@ -108,14 +103,6 @@ class PMFDataModule(MovieLensDataModule):
                 SparseDataset(explicit), sampler_type="grid", shuffle=True
             )
 
-    def val_dataloader(self):
-        if (explicit := self.val_explicit) is not None:
-            return self.build_dataloader(SparseDataset(explicit), sampler_type="user")
-
-    def test_dataloader(self):
-        if (explicit := self.test_explicit) is not None:
-            return self.build_dataloader(SparseDataset(explicit), sampler_type="user")
-
 
 class LitProbabilityMatrixFactorization(RecommenderBase):
     def build_model(self):
@@ -168,7 +155,7 @@ class PMFDispatcher(MovielensDispatcher):
         return (PMFDataModule,)
 
 
-@RecommendingConfigDispenser
+@ConfigDispenser
 def main(config):
     PMFDispatcher(config).dispatch()
 

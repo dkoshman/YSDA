@@ -201,7 +201,7 @@ class ConfigDispenser:
             parser = self.parser(parser=self.default_parser)
             args = vars(parser.parse_args())
         else:
-            args.update(config=config_path)
+            args.update(config_path=config_path)
 
         config = yaml.safe_load(open(args["config_path"]))
 

@@ -1,0 +1,15 @@
+project: Recommending
+name: "ALS debug run"
+model:
+  name: ALSjit
+  epochs: 10
+  latent_dimension_size: 10
+  regularization_lambda: 1.0
+  confidence_alpha: 40
+  lambda_decay: 0.5
+datamodule:
+  name: MovieLensDataModule
+  directory: local/ml-100k
+logger:
+  name: WandbLogger
+  save_dir: local

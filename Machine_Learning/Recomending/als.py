@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 import scipy
 import torch
+import wandb
 
 from tqdm.auto import tqdm
 from typing_extensions import Literal
 
-from my_tools.utils import get_class
+from my_tools.entrypoints import ConfigDispenser
 
-from utils import RecommendingConfigDispenser
+from entrypoints import NonLightningDispatcher
 
 
 class ALS:
@@ -18,8 +19,9 @@ class ALS:
         implicit_feedback: scipy.sparse.csr_matrix,
         epochs=10,
         latent_dimension_size=10,
-        regularization_lambda=1e-2,
+        regularization_lambda=10,
         confidence_alpha=40,
+        lambda_decay=0.5,
     ):
         if set(implicit_feedback.data) != {1}:
             raise ValueError(
@@ -35,6 +37,7 @@ class ALS:
         self.confidence_x_preference = (
             self.confidence_minus_1.multiply(implicit_feedback) + implicit_feedback
         )
+        self.lambda_decay = lambda_decay
 
         self.user_factors = self.parameter_init(
             implicit_feedback.shape[0], latent_dimension_size
@@ -51,9 +54,10 @@ class ALS:
         for epoch in tqdm(range(self.epochs), "Alternating"):
             self.least_squares_optimization_with_fixed_factors(fixed="items")
             self.least_squares_optimization_with_fixed_factors(fixed="users")
+            self.regularization_lambda *= self.lambda_decay
 
     def least_squares_optimization_with_fixed_factors(
-        self, fixed=Literal["users", "items"]
+        self, fixed: Literal["users", "items"]
     ):
         kwargs = self.preprocess_optimization_args(fixed=fixed)
         self.analytic_optimum_dispatcher(**kwargs)
@@ -71,7 +75,7 @@ class ALS:
             raise ValueError
         return dict(X=X, Y=Y, sparse_iterator=sparse_iterator, fixed=fixed)
 
-    def analytic_optimum_dispatcher(self, X, Y, sparse_iterator):
+    def analytic_optimum_dispatcher(self, X, Y, sparse_iterator, fixed):
         """This implementation and the next helper method are left here mainly for
         completeness's sake, for more efficient and less convoluted implementation see ALSJIT."""
         lambda_I = self.regularization_lambda * np.eye(Y.shape[1])
@@ -107,36 +111,22 @@ class ALS:
             ind_slice = slice(ind_begin, ind_end)
             yield ptr_id, indices[ind_slice], cm1_data[ind_slice], cp_data[ind_slice]
 
-    def topk_recommendations(self, user_ids, topk):
-        user_factors = torch.tensor(self.user_factors[user_ids], device="cuda")
-        item_factors = torch.tensor(self.item_factors, device="cuda")
+    def __call__(self, user_ids=None, item_ids=None):
+        if user_ids is None:
+            user_ids = slice(None)
 
-        ratings = user_factors @ item_factors.T
-        ratings_of_recommended_items, ids_of_recommended_items = torch.topk(
-            ratings, topk
-        )
+        if item_ids is None:
+            item_ids = slice(None)
 
-        ratings_of_recommended_items = ratings_of_recommended_items.cpu().numpy()
-        ids_of_recommended_items = ids_of_recommended_items.cpu().numpy()
+        ratings = self.user_factors[user_ids] @ self.item_factors[item_ids].T
+        return ratings
 
-        del user_factors, item_factors, ratings
+    def explain_recommendations(self, user_ids, k=10):
+        ratings = self(user_ids=user_ids)
+        ratings, item_ids = torch.topk(torch.from_numpy(ratings), k=k)
+        ratings = ratings.numpy()
+        item_ids = item_ids.numpy()
 
-        return ratings_of_recommended_items, ids_of_recommended_items
-
-    def recommend(self, user_ids, topk=20, explain=False):
-        (
-            ratings_of_recommended_items,
-            ids_of_recommended_items,
-        ) = self.topk_recommendations(user_ids, topk)
-
-        if explain:
-            return self.explain_recommendations(
-                user_ids, ids_of_recommended_items, ratings_of_recommended_items
-            )
-
-        return ids_of_recommended_items
-
-    def explain_recommendations(self, user_ids, item_ids, ratings):
         recommendations = pd.DataFrame(
             item_ids, index=user_ids, columns=range(item_ids.shape[1])
         )
@@ -189,7 +179,7 @@ class ALS:
         return recommendations, explanations
 
 
-class ALSJIT(ALS):
+class ALSjit(ALS):
     def __init__(self, *args, num_threads=8, **kwargs):
         super().__init__(*args, **kwargs)
         numba.config.THREADING_LAYER = "threadsafe"
@@ -247,7 +237,7 @@ class ALSJIT(ALS):
             X[row_id] = np.linalg.inv(YtCY_plus_lambdaI).astype(np.float32) @ (y.T @ cp)
 
 
-class ALSJITBiased(ALSJIT):
+class ALSjitBiased(ALSjit):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.bias = self.parameter_init(1)
@@ -316,7 +306,6 @@ class ALSJITBiased(ALSJIT):
         bias,
         X_constant_latent_index,
     ):
-        Yt_bias = bias[0] * Y.sum(axis=0)
         for row_id in numba.prange(X.shape[0]):
             ind_slice = slice(indptr[row_id], indptr[row_id + 1])
             if ind_slice.start == ind_slice.stop:
@@ -329,36 +318,30 @@ class ALSJITBiased(ALSJIT):
             y = Y[col_indices]
 
             YtCY_plus_lambdaI = (y.T * cm1) @ y + YtY_plus_lambdaI
-            YtCP_minus_biasYtC = y.T @ (cp - bias[0] * cm1) - Yt_bias
+            YtCP_minus_biasYtC = y.T @ (cp - bias[0] * cm1 - bias[0])
             X[row_id] = np.linalg.inv(YtCY_plus_lambdaI).astype(np.float32) @ (
                 YtCP_minus_biasYtC
             )
 
         X[:, X_constant_latent_index] = 1
 
-    def explain_recommendations(self, user_ids, item_ids, ratings):
+    def explain_recommendations(self, user_ids, k=10):
         raise NotImplementedError("Need to add bias to existing implementation")
 
 
-class ALSConfigDispenser(RecommendingConfigDispenser):
-    def debug_config(self, config):
-        config = super().debug_config(config)
-        return config
+class ALSDispatcher(NonLightningDispatcher):
+    def build_model(self):
+        model = self.build_class(
+            class_candidates=[ALS, ALSjit, ALSjitBiased],
+            implicit_feedback=self.datamodule.train_explicit > 0,
+            **self.config["model"],
+        )
+        return model
 
 
-@ALSConfigDispenser
+@ConfigDispenser
 def main(config):
-    model_config = config["model"]
-    model_name = model_config.pop("name")
-    model_config.update(
-        implicit_feedback=scipy.sparse.load_npz(config["train_explicit"]).tocsr() > 0
-    )
-    Model = get_class(
-        class_name=model_name, class_candidates=[ALS, ALSJIT, ALSJITBiased]
-    )
-    model = Model(model_config)
-    model.fit()
-    # TODO: log metrics
+    ALSDispatcher(config).dispatch()
 
 
 if __name__ == "__main__":

@@ -12,8 +12,8 @@ import wandb
 from numba import njit
 from scipy.sparse import csr_matrix
 
-from Machine_Learning.Recomending.data import MovieLens
-from Machine_Learning.Recomending.utils import scipy_coo_to_torch_sparse
+from data import MovieLens
+from utils import scipy_coo_to_torch_sparse
 
 
 def relevant_pairs_to_frame(relevant_pairs):
@@ -262,6 +262,7 @@ class RecommendingMetrics:
             return {key + "@" + str(self.k): v for key, v in dictionary.items()}
 
     def torch_batch_metrics(self, user_ids, ratings):
+        ratings = ratings.to_dense()
         if self.k is None:
             recommendations = torch.argsort(ratings, descending=True)
         else:
@@ -319,12 +320,13 @@ class RecommendingMetrics:
 
 
 class RecommendingMetricsCallback(pytorch_lightning.callbacks.Callback):
-    def __init__(self, directory, k=10):
+    def __init__(self, directory, k=10, aggregate_test_metrics=False):
+        self.aggregate_test_metrics = aggregate_test_metrics
         movielens = MovieLens(directory)
         explicit_feedback = movielens.explicit_feedback_scipy_csr("u.data")
         if isinstance(k, int):
             k = [k]
-        self.metrics = [RecommendingMetrics(explicit_feedback, kk) for kk in k]
+        self.metrics = [RecommendingMetrics(explicit_feedback, k1) for k1 in k]
 
     @staticmethod
     def test_prefix(metrics_dict):
@@ -347,11 +349,14 @@ class RecommendingMetricsCallback(pytorch_lightning.callbacks.Callback):
     def log_batch(self, user_ids, ratings, kind: Literal["val", "test"]):
         for atk_metric in self.metrics:
             metrics = atk_metric.torch_batch_metrics(user_ids=user_ids, ratings=ratings)
-            if kind == "test":
-                metrics = self.test_prefix(metrics)
-                for metric_name in metrics:
-                    wandb.define_metric(metric_name, summary="mean")
+            if kind == "test" and self.aggregate_test_metrics:
+                self.define_test_metrics(metrics)
             wandb.log(metrics)
+
+    def define_test_metrics(self, metrics):
+        metrics = self.test_prefix(metrics)
+        for metric_name in metrics:
+            wandb.define_metric(metric_name, summary="mean")
 
     def on_test_epoch_end(self, trainer=None, pl_module=None):
         self.epoch_end(kind="test")
@@ -363,10 +368,8 @@ class RecommendingMetricsCallback(pytorch_lightning.callbacks.Callback):
         for atk_metric in self.metrics:
             if len(atk_metric.unique_recommended_items):
                 metrics = atk_metric.finalize_coverage()
-                if kind == "test":
-                    metrics = self.test_prefix(metrics)
-                    for metric_name in metrics:
-                        wandb.define_metric(metric_name, summary="mean")
+                if kind == "test" and self.aggregate_test_metrics:
+                    self.define_test_metrics(metrics)
                 wandb.log(metrics)
 
 
@@ -378,7 +381,7 @@ class RecommendingIMDBCallback(pytorch_lightning.callbacks.Callback):
         k=10,
     ):
         imdb = ImdbRatings(path_to_imdb_ratings_csv, path_to_movielens_folder)
-        self.explicit_feedback = imdb.explicit_feedback_torch()
+        self.explicit_feedback = imdb.explicit_feedback_scipy()
         self.item_df = imdb.movielens["u.item"]
         self.k = k
 

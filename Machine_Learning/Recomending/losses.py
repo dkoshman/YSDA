@@ -6,8 +6,8 @@ from my_tools.utils import sparse_dense_multiply
 
 
 class MSELoss:
-    def __call__(self, explicit, model_ratings):
-        loss = ((explicit.to_dense() - model_ratings) ** 2).sum()
+    def __call__(self, explicit, model_ratings, implicit=None):
+        loss = ((explicit.to_dense() - model_ratings) ** 2).mean()
         return loss
 
 

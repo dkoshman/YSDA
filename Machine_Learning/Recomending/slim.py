@@ -1,19 +1,14 @@
+import warnings
+
 import scipy.sparse
 import torch
 
-from Machine_Learning.Recomending.metrics import (
-    RecommendingMetricsCallback,
-    RecommendingIMDBCallback,
-)
-from data import SparseDataset, MovieLensDataModule
-from entrypoints import (
-    RecommenderBase,
-    RecommendingConfigDispenser,
-    MovielensDispatcher,
-)
+from my_tools.entrypoints import ConfigDispenser
 from my_tools.models import register_regularization_hook
 from my_tools.utils import scipy_to_torch_sparse, StoppingMonitor, build_class
 
+from data import SparseDataset, MovieLensDataModule
+from entrypoints import RecommenderBase, MovielensDispatcher
 from utils import torch_sparse_slice
 
 
@@ -29,8 +24,8 @@ class SLIM(torch.nn.Module):
     def __init__(
         self,
         explicit_feedback: scipy.sparse.csr_matrix,
-        l2_coefficient=1.0,
-        l1_coefficient=1.0,
+        l2_coefficient=1.0e-4,
+        l1_coefficient=1.0e-4,
     ):
         super().__init__()
 
@@ -49,7 +44,7 @@ class SLIM(torch.nn.Module):
         self.register_buffer(name="sparse_weight", tensor=None)
 
         self._sparse_values = torch.empty(0)
-        self._sparse_indices = torch.empty(0, dtype=torch.int32)
+        self._sparse_indices = torch.empty(2, 0, dtype=torch.int32)
 
     def is_uninitialized(self):
         return self.dense_weight_slice.numel() == 0
@@ -80,8 +75,6 @@ class SLIM(torch.nn.Module):
         return density
 
     def finalize(self):
-        if self.sparse_weight is not None:
-            raise RuntimeError("Model already finalized.")
         self.sparse_weight = torch.sparse_coo_tensor(
             indices=self._sparse_indices,
             values=self._sparse_values,
@@ -131,8 +124,9 @@ class SLIM(torch.nn.Module):
             )
             dense_weight_slice.register_hook(hook)
 
-    def training_forward(self, user_ids, item_ids):
-        dense_weight_slice = self.dense_weight_slice.clone()[user_ids]
+    def training_forward(self, item_ids):
+        assert len(item_ids) == self.dense_weight_slice.shape[1]
+        dense_weight_slice = self.dense_weight_slice.clone()
         ratings = self.explicit_feedback.to(torch.float32) @ dense_weight_slice
         register_regularization_hook(
             dense_weight_slice, self.l2_coefficient, self.l1_coefficient
@@ -143,21 +137,18 @@ class SLIM(torch.nn.Module):
     def predicting_forward(self, user_ids, item_ids):
         explicit_feedback = torch_sparse_slice(self.explicit_feedback, row_ids=user_ids)
         items_sparse_weight = torch_sparse_slice(self.sparse_weight, col_ids=item_ids)
-        ratings = explicit_feedback @ items_sparse_weight
+        ratings = explicit_feedback.to(torch.float32) @ items_sparse_weight
         return ratings
 
     def forward(self, user_ids=None, item_ids=None):
-        # TODO: maybe move this slice logic to lit?
         if user_ids is None:
-            user_ids = slice(None)
+            assert item_ids is not None
+            return self.training_forward(item_ids)
 
+        self.finalize()
         if item_ids is None:
             item_ids = slice(None)
-
-        if self.sparse_weight is None:
-            return self.training_forward(user_ids, item_ids)
-        else:
-            return self.predicting_forward(user_ids, item_ids)
+        return self.predicting_forward(user_ids, item_ids)
 
 
 class SLIMDataset(SparseDataset):
@@ -165,9 +156,8 @@ class SLIMDataset(SparseDataset):
         self,
         explicit_feedback: scipy.sparse.csr_matrix,
         explicit_feedback_val: scipy.sparse.csr_matrix,
-        normalize=True,
     ):
-        super().__init__(explicit_feedback, normalize)
+        super().__init__(explicit_feedback)
         self.explicit_feedback_val = explicit_feedback_val
 
     def __len__(self):
@@ -187,32 +177,21 @@ class SLIMDataModule(MovieLensDataModule):
         super().setup(stage)
         self.current_batch = None
         self.batch_is_fitted = False
-        self.dataloader_iter = iter(self.item_dataloader())
-
-    def item_dataloader(self):
-        dataset = SLIMDataset(self.train_explicit, self.val_explicit)
-        return self.build_dataloader(dataset, sampler_type="item")
+        slim_dataset = SLIMDataset(self.train_explicit, self.val_explicit)
+        item_dataloader = self.build_dataloader(
+            dataset=slim_dataset, sampler_type="item"
+        )
+        self.item_dataloader_iter = iter(item_dataloader)
 
     def train_dataloader(self):
         try:
-            self.current_batch = next(self.dataloader_iter)
+            self.current_batch = next(self.item_dataloader_iter)
         except StopIteration:
             self.trainer.should_stop = True
             yield {}
 
         while not self.batch_is_fitted:
             yield self.current_batch
-
-    def val_dataloader(self):
-        class SingleValueIterableThatIsDefinitelyNotAList:
-            def __iter__(inner_self):
-                yield self.current_batch
-
-        return SingleValueIterableThatIsDefinitelyNotAList()
-
-    def test_dataloader(self):
-        if (explicit := self.test_explicit) is not None:
-            return self.build_dataloader(SparseDataset(explicit), sampler_type="user")
 
 
 class LitSLIM(RecommenderBase):
@@ -221,12 +200,22 @@ class LitSLIM(RecommenderBase):
         *args,
         patience=0,
         min_delta=0,
-        checkpoint="local/slim_finalized.ckpt",
+        checkpoint_path="local/slim_finalized.ckpt",
+        check_val_every_n_epoch=10,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.stopping_monitor = StoppingMonitor(patience, min_delta)
-        self.checkpoint = checkpoint
+
+    def setup(self, stage=None):
+        if self.trainer.limit_val_batches != 0:
+            warnings.warn(
+                "In this implementation when training model is iterating over items, "
+                "and the user-wise metrics cannot be calculated while training. "
+                "So validation should be manually disabled, and the model will validate "
+                "when it is fitted."
+            )
+        super().setup(stage)
 
     def build_model(self):
         model = build_class(
@@ -245,67 +234,58 @@ class LitSLIM(RecommenderBase):
 
     def training_step(self, batch, batch_idx):
         ratings = self(**batch)
-        loss = self.loss(explicit=batch["explicit"], model_ratings=ratings)
-        self.log("train_loss", (loss / ratings.numel()) ** 0.5)
-        return loss
+        train_loss = self.loss(explicit=batch["explicit"], model_ratings=ratings)
+        self.log("train_loss", train_loss)
+
+        if batch_idx % self.hparams["check_val_every_n_epoch"] == 0:
+            val_loss = self.loss(explicit=batch["explicit_val"], model_ratings=ratings)
+            self.log("val_loss", val_loss)
+
+            if self.stopping_monitor.is_time_to_stop(val_loss):
+                self.trainer.datamodule.batch_is_fitted = True
+                density = self.model.transform_dense_slice_to_sparse(
+                    item_ids=self.trainer.datamodule.current_batch["item_ids"]
+                )
+                self.log("density", density)
+
+        return train_loss
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
         self.model.clip_parameter()
-        # Update parameters for optimization.
         self.trainer.optimizers = [self.configure_optimizers()]
 
     def validation_step(self, batch, batch_idx):
-        ratings = self(**batch)
-        loss = self.loss(explicit=batch["explicit_val"], model_ratings=ratings)
-        self.log("val_loss", (loss / ratings.numel()) ** 0.5)
-        return loss
-
-    def validation_epoch_end(self, validation_step_outputs):
-        loss = validation_step_outputs[0]
-        if self.stopping_monitor.is_time_to_stop(loss):
-            self.trainer.datamodule.batch_is_fitted = True
-            density = self.model.transform_dense_slice_to_sparse(
-                item_ids=self.trainer.datamodule.current_batch["item_ids"]
-            )
-            self.log("density", density)
+        pass
 
     def test_step(self, batch, batch_idx):
         pass
 
     def on_fit_end(self):
         self.model.finalize()
-        if self.checkpoint:
-            self.trainer.save_checkpoint(self.checkpoint)
+        self.trainer.validate(self, datamodule=self.trainer.datamodule)
+        if checkpoint_path := self.hparams["checkpoint_path"]:
+            self.trainer.save_checkpoint(checkpoint_path)
         super().on_fit_end()
 
 
-class SLIMRecommendingMetricsCallback(RecommendingMetricsCallback):
-    def on_validation_batch_end(
-        self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx
-    ):
-        pass
-
-    def on_validation_epoch_end(self, trainer=None, pl_module=None):
-        pass
-
-
-class SLIMRecommendingIMDBCallback(RecommendingIMDBCallback):
-    def on_validation_epoch_end(self, trainer=None, pl_module=None):
-        pass
-
-
 class SLIMDispatcher(MovielensDispatcher):
+    def update_tune_data(self):
+        self.config["datamodule"].update(
+            dict(
+                train_explicit_file="u1.base",
+                val_explicit_file="u1.test",
+                test_explicit_file="u1.test",
+            )
+        )
+
     def lightning_candidates(self):
         return (LitSLIM,)
 
     def datamodule_candidates(self):
         return (SLIMDataModule,)
 
-    def callback_candidates(self):
-        return SLIMRecommendingMetricsCallback, SLIMRecommendingIMDBCallback
 
-
-@RecommendingConfigDispenser
+@ConfigDispenser
 def main(config):
     SLIMDispatcher(config).dispatch()
 

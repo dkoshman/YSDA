@@ -2,10 +2,7 @@ import numpy as np
 import torch
 from scipy.sparse import coo_matrix, csr_matrix
 
-from Machine_Learning.Recomending.utils import (
-    scipy_coo_to_torch_sparse,
-    torch_sparse_to_scipy_coo,
-)
+from utils import torch_sparse_to_scipy_coo
 
 
 class NearestNeighbours:
