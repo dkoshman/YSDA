@@ -240,9 +240,18 @@ class Hooker:
 
 
 class ConfigConstructorBase(abc.ABC):
-    def __init__(self, config):
-        super().__init__()
+    def __init__(
+        self,
+        config,
+        lightning_candidates=(),
+        datamodule_candidates=(),
+        callback_candidates=(),
+    ):
+        self.lightning_candidates = lightning_candidates
+        self.datamodule_candidates = datamodule_candidates
+        self.callback_candidates = callback_candidates
         self.config = config.copy()
+        super().__init__()
 
     @property
     def build_class(self):
@@ -254,52 +263,36 @@ class ConfigConstructorBase(abc.ABC):
         datamodule = self.build_datamodule()
         trainer = self.build_trainer()
         trainer.fit(lightning_module, datamodule=datamodule)
+        trainer.validate(lightning_module, datamodule=datamodule)
         trainer.test(lightning_module, datamodule=datamodule)
 
-    def lightning_candidates(self):
-        return ()
-
-    def datamodule_candidates(self):
-        return ()
-
-    def callback_candidates(self):
-        return ()
-
-    def build_lightning_module(self, lightning_candidates=()):
-        lightning_candidates = list(lightning_candidates) + list(
-            self.lightning_candidates()
-        )
+    def build_lightning_module(self):
         lightning_config = self.config["lightning_module"]
         lightning_module = self.build_class(
-            class_candidates=lightning_candidates,
-            **lightning_config,
+            class_candidates=self.lightning_candidates,
             model_config=self.config["model"],
             loss_config=self.config["loss"],
             optimizer_config=self.config["optimizer"],
+            **lightning_config,
         )
         return lightning_module
 
-    def build_datamodule(self, datamodule_candidates=()):
-        datamodule_candidates = list(datamodule_candidates) + list(
-            self.datamodule_candidates()
-        )
+    def build_datamodule(self):
         datamodule = self.build_class(
-            class_candidates=datamodule_candidates, **self.config["datamodule"]
+            class_candidates=self.datamodule_candidates,
+            **self.config["datamodule"],
         )
         return datamodule
 
-    def build_callbacks(self, callback_candidates=()) -> dict:
-        callback_candidates = list(callback_candidates) + list(
-            self.callback_candidates()
-        )
+    def build_callbacks(self) -> dict:
         callbacks = {}
         if callbacks_config := self.config.get("callbacks"):
             for callback_name, single_callback_config in callbacks_config.items():
                 callback = self.build_class(
-                    class_candidates=callback_candidates,
+                    class_candidates=self.callback_candidates,
                     modules=[pl.callbacks],
-                    **single_callback_config,
                     name=callback_name,
+                    **single_callback_config,
                 )
                 callbacks[callback_name] = callback
         return callbacks
@@ -313,10 +306,10 @@ class ConfigConstructorBase(abc.ABC):
             )
             return logger
 
-    def build_trainer(self, callback_candidates=()):
+    def build_trainer(self):
         trainer = pl.Trainer(
             **self.config["trainer"],
-            callbacks=list(self.build_callbacks(callback_candidates).values()),
+            callbacks=list(self.build_callbacks().values()),
             logger=self.build_logger(),
         )
         return trainer

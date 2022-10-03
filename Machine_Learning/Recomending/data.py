@@ -1,7 +1,8 @@
 import functools
 import itertools
 import os
-from typing import Literal
+
+from typing import Literal, Optional
 
 import numpy as np
 import pandas as pd
@@ -9,7 +10,7 @@ import pytorch_lightning
 import torch
 
 from scipy.sparse import coo_matrix, csr_matrix
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 from utils import torch_sparse_slice
 
@@ -117,15 +118,15 @@ class GridSampler:
         yield from ({"user_ids": i[0], "item_ids": i[1]} for i in batch_indices_product)
 
 
-class MovieLensDataModule(pytorch_lightning.LightningDataModule):
+class RecommendingDataModule(pytorch_lightning.LightningDataModule):
     def __init__(
         self,
-        directory,
         train_explicit_file=None,
         val_explicit_file=None,
         test_explicit_file=None,
         batch_size=1000,
         num_workers=0,
+        **kwargs,
     ):
         super().__init__()
         self.common_dataloader_params = dict(
@@ -133,24 +134,19 @@ class MovieLensDataModule(pytorch_lightning.LightningDataModule):
             pin_memory=isinstance(num_workers, int) and num_workers > 1,
             batch_size=None,
         )
-        self.movielens = MovieLens(directory)
-        self.n_users, self.n_items = self.movielens.shape
-        self.save_hyperparameters(ignore="movielens")
+        self.save_hyperparameters()
 
     @property
-    def train_explicit(self):
-        if file := self.hparams["train_explicit_file"]:
-            return self.movielens.explicit_feedback_scipy_csr(file)
+    def train_explicit(self) -> Optional[csr_matrix]:
+        return
 
     @property
-    def val_explicit(self):
-        if file := self.hparams["val_explicit_file"]:
-            return self.movielens.explicit_feedback_scipy_csr(file)
+    def val_explicit(self) -> Optional[csr_matrix]:
+        return
 
     @property
-    def test_explicit(self):
-        if file := self.hparams["test_explicit_file"]:
-            return self.movielens.explicit_feedback_scipy_csr(file)
+    def test_explicit(self) -> Optional[csr_matrix]:
+        return
 
     def build_dataloader(
         self,

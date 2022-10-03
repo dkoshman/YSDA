@@ -1,55 +1,63 @@
 import abc
 from typing import Literal
 
-import numpy as np
 import pytorch_lightning as pl
 import torch
-import wandb
+from my_tools.entrypoints import ConfigDispenser
 
-from my_tools.entrypoints import ConfigConstructorBase
 from my_tools.utils import build_class
 
-import losses
-
-from data import MovieLensDataModule
-from metrics import RecommendingMetricsCallback, RecommendingIMDBCallback
-from nearest_neighbours import NearestNeighbours
+from Machine_Learning.Recomending import losses, baseline
+from Machine_Learning.Recomending.baseline import ImplicitNearestNeighbors
+from Machine_Learning.Recomending.movielens import MovielensDispatcher
 
 
-class RecommenderBase(pl.LightningModule):
+class LitRecommenderBase(pl.LightningModule):
     def __init__(
-        self, model_config, optimizer_config, loss_config, train_explicit=None
+        self,
+        model_config,
+        optimizer_config=None,
+        loss_config=None,
+        recommender_config=None,
     ):
         super().__init__()
-        self.save_hyperparameters(ignore="train_explicit")
+        self.save_hyperparameters()
         self.model = None
         self.loss = None
-        self.train_explicit = train_explicit
-        self.recommender = (
-            None if train_explicit is None else Recommender(train_explicit, self)
-        )
+        self.recommend = None
 
     @abc.abstractmethod
     def build_model(self):
         return "model"
 
     def build_loss(self):
-        loss = build_class(modules=[losses], **self.hparams["loss_config"])
-        return loss
+        if config := self.hparams["loss_config"]:
+            loss = build_class(modules=[losses], **config)
+            return loss
+
+    def build_recommender(self):
+        config = self.hparams["recommender_config"]
+        if config is None:
+            config = dict()
+
+        recommender = Recommender(
+            train_explicit=self.trainer.datamodule.train_explicit,
+            model=self,
+            **config,
+        )
+        return recommender
 
     def setup(self, stage=None):
-        if stage == "fit":
-            if self.train_explicit is None:
-                self.train_explicit = self.trainer.datamodule.train_explicit
-                self.recommender = Recommender(self.train_explicit, self)
+        if self.model is None:
             self.model = self.build_model()
             self.loss = self.build_loss()
+            self.recommend = self.build_recommender()
 
     def configure_optimizers(self):
         optimizer = build_class(
             modules=[torch.optim],
-            **self.hparams["optimizer_config"],
             params=self.parameters(),
+            **self.hparams["optimizer_config"],
         )
         return optimizer
 
@@ -58,25 +66,64 @@ class RecommenderBase(pl.LightningModule):
             user_ids=batch.get("user_ids"), item_ids=batch.get("item_ids")
         )
 
-    def recommend(
-        self,
-        user_ids=None,
-        users_explicit_feedback=None,
-        k=None,
-        filter_already_liked_items=True,
-    ):
-        return self.recommender.__call__(
-            user_ids=user_ids,
-            users_explicit_feedback=users_explicit_feedback,
-            k=k,
-            filter_already_liked_items=filter_already_liked_items,
+    def training_step(self, batch, batch_idx):
+        pass
+
+    def validation_step(self, batch, batch_idx):
+        pass
+
+    def test_step(self, batch, batch_idx):
+        pass
+
+
+class NonLitToLitAdapterRecommender(LitRecommenderBase):
+    @abc.abstractmethod
+    def build_model(self):
+        model = build_class(
+            class_candidates=[...],
+            modules=[...],
+            explicit_feedback=self.trainer.datamodule.train_explicit,
+            **self.hparams["model_config"],
         )
+        return model
+
+    def on_train_batch_start(self, batch, batch_idx):
+        """Skip train dataloader."""
+        self.model.fit()
+        self.trainer.should_stop = True
+        return -1
+
+    def configure_optimizers(self):
+        """Placeholder optimizer."""
+        adam = torch.optim.Adam(params=[torch.empty(0)])
+        return adam
 
 
 class Recommender:
-    def __init__(self, train_explicit, model):
+    def __init__(
+        self,
+        train_explicit,
+        model,
+        nearest_neighbors_model: Literal[
+            "BM25Recommender",
+            "CosineRecommender",
+            "TFIDFRecommender",
+        ] = "BM25Recommender",
+        num_neighbors=20,
+    ):
+        """
+        :param train_explicit: explicit feedback matrix
+        :param model: Callable[[user_ids], ratings]
+        :param nearest_neighbors_model: name of nearest neighbors
+        model to use for generating recommendations fo new users
+        :param num_neighbors: number of nearest neighbors to use
+        """
         self.train_explicit = train_explicit
-        self.nearest_neighbours = NearestNeighbours(self.train_explicit)
+        self.nearest_neighbours = ImplicitNearestNeighbors(
+            explicit_feedback=self.train_explicit,
+            name=nearest_neighbors_model,
+            num_neighbors=num_neighbors,
+        )
         self.model = model
 
     def nearest_neighbours_ratings(self, explicit_feedback):
@@ -86,23 +133,33 @@ class Recommender:
         their predicted ratings.
         """
 
-        nn_dict = self.nearest_neighbours(explicit_feedback)
-        ratings = torch.empty(*explicit_feedback.shape)
-        for i, (similar_users, similarity) in enumerate(
-            zip(nn_dict["similar_users"], nn_dict["similarity"])
+        nn_dict = self.nearest_neighbours.similar_users(
+            users_feedback=explicit_feedback
+        )
+        similar_users = nn_dict["similar_users"]
+        similarity = nn_dict["similarity"]
+        similarity /= similarity.sum(axis=0)
+
+        ratings = torch.empty(*explicit_feedback.shape, dtype=torch.float32)
+        for i, (similar_users_row, similarity_row) in enumerate(
+            zip(similar_users, similarity)
         ):
-            similar_ratings = self.model(user_ids=similar_users)
-            if isinstance(similar_ratings, np.ndarray):
+            similar_ratings = self.model(user_ids=similar_users_row)
+            if torch.is_tensor(similar_ratings):
+                similarity_row = torch.from_numpy(similarity_row)
+            else:
                 similar_ratings = torch.from_numpy(similar_ratings).to(torch.float32)
-            ratings[i] = similar_ratings.transpose(0, 1) @ similarity
+            ratings[i] = (
+                similar_ratings.transpose(0, 1).to(torch.float32) @ similarity_row
+            )
         return ratings
 
     def __call__(
         self,
         user_ids=None,
         users_explicit_feedback=None,
-        k=None,
         filter_already_liked_items=True,
+        n_recommendations=10,
     ):
         if user_ids is None and users_explicit_feedback is None:
             raise ValueError(
@@ -114,6 +171,9 @@ class Recommender:
         else:
             ratings = self.model(user_ids=user_ids)
 
+        if not torch.is_tensor(ratings):
+            ratings = torch.from_numpy(ratings)
+
         if filter_already_liked_items:
             if user_ids is None:
                 already_liked_items = users_explicit_feedback > 0
@@ -124,123 +184,30 @@ class Recommender:
                 torch.from_numpy(already_liked_items.toarray()) * torch.finfo().max / 2
             )
 
-        if k is None:
+        if n_recommendations is None:
             recommendations = torch.argsort(ratings, descending=True)
         else:
-            values, recommendations = torch.topk(input=ratings, k=k)
+            values, recommendations = torch.topk(input=ratings, k=n_recommendations)
         return recommendations
 
 
-class MovielensDispatcher(ConfigConstructorBase, abc.ABC):
-    def __init__(self, config):
-        if "callbacks" not in config:
-            config["callbacks"] = {}
-        config["callbacks"].update(
-            RecommendingIMDBCallback=dict(
-                path_to_imdb_ratings_csv="local/my_imdb_ratings.csv",
-                path_to_movielens_folder="local/ml-100k",
-                k=10,
-            ),
-            RecommendingMetricsCallback=dict(directory="local/ml-100k", k=[10, 20]),
-        )
-        super().__init__(config)
-
-    def datamodule_candidates(self):
-        return (MovieLensDataModule,)
-
-    def callback_candidates(self):
-        return RecommendingIMDBCallback, RecommendingMetricsCallback
-
-    def update_tune_data(self):
-        self.config["datamodule"].update(
-            dict(
-                train_explicit_file="u1.base",
-                val_explicit_file="u1.test",
-                test_explicit_file="u1.test",
-            )
-        )
-
-    def tune(self):
-        self.update_tune_data()
-        if wandb.run is None and self.config.get("logger") is not None:
-            with wandb.init(project=self.config.get("project"), config=self.config):
-                return self.main()
-        else:
-            return self.main()
-
-    def test_datasets_iter(self):
-        for i in [2, 3, 4, 5]:
-            self.config["datamodule"].update(
-                dict(
-                    train_explicit_file=f"u{i}.base",
-                    val_explicit_file=f"u{i}.base",
-                    test_explicit_file=f"u{i}.test",
-                )
-            )
-            yield
-
-    def test(self):
-        with wandb.init(project=self.config["project"], config=self.config):
-            for _ in self.test_datasets_iter():
-                self.main()
-
-    def dispatch(self):
-        if self.config.get("stage") == "test":
-            self.test()
-        else:
-            self.tune()
-
-
-class NonLightningDispatcher(MovielensDispatcher):
+class LitBaselineRecommender(NonLitToLitAdapterRecommender):
     def build_model(self):
-        raise NotImplementedError
-
-    def main(self):
-        self.datamodule = self.build_datamodule([MovieLensDataModule])
-        self.model = self.build_model()
-        self.callbacks = self.build_callbacks()
-
-        self.model.fit()
-        self.log("val")
-        self.log("test")
-
-    def log(self, kind: Literal["val", "test"]):
-        match kind:
-            case "val":
-                dataloader = self.datamodule.val_dataloader()
-            case "test":
-                dataloader = self.datamodule.test_dataloader()
-            case _:
-                raise ValueError(f"Unknown epoch type {kind}")
-
-        metrics_callbacks = filter(
-            lambda x: isinstance(x, RecommendingMetricsCallback),
-            self.callbacks.values(),
+        model = build_class(
+            modules=[baseline],
+            explicit_feedback=self.trainer.datamodule.train_explicit,
+            **self.hparams["model_config"],
         )
-        imdb_callbacks = filter(
-            lambda x: isinstance(x, RecommendingIMDBCallback),
-            self.callbacks.values(),
-        )
+        return model
 
-        if dataloader:
-            for batch in dataloader:
-                user_ids = batch["user_ids"]
-                ratings = self.model(user_ids=user_ids.numpy())
-                for callback in metrics_callbacks:
-                    callback.log_batch(
-                        user_ids=user_ids, ratings=torch.from_numpy(ratings), kind=kind
-                    )
 
-            for callback in metrics_callbacks:
-                match kind:
-                    case "val":
-                        callback.on_validation_epoch_end()
-                    case "test":
-                        callback.on_test_epoch_end()
+@ConfigDispenser
+def main(config):
+    MovielensDispatcher(
+        config=config,
+        lightning_candidates=[LitBaselineRecommender],
+    ).dispatch()
 
-            for callback in imdb_callbacks:
-                recommender = Recommender(self.datamodule.train_explicit, self.model)
-                recommendations = recommender(
-                    users_explicit_feedback=callback.explicit_feedback
-                )
-                callback.log_recommendation(recommendations)
+
+if __name__ == "__main__":
+    main()

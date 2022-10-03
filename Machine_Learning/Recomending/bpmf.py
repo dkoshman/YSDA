@@ -5,12 +5,14 @@ import numba
 import numpy as np
 import scipy
 import torch
+from my_tools.utils import build_class
 
 from tqdm.auto import tqdm
 
 from my_tools.entrypoints import ConfigDispenser
 
-from entrypoints import NonLightningDispatcher
+from Machine_Learning.Recomending.movielens import MovielensDispatcher
+from entrypoints import NonLitToLitAdapterRecommender
 
 
 class BayesianPMF:
@@ -236,6 +238,8 @@ class BayesianPMF:
         )
 
     def aggregate_prediction_mean(self, user_ids):
+        if torch.is_tensor(user_ids):
+            user_ids = user_ids.numpy()
         return einops.reduce(
             self.step_explicit_normal_distribution_means[:, user_ids, :],
             "step user item -> user item",
@@ -255,29 +259,41 @@ class BayesianPMF:
         mode_means = torch.gather(means, 0, step_ids_with_highest_mean_pdf[None])[0]
         return mode_means
 
-    def __call__(self, user_ids, aggregation_method: Literal["mean", "mode"] = "mean"):
+    def __call__(
+        self,
+        user_ids,
+        aggregation_method: Literal["mean", "mode"] = "mean",
+        item_ids=None,
+    ):
         match aggregation_method:
             case "mean":
-                return self.aggregate_prediction_mean(user_ids)
+                ratings = self.aggregate_prediction_mean(user_ids)
             case "mode":
-                return self.aggregate_prediction_mode_approximation(user_ids)
+                ratings = self.aggregate_prediction_mode_approximation(user_ids)
             case _:
                 raise ValueError(f"Unknown aggregation method {aggregation_method}")
+        if item_ids is None:
+            return ratings
+        else:
+            return ratings[:, item_ids]
 
 
-class BPMFDispatcher(NonLightningDispatcher):
+class BPMFRecommender(NonLitToLitAdapterRecommender):
     def build_model(self):
-        model = self.build_class(
+        model = build_class(
             class_candidates=[BayesianPMF],
-            explicit=self.datamodule.train_explicit,
-            **self.config["model"],
+            explicit=self.trainer.datamodule.train_explicit,
+            **self.hparams["model_config"],
         )
         return model
 
 
 @ConfigDispenser
 def main(config):
-    BPMFDispatcher(config).dispatch()
+    MovielensDispatcher(
+        config=config,
+        lightning_candidates=[BPMFRecommender],
+    ).dispatch()
 
 
 if __name__ == "__main__":

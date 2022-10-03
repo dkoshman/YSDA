@@ -261,8 +261,13 @@ class RecommendingMetrics:
         else:
             return {key + "@" + str(self.k): v for key, v in dictionary.items()}
 
-    def torch_batch_metrics(self, user_ids, ratings):
+    def batch_metrics_from_ratings(self, user_ids, ratings):
+        if isinstance(ratings, np.ndarray):
+            ratings = torch.from_numpy(ratings)
         ratings = ratings.to_dense()
+        if isinstance(user_ids, np.ndarray):
+            user_ids = torch.from_numpy(user_ids)
+
         if self.k is None:
             recommendations = torch.argsort(ratings, descending=True)
         else:
@@ -348,7 +353,9 @@ class RecommendingMetricsCallback(pytorch_lightning.callbacks.Callback):
 
     def log_batch(self, user_ids, ratings, kind: Literal["val", "test"]):
         for atk_metric in self.metrics:
-            metrics = atk_metric.torch_batch_metrics(user_ids=user_ids, ratings=ratings)
+            metrics = atk_metric.batch_metrics_from_ratings(
+                user_ids=user_ids, ratings=ratings
+            )
             if kind == "test" and self.aggregate_test_metrics:
                 self.define_test_metrics(metrics)
             wandb.log(metrics)
@@ -378,22 +385,24 @@ class RecommendingIMDBCallback(pytorch_lightning.callbacks.Callback):
         self,
         path_to_imdb_ratings_csv="local/my_imdb_ratings.csv",
         path_to_movielens_folder="local/ml-100k",
-        k=10,
+        n_recommendations=10,
     ):
         imdb = ImdbRatings(path_to_imdb_ratings_csv, path_to_movielens_folder)
         self.explicit_feedback = imdb.explicit_feedback_scipy()
         self.item_df = imdb.movielens["u.item"]
-        self.k = k
+        self.n_recommendations = n_recommendations
 
     def on_test_epoch_end(self, trainer=None, pl_module=None):
         recommendations = pl_module.recommend(
-            users_explicit_feedback=self.explicit_feedback, k=self.k
+            users_explicit_feedback=self.explicit_feedback,
+            n_recommendations=self.n_recommendations,
         )
         self.log_recommendation(recommendations.cpu().numpy())
 
     def on_validation_epoch_end(self, trainer=None, pl_module=None):
         recommendations = pl_module.recommend(
-            users_explicit_feedback=self.explicit_feedback, k=self.k
+            users_explicit_feedback=self.explicit_feedback,
+            n_recommendations=self.n_recommendations,
         )
         self.log_recommendation(recommendations.cpu().numpy())
 
@@ -457,7 +466,7 @@ class ImdbRatings:
                     liked_items_ids.append(movie_id - 1)
                     liked_items_ratings.append(rating)
 
-        data = liked_items_ids
+        data = liked_items_ratings
         row = np.zeros(len(liked_items_ids))
         col = np.array(liked_items_ids)
         shape = (1, self.movielens.shape[1])

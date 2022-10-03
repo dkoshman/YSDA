@@ -1,7 +1,8 @@
 import torch
 
-from data import MovieLensDataModule, SparseDataset
-from entrypoints import RecommenderBase, MovielensDispatcher
+from data import SparseDataset
+from entrypoints import LitRecommenderBase
+from movielens import MovielensDispatcher, MovieLensDataModule
 
 from my_tools.entrypoints import ConfigDispenser
 from my_tools.models import register_regularization_hook
@@ -96,7 +97,7 @@ class ConstrainedProbabilityMatrixFactorization(ProbabilityMatrixFactorization):
         return rating
 
 
-class PMFDataModule(MovieLensDataModule):
+class PMFDataModuleMixin:
     def train_dataloader(self):
         if (explicit := self.train_explicit) is not None:
             return self.build_dataloader(
@@ -104,7 +105,11 @@ class PMFDataModule(MovieLensDataModule):
             )
 
 
-class LitProbabilityMatrixFactorization(RecommenderBase):
+class MovielensPMFDataModule(PMFDataModuleMixin, MovieLensDataModule):
+    pass
+
+
+class LitProbabilityMatrixFactorization(LitRecommenderBase):
     def build_model(self):
         model_config = self.hparams["model_config"]
         model_candidates = [
@@ -118,8 +123,8 @@ class LitProbabilityMatrixFactorization(RecommenderBase):
 
         model = build_class(
             class_candidates=model_candidates,
-            n_users=self.train_explicit.shape[0],
-            n_items=self.train_explicit.shape[1],
+            n_users=self.trainer.datamodule.train_explicit.shape[0],
+            n_items=self.trainer.datamodule.train_explicit.shape[1],
             **model_config,
         )
         return model
@@ -143,21 +148,14 @@ class LitProbabilityMatrixFactorization(RecommenderBase):
         self.log(f"val_loss", loss)
         return loss
 
-    def test_step(self, batch, batch_idx):
-        pass
-
-
-class PMFDispatcher(MovielensDispatcher):
-    def lightning_candidates(self):
-        return (LitProbabilityMatrixFactorization,)
-
-    def datamodule_candidates(self):
-        return (PMFDataModule,)
-
 
 @ConfigDispenser
 def main(config):
-    PMFDispatcher(config).dispatch()
+    MovielensDispatcher(
+        config=config,
+        lightning_candidates=[LitProbabilityMatrixFactorization],
+        datamodule_candidates=[MovielensPMFDataModule]
+    ).dispatch()
 
 
 if __name__ == "__main__":

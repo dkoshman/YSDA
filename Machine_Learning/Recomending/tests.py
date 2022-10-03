@@ -1,11 +1,10 @@
-import copy
-
 import numpy as np
 import scipy
 import torch
 import torchmetrics as tm
 
 import als
+import entrypoints
 import bpmf
 import metrics
 import pmf
@@ -20,7 +19,7 @@ def get_config_base():
             name="MovieLensDataModule", directory="local/ml-100k", batch_size=100
         ),
     )
-    return copy.deepcopy(config_base)
+    return config_base
 
 
 def test_mark_duplicate_recommended_items_as_invalid():
@@ -118,13 +117,13 @@ def test_normalized_discounted_cumulative_gain():
 
 def test_slim():
     config = get_config_base()
-    config["datamodule"]["name"] = "SLIMDataModule"
+    config["datamodule"]["name"] = "MovielensSlimDatamodule"
     slim.main(**config, model=dict(name="SLIM"), lightning_module=dict(name="LitSLIM"))
 
 
 def test_pmf():
     config = get_config_base()
-    config["datamodule"]["name"] = "PMFDataModule"
+    config["datamodule"]["name"] = "MovielensPMFDataModule"
     pmf.main(
         **config,
         model=dict(name="ProbabilityMatrixFactorization"),
@@ -134,7 +133,42 @@ def test_pmf():
 
 def test_als():
     for als_name in ["ALS", "ALSjit", "ALSjitBiased"]:
-        als.main(**get_config_base(), model=dict(name=als_name))
+        als.main(
+            **get_config_base(),
+            model=dict(name=als_name),
+            lightning_module=dict(name="ALSRecommender"),
+        )
+
+
+def test_baseline():
+    for name in [
+        "RandomRecommender",
+        "PopularRecommender",
+        "ImplicitNearestNeighbors",
+        "SVDRecommender",
+        "NearestNeighbours",
+    ]:
+        entrypoints.main(
+            **get_config_base(),
+            model=dict(name=name),
+            lightning_module=dict(name="LitBaselineRecommender"),
+        )
+
+
+def test_implicit_matrix_factorization():
+    for matrix_factorization_model in [
+        "AlternatingLeastSquares",
+        "LogisticMatrixFactorization",
+        "BayesianPersonalizedRanking",
+    ]:
+        entrypoints.main(
+            **get_config_base(),
+            model=dict(
+                name="ImplicitMatrixFactorization",
+                matrix_factorization_model=matrix_factorization_model,
+            ),
+            lightning_module=dict(name="LitBaselineRecommender"),
+        )
 
 
 def test_RecommendingMetrics():
@@ -153,11 +187,13 @@ def test_RecommendingMetrics():
                 np.random.choice(explicit.shape[0], size=n_users, replace=False)
             )
             ratings = torch.tensor(np.random.randn(n_users, explicit.shape[1]))
-            metrics_dict_atk = recommending_metrics_atk.torch_batch_metrics(
+            metrics_dict_atk = recommending_metrics_atk.batch_metrics_from_ratings(
                 user_ids, ratings
             )
             metrics_dict_atk = {k.split("@")[0]: v for k, v in metrics_dict_atk.items()}
-            metrics_dict = recommending_metrics.torch_batch_metrics(user_ids, ratings)
+            metrics_dict = recommending_metrics.batch_metrics_from_ratings(
+                user_ids, ratings
+            )
 
             target = torch.tensor((explicit[user_ids] > 0).toarray())
             assert np.isclose(
@@ -199,4 +235,8 @@ def test_RecommendingMetrics():
 
 
 def test_bpmf():
-    bpmf.main(**get_config_base(), model=dict(name="BayesianPMF"))
+    bpmf.main(
+        **get_config_base(),
+        model=dict(name="BayesianPMF"),
+        lightning_module=dict(name="BPMFRecommender"),
+    )

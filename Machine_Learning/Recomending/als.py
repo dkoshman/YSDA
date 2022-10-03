@@ -2,15 +2,15 @@ import numba
 import numpy as np
 import pandas as pd
 import scipy
-import torch
-import wandb
+from my_tools.utils import build_class
 
 from tqdm.auto import tqdm
 from typing_extensions import Literal
 
 from my_tools.entrypoints import ConfigDispenser
 
-from entrypoints import NonLightningDispatcher
+from Machine_Learning.Recomending.movielens import MovielensDispatcher
+from entrypoints import Recommender, NonLitToLitAdapterRecommender
 
 
 class ALS:
@@ -28,6 +28,7 @@ class ALS:
                 "This als implementation works only with binary implicit feedback"
             )
 
+        self.implicit_feedback = implicit_feedback
         self.epochs = epochs
         self.regularization_lambda = regularization_lambda
 
@@ -121,62 +122,117 @@ class ALS:
         ratings = self.user_factors[user_ids] @ self.item_factors[item_ids].T
         return ratings
 
-    def explain_recommendations(self, user_ids, k=10):
-        ratings = self(user_ids=user_ids)
-        ratings, item_ids = torch.topk(torch.from_numpy(ratings), k=k)
-        ratings = ratings.numpy()
-        item_ids = item_ids.numpy()
+    def recommendation_factors(self, user_id, n_recommendations=10):
+        recommender = Recommender(self.implicit_feedback, model=self)
+        recommended_item_ids = recommender(
+            user_ids=[user_id],
+            n_recommendations=n_recommendations,
+        ).numpy()[0]
+        user_ratings = self(user_ids=[user_id], item_ids=recommended_item_ids)[0]
 
-        recommendations = pd.DataFrame(
-            item_ids, index=user_ids, columns=range(item_ids.shape[1])
-        )
         YtY_plus_lambdaI = item_factors_regularization_term = (
             self.item_factors.T @ self.item_factors
             + self.regularization_lambda * np.eye(self.item_factors.shape[1])
         )
-        explanations = {}
-
-        for (user_id, recommended_item_ids, user_ratings) in zip(
-            user_ids, item_ids, ratings
-        ):
-            relative_row_ids, liked_item_ids = self.preference[user_id].nonzero()
-            if liked_item_ids.size == 0:
-                explanations[user_id] = None
-                continue
-
-            confidence_minus_1 = (
-                self.confidence_minus_1[user_id, liked_item_ids].toarray().squeeze()
+        relative_row_ids, liked_item_ids = self.preference[user_id].nonzero()
+        if liked_item_ids.size == 0:
+            raise ValueError(
+                "No personal recommendations generated, probably a cold user."
             )
 
-            Y = liked_items_factors = self.item_factors[liked_item_ids]
-            Y_recommended = recommended_items_factors = self.item_factors[
-                recommended_item_ids
-            ]
-            user_latent_weight = YtCY = np.linalg.inv(
-                (Y.T * confidence_minus_1) @ Y + YtY_plus_lambdaI
+        confidence_minus_1 = (
+            self.confidence_minus_1[user_id, liked_item_ids].toarray().squeeze()
+        )
+        Y = liked_items_factors = self.item_factors[liked_item_ids]
+        Y_recommended = recommended_items_factors = self.item_factors[
+            recommended_item_ids
+        ]
+        user_latent_weight = YtCY = np.linalg.inv(
+            (Y.T * confidence_minus_1) @ Y + YtY_plus_lambdaI
+        )
+        similarity = Y_recommended @ user_latent_weight @ Y.T
+
+        return dict(
+            user_ratings=user_ratings,
+            recommended_item_ids=recommended_item_ids,
+            liked_item_ids=liked_item_ids,
+            similarity=similarity,
+            confidence=confidence_minus_1 + 1,
+        )
+
+    def explain_recommendations(self, user_id, k=10):
+        return explain_recommendations(**self.recommendation_factors(user_id, k))
+
+
+def explain_recommendations(
+    user_id,
+    user_ratings,
+    recommended_item_ids,
+    liked_item_ids,
+    similarity,
+    confidence,
+):
+    explanations = {
+        "ratings": pd.Series(
+            user_ratings,
+            recommended_item_ids,
+            name=f"predicted relevance",
+        ).rename_axis(index="recommended items for user"),
+        "similarity": pd.DataFrame(
+            similarity, index=recommended_item_ids, columns=liked_item_ids
+        ).rename_axis(
+            index=f"recommended items for user",
+            columns=f"liked items by user",
+        ),
+        "confidence": pd.Series(
+            confidence,
+            liked_item_ids,
+            name=f"estimated confidence that user likes items",
+        ).rename_axis(index="liked items by user"),
+    }
+
+    dataframe = pd.concat(
+        [explanations["similarity"], explanations["ratings"]], axis="columns"
+    )
+    dataframe = pd.concat(
+        [dataframe.T, explanations["confidence"]], axis="columns"
+    ).T.rename_axis(index="recommended items", columns="liked items")
+
+    style = dataframe.style
+    style.set_caption(
+        f"Recommended items for user {user_id} based on personal similarity measure "
+        "between items and estimated confidence in these similarities."
+    ).set_table_styles(
+        [
+            dict(
+                selector="caption",
+                props=[
+                    ("text-align", "center"),
+                    ("font-size", "125%"),
+                    ("color", "black"),
+                ],
             )
-            similarity = Y_recommended @ user_latent_weight @ Y.T
+        ]
+    )
+    common_gradient_kwargs = dict(low=0.5, high=0.5)
+    style = style.background_gradient(
+        subset=(dataframe.index[-1], dataframe.columns[:-1]),
+        axis="columns",
+        **common_gradient_kwargs,
+        cmap="YlOrRd",
+    )
+    style = style.background_gradient(
+        subset=(dataframe.index[:-1], dataframe.columns[:-1]),
+        **common_gradient_kwargs,
+        cmap="coolwarm",
+    )
+    style = style.background_gradient(
+        subset=(dataframe.index[:-1], dataframe.columns[-1]),
+        **common_gradient_kwargs,
+        cmap="YlOrRd",
+    )
 
-            explanations[user_id] = {
-                "ratings": pd.Series(
-                    user_ratings,
-                    recommended_item_ids,
-                    name=f"predicted relevance",
-                ).rename_axis(index="recommended items for user"),
-                "similarity": pd.DataFrame(
-                    similarity, index=recommended_item_ids, columns=liked_item_ids
-                ).rename_axis(
-                    index=f"recommended items for user",
-                    columns=f"liked items by user",
-                ),
-                "confidence": pd.Series(
-                    confidence_minus_1 + 1,
-                    liked_item_ids,
-                    name=f"estimated confidence that user likes items",
-                ).rename_axis(index="liked items by user"),
-            }
-
-        return recommendations, explanations
+    return dict(dataframe=dataframe, style=style)
 
 
 class ALSjit(ALS):
@@ -329,19 +385,22 @@ class ALSjitBiased(ALSjit):
         raise NotImplementedError("Need to add bias to existing implementation")
 
 
-class ALSDispatcher(NonLightningDispatcher):
+class ALSRecommender(NonLitToLitAdapterRecommender):
     def build_model(self):
-        model = self.build_class(
+        model = build_class(
             class_candidates=[ALS, ALSjit, ALSjitBiased],
-            implicit_feedback=self.datamodule.train_explicit > 0,
-            **self.config["model"],
+            implicit_feedback=self.trainer.datamodule.train_explicit > 0,
+            **self.hparams["model_config"],
         )
         return model
 
 
 @ConfigDispenser
 def main(config):
-    ALSDispatcher(config).dispatch()
+    MovielensDispatcher(
+        config=config,
+        lightning_candidates=[ALSRecommender],
+    ).dispatch()
 
 
 if __name__ == "__main__":

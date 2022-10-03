@@ -7,8 +7,9 @@ from my_tools.entrypoints import ConfigDispenser
 from my_tools.models import register_regularization_hook
 from my_tools.utils import scipy_to_torch_sparse, StoppingMonitor, build_class
 
-from data import SparseDataset, MovieLensDataModule
-from entrypoints import RecommenderBase, MovielensDispatcher
+from data import SparseDataset
+from entrypoints import LitRecommenderBase
+from movielens import MovielensDispatcher, MovieLensDataModule
 from utils import torch_sparse_slice
 
 
@@ -172,7 +173,7 @@ class SLIMDataset(SparseDataset):
         return item
 
 
-class SLIMDataModule(MovieLensDataModule):
+class SlimDataModuleMixin:
     def setup(self, stage=None):
         super().setup(stage)
         self.current_batch = None
@@ -193,8 +194,11 @@ class SLIMDataModule(MovieLensDataModule):
         while not self.batch_is_fitted:
             yield self.current_batch
 
+class MovielensSlimDatamodule(SlimDataModuleMixin, MovieLensDataModule):
+    pass
 
-class LitSLIM(RecommenderBase):
+
+class LitSLIM(LitRecommenderBase):
     def __init__(
         self,
         *args,
@@ -204,6 +208,7 @@ class LitSLIM(RecommenderBase):
         check_val_every_n_epoch=10,
         **kwargs,
     ):
+        self.save_hyperparameters("checkpoint_path", "check_val_every_n_epoch")
         super().__init__(*args, **kwargs)
         self.stopping_monitor = StoppingMonitor(patience, min_delta)
 
@@ -254,12 +259,6 @@ class LitSLIM(RecommenderBase):
         self.model.clip_parameter()
         self.trainer.optimizers = [self.configure_optimizers()]
 
-    def validation_step(self, batch, batch_idx):
-        pass
-
-    def test_step(self, batch, batch_idx):
-        pass
-
     def on_fit_end(self):
         self.model.finalize()
         self.trainer.validate(self, datamodule=self.trainer.datamodule)
@@ -268,26 +267,13 @@ class LitSLIM(RecommenderBase):
         super().on_fit_end()
 
 
-class SLIMDispatcher(MovielensDispatcher):
-    def update_tune_data(self):
-        self.config["datamodule"].update(
-            dict(
-                train_explicit_file="u1.base",
-                val_explicit_file="u1.test",
-                test_explicit_file="u1.test",
-            )
-        )
-
-    def lightning_candidates(self):
-        return (LitSLIM,)
-
-    def datamodule_candidates(self):
-        return (SLIMDataModule,)
-
-
 @ConfigDispenser
 def main(config):
-    SLIMDispatcher(config).dispatch()
+    MovielensDispatcher(
+        config=config,
+        lightning_candidates=[LitSLIM],
+        datamodule_candidates=[MovielensSlimDatamodule]
+    ).dispatch()
 
 
 if __name__ == "__main__":
