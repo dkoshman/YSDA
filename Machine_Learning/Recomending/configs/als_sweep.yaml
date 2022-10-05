@@ -1,0 +1,31 @@
+project: Recommending
+name: "ALS movielens sweep 5"
+method: random
+metric:
+  goal: maximize
+  name: test_ndcg@10.mean
+parameters:
+  model:
+    name:
+      values: [ALSjit, ALSjitBiased]
+    epochs:
+      min: 10
+      max: 50
+    latent_dimension_size:
+      min: 50
+      max: 300
+    lambda_decay:
+      min: 0.5
+      max: 1.0
+    confidence_alpha: 10
+    regularization_lambda: 100
+  datamodule:
+    name: MovieLensDataModule
+    directory: local/ml-100k
+  lightning_module:
+    name: ALSRecommender
+  logger:
+    name: WandbLogger
+    save_dir: local
+  trainer:
+    num_sanity_val_steps: 0

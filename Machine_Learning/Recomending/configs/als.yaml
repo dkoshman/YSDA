@@ -1,15 +1,24 @@
 project: Recommending
-name: "ALS debug run"
+name: "ALS run"
+#stage: test
 model:
-  name: ALSjit
-  epochs: 10
-  latent_dimension_size: 10
-  regularization_lambda: 1.0
-  confidence_alpha: 40
-  lambda_decay: 0.5
+  name: ALSjitBiased
+  enable_logging: true
+  epochs: 30
+  latent_dimension_size: 300
+  regularization_lambda: 100
+  confidence_alpha: 10
+  lambda_decay: 0.75
 datamodule:
   name: MovieLensDataModule
   directory: local/ml-100k
+lightning_module:
+  name: ALSRecommender
 logger:
   name: WandbLogger
   save_dir: local
+callbacks:
+  WandbWatcher: {}
+  RecommendingDataOverviewCallback: {}
+trainer:
+  num_sanity_val_steps: 0

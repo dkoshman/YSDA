@@ -2,6 +2,7 @@ import numpy as np
 import scipy
 import torch
 import torchmetrics as tm
+import wandb
 
 import als
 import entrypoints
@@ -9,6 +10,8 @@ import bpmf
 import metrics
 import pmf
 import slim
+
+from callbacks import RecommendingDataOverviewCallback
 
 
 def get_config_base():
@@ -240,3 +243,16 @@ def test_bpmf():
         model=dict(name="BayesianPMF"),
         lightning_module=dict(name="BPMFRecommender"),
     )
+
+def test_RecommendingDataOverviewCallback():
+    explicit_feedback = scipy.sparse.csr_matrix(
+    np.random.choice(
+        np.arange(6),
+        size=(1300, 800),
+        replace=True,
+        p=[0.90, 0, 0.01, 0.02, 0.03, 0.04],
+    )
+)
+    callback = RecommendingDataOverviewCallback(explicit_feedback=explicit_feedback)
+    with wandb.init(dir="local", mode="offline"):
+        callback.log_data_overview()

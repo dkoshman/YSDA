@@ -1,13 +1,17 @@
 import abc
 
+import torch
 import wandb
 
-from Machine_Learning.Recomending.data import MovieLens, RecommendingDataModule
-from Machine_Learning.Recomending.metrics import (
+from callbacks import (
     RecommendingIMDBCallback,
-    RecommendingMetricsCallback,
+    RecommendingDataOverviewCallback,
+    WandbWatcher,
 )
-from my_tools.my_tools.entrypoints import ConfigConstructorBase
+from data import MovieLens, RecommendingDataModule
+from metrics import RecommendingMetricsCallback
+
+from my_tools.entrypoints import ConfigConstructorBase
 
 
 class MovieLensDataModule(RecommendingDataModule):
@@ -41,6 +45,9 @@ class MovielensDispatcher(ConfigConstructorBase, abc.ABC):
         datamodule_candidates=(),
         callback_candidates=(),
     ):
+        # For some reason with some configuration it is necessary to manually init cuda.
+        torch.cuda.init()
+
         if "callbacks" not in config:
             config["callbacks"] = {}
         config["callbacks"].update(
@@ -49,12 +56,17 @@ class MovielensDispatcher(ConfigConstructorBase, abc.ABC):
                 path_to_movielens_folder="local/ml-100k",
                 n_recommendations=10,
             ),
-            RecommendingMetricsCallback=dict(directory="local/ml-100k", k=[10, 20]),
+            RecommendingMetricsCallback=dict(
+                directory="local/ml-100k",
+                k=[10, 20],
+            ),
         )
         datamodule_candidates = list(datamodule_candidates) + [MovieLensDataModule]
         callback_candidates = list(callback_candidates) + [
             RecommendingIMDBCallback,
             RecommendingMetricsCallback,
+            RecommendingDataOverviewCallback,
+            WandbWatcher,
         ]
         super().__init__(
             config,
@@ -67,7 +79,7 @@ class MovielensDispatcher(ConfigConstructorBase, abc.ABC):
         self.config["datamodule"].update(
             dict(
                 train_explicit_file="u1.base",
-                val_explicit_file="u1.test",
+                val_explicit_file="u1.base",
                 test_explicit_file="u1.test",
             )
         )

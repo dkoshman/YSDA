@@ -12,8 +12,6 @@ from my_tools.utils import build_class
 
 from utils import torch_sparse_to_scipy_coo
 
-# TODO: make callback from graphs
-
 
 class BaselineRecommender:
     def __init__(self, explicit_feedback):

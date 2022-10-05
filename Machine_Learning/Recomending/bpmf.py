@@ -11,7 +11,7 @@ from tqdm.auto import tqdm
 
 from my_tools.entrypoints import ConfigDispenser
 
-from Machine_Learning.Recomending.movielens import MovielensDispatcher
+from movielens import MovielensDispatcher
 from entrypoints import NonLitToLitAdapterRecommender
 
 

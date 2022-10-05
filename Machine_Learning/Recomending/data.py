@@ -124,7 +124,7 @@ class RecommendingDataModule(pytorch_lightning.LightningDataModule):
         train_explicit_file=None,
         val_explicit_file=None,
         test_explicit_file=None,
-        batch_size=1000,
+        batch_size=100,
         num_workers=0,
         **kwargs,
     ):

@@ -194,6 +194,7 @@ class SlimDataModuleMixin:
         while not self.batch_is_fitted:
             yield self.current_batch
 
+
 class MovielensSlimDatamodule(SlimDataModuleMixin, MovieLensDataModule):
     pass
 
@@ -251,7 +252,7 @@ class LitSLIM(LitRecommenderBase):
                 density = self.model.transform_dense_slice_to_sparse(
                     item_ids=self.trainer.datamodule.current_batch["item_ids"]
                 )
-                self.log("density", density)
+                self.log("Items similarity matrix density", density)
 
         return train_loss
 
@@ -272,7 +273,7 @@ def main(config):
     MovielensDispatcher(
         config=config,
         lightning_candidates=[LitSLIM],
-        datamodule_candidates=[MovielensSlimDatamodule]
+        datamodule_candidates=[MovielensSlimDatamodule],
     ).dispatch()
 
 

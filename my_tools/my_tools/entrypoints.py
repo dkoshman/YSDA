@@ -2,6 +2,7 @@ import abc
 import sys
 
 from argparse import ArgumentParser
+from pprint import pprint
 from typing import Callable
 
 import pytorch_lightning as pl
@@ -26,7 +27,11 @@ class WandbSweepDispatcher:
             print(f"Using sweep id {sweep_id} from config file", file=sys.stderr)
         else:
             config = self.preprocess_sweep_parameters(config)
-            sweep_id = wandb.sweep(config)
+            try:
+                sweep_id = wandb.sweep(config)
+            except Exception as exception:
+                pprint(config)
+                raise exception
             yaml.safe_dump({"sweep_id": sweep_id}, open(config_file_path, "a"))
             print("Added sweep id to config file", file=sys.stderr)
         return sweep_id
@@ -105,7 +110,9 @@ class WandbSweepDispatcher:
         with wandb.init() as wandb_run:
             config = dict(wandb_run.config)
             self.expand_string_configs(config)
-            config.update(self.args)
+            if gpu := self.args.get("gpu"):
+                config["trainer"]["accelerator"] = "gpu"
+                config["trainer"]["devices"] = [gpu]
             self.main(config)
 
     def expand_string_configs(self, config):
@@ -263,7 +270,6 @@ class ConfigConstructorBase(abc.ABC):
         datamodule = self.build_datamodule()
         trainer = self.build_trainer()
         trainer.fit(lightning_module, datamodule=datamodule)
-        trainer.validate(lightning_module, datamodule=datamodule)
         trainer.test(lightning_module, datamodule=datamodule)
 
     def build_lightning_module(self):
@@ -271,8 +277,8 @@ class ConfigConstructorBase(abc.ABC):
         lightning_module = self.build_class(
             class_candidates=self.lightning_candidates,
             model_config=self.config["model"],
-            loss_config=self.config["loss"],
-            optimizer_config=self.config["optimizer"],
+            loss_config=self.config.get("loss"),
+            optimizer_config=self.config.get("optimizer"),
             **lightning_config,
         )
         return lightning_module
@@ -308,7 +314,7 @@ class ConfigConstructorBase(abc.ABC):
 
     def build_trainer(self):
         trainer = pl.Trainer(
-            **self.config["trainer"],
+            **self.config.get("trainer", {}),
             callbacks=list(self.build_callbacks().values()),
             logger=self.build_logger(),
         )

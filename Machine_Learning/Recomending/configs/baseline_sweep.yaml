@@ -1,0 +1,20 @@
+project: Recommending
+name: "Baseline basic models movielens sweep"
+method: bayes
+metric:
+  goal: maximize
+  name: test_ndcg@10.mean
+parameters:
+  model:
+    name:
+      values: [RandomRecommender, PopularRecommender]
+  datamodule:
+    name: MovieLensDataModule
+    directory: local/ml-100k
+  lightning_module:
+    name: LitBaselineRecommender
+  trainer:
+    num_sanity_val_steps: 0
+  logger:
+    name: WandbLogger
+    save_dir: local

@@ -7,22 +7,23 @@ from my_tools.utils import sparse_dense_multiply
 
 class MSELoss:
     def __call__(self, explicit, model_ratings, implicit=None):
-        loss = ((explicit.to_dense() - model_ratings) ** 2).mean()
+        loss = ((explicit.to_dense() - model_ratings.to_dense()) ** 2).mean()
         return loss
 
 
 class ImplicitAwareSparseLoss:
     def __call__(self, explicit, implicit, model_ratings):
         """Loss = 1/|Explicit| * \\sum_{ij}Implicit_{ij} * (Explicit_{ij} - ModelRating_{ij})^2"""
-        error = model_ratings - explicit
+        error = model_ratings.to_dense() - explicit.to_dense()
         error = sparse_dense_multiply(sparse_dense_multiply(implicit, error), error)
+        error = error.coalesce()
         loss = torch.sparse.sum(error) / error.values().numel()
         return loss
 
 
 class PersonalizedRankingLoss:
     def __init__(
-        self, max_rating, confidence_in_rating_quality=0.9, memory_upper_bound=1e8
+        self, max_rating=5, confidence_in_rating_quality=0.9, memory_upper_bound=1e8
     ):
         """
         Ranking based loss inspired by Bayesian Personalized Ranking paper.

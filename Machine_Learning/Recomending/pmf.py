@@ -56,15 +56,22 @@ class ConstrainedProbabilityMatrixFactorization(ProbabilityMatrixFactorization):
         self,
         n_users,
         n_items,
-        latent_dimension,
-        weight_decay,
         implicit_feedback,
+        latent_dimension=10,
+        weight_decay=1e-3,
     ):
-        super().__init__(n_users, n_items, latent_dimension, weight_decay)
+        super().__init__(
+            n_users=n_users,
+            n_items=n_items,
+            latent_dimension=latent_dimension,
+            weight_decay=weight_decay,
+        )
         self.item_rating_effect_weight = build_weight(n_items, latent_dimension)
-        self.implicit_feedback_normalized = implicit_feedback.multiply(
-            1 / (implicit_feedback.sum(axis=1) + 1e-8)
-        ).tocsr()
+        self.implicit_feedback_normalized = (
+            implicit_feedback.multiply(1 / (implicit_feedback.sum(axis=1) + 1e-8))
+            .tocsr()
+            .astype("float32")
+        )
 
     def forward(self, user_ids=None, item_ids=None):
         if user_ids is None:
@@ -119,7 +126,9 @@ class LitProbabilityMatrixFactorization(LitRecommenderBase):
 
         if model_config["name"] == "ConstrainedProbabilityMatrixFactorization":
             model_config = model_config.copy()
-            model_config["implicit_feedback"] = self.train_explicit > 0
+            model_config["implicit_feedback"] = (
+                self.trainer.datamodule.train_explicit > 0
+            )
 
         model = build_class(
             class_candidates=model_candidates,
@@ -154,7 +163,7 @@ def main(config):
     MovielensDispatcher(
         config=config,
         lightning_candidates=[LitProbabilityMatrixFactorization],
-        datamodule_candidates=[MovielensPMFDataModule]
+        datamodule_candidates=[MovielensPMFDataModule],
     ).dispatch()
 
 

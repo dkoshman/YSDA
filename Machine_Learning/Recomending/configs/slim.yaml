@@ -1,6 +1,6 @@
 project: Recommending
 name: "SLIM debug run"
-#stage: test
+stage: test
 model:
   name: SLIM
   l2_coefficient: 1.0e-4
@@ -10,18 +10,12 @@ loss:
 #  name: PersonalizedRankingLoss
 #  max_rating: 5
 datamodule:
-  name: SLIMDataModule
+  name: MovielensSlimDatamodule
   directory: local/ml-100k
   batch_size: 100
-  num_workers: 0
+  num_workers: 4
 callbacks:
-  RecommendingIMDBCallback:
-    path_to_imdb_ratings_csv: "local/my_imdb_ratings.csv"
-    path_to_movielens_folder: "local/ml-100k"
-    k: 10
-  RecommendingMetricsCallback:
-    directory: "local/ml-100k"
-    k: [10, 20]
+  RecommendingDataOverviewCallback: {}
 lightning_module:
   name: LitSLIM
 optimizer:

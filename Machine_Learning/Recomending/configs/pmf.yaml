@@ -5,14 +5,12 @@ model:
   latent_dimension: 10
   weight_decay: 1.0e-3
 loss:
-  name: PersonalizedRankingLoss
+  name: ImplicitAwareSparseLoss
 datamodule:
-  name: PMFDataModule
+  name: MovielensPMFDataModule
   directory: local/ml-100k
   batch_size: 100
   num_workers: 0
-metrics:
-  k: [10, 20]
 lightning_module:
   name: LitProbabilityMatrixFactorization
 optimizer:
@@ -20,24 +18,27 @@ optimizer:
 trainer:
   max_epochs: 50
   accelerator: gpu
-  devices: [0]
+  devices: [5]
   default_root_dir: local
   check_val_every_n_epoch: 5
   amp_backend: native
   log_every_n_steps: 1
+logger:
+  name: WandbLogger
+  save_dir: local
 callbacks:
+  WandbWatcher:
+    log_every_n_steps: 50
   EarlyStopping:
     monitor: val_loss
     mode: min
     min_delta: 0
     patience: 2
-  GradientAccumulationScheduler:
-    scheduling: {0: 10}
-  StochasticWeightAveraging:
-    swa_lrs: 1.0e-2
-    swa_epoch_start: 10
-    annealing_epochs: 5
-    annealing_strategy: cos
-logger:
-  name: WandbLogger
-  save_dir: local
+#  GradientAccumulationScheduler:
+#    scheduling: {0: 10}
+#  StochasticWeightAveraging:
+#    swa_lrs: 1.0e-2
+#    swa_epoch_start: 10
+#    annealing_epochs: 5
+#    annealing_strategy: cos
+

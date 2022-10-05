@@ -7,9 +7,11 @@ from my_tools.entrypoints import ConfigDispenser
 
 from my_tools.utils import build_class
 
-from Machine_Learning.Recomending import losses, baseline
-from Machine_Learning.Recomending.baseline import ImplicitNearestNeighbors
-from Machine_Learning.Recomending.movielens import MovielensDispatcher
+import losses, baseline
+from baseline import ImplicitNearestNeighbors
+from movielens import MovielensDispatcher
+
+# TODO:catboost, transformer, maybe other neural nets
 
 
 class LitRecommenderBase(pl.LightningModule):
@@ -57,7 +59,7 @@ class LitRecommenderBase(pl.LightningModule):
         optimizer = build_class(
             modules=[torch.optim],
             params=self.parameters(),
-            **self.hparams["optimizer_config"],
+            **(self.hparams["optimizer_config"] or {}),
         )
         return optimizer
 
@@ -126,6 +128,7 @@ class Recommender:
         )
         self.model = model
 
+    @torch.inference_mode()
     def nearest_neighbours_ratings(self, explicit_feedback):
         """
         Predicts ratings for new user defined by its explicit feedback by
@@ -137,7 +140,7 @@ class Recommender:
             users_feedback=explicit_feedback
         )
         similar_users = nn_dict["similar_users"]
-        similarity = nn_dict["similarity"]
+        similarity = torch.from_numpy(nn_dict["similarity"])
         similarity /= similarity.sum(axis=0)
 
         ratings = torch.empty(*explicit_feedback.shape, dtype=torch.float32)
@@ -145,15 +148,14 @@ class Recommender:
             zip(similar_users, similarity)
         ):
             similar_ratings = self.model(user_ids=similar_users_row)
-            if torch.is_tensor(similar_ratings):
-                similarity_row = torch.from_numpy(similarity_row)
-            else:
-                similar_ratings = torch.from_numpy(similar_ratings).to(torch.float32)
-            ratings[i] = (
-                similar_ratings.transpose(0, 1).to(torch.float32) @ similarity_row
-            )
+            if not torch.is_tensor(similar_ratings):
+                similar_ratings = torch.from_numpy(similar_ratings)
+
+            similar_ratings = similar_ratings.to("cpu", torch.float32)
+            ratings[i] = similar_ratings.transpose(0, 1) @ similarity_row
         return ratings
 
+    @torch.inference_mode()
     def __call__(
         self,
         user_ids=None,

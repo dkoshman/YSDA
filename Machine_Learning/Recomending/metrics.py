@@ -1,11 +1,9 @@
-import string
 from typing import Literal
 
 import einops
 import numpy as np
 import pandas as pd
 import pytorch_lightning
-import scipy
 import torch
 import wandb
 
@@ -13,7 +11,6 @@ from numba import njit
 from scipy.sparse import csr_matrix
 
 from data import MovieLens
-from utils import scipy_coo_to_torch_sparse
 
 
 def relevant_pairs_to_frame(relevant_pairs):
@@ -325,18 +322,14 @@ class RecommendingMetrics:
 
 
 class RecommendingMetricsCallback(pytorch_lightning.callbacks.Callback):
-    def __init__(self, directory, k=10, aggregate_test_metrics=False):
-        self.aggregate_test_metrics = aggregate_test_metrics
+    def __init__(self, directory, k=10):
         movielens = MovieLens(directory)
         explicit_feedback = movielens.explicit_feedback_scipy_csr("u.data")
         if isinstance(k, int):
             k = [k]
         self.metrics = [RecommendingMetrics(explicit_feedback, k1) for k1 in k]
 
-    @staticmethod
-    def test_prefix(metrics_dict):
-        return {"test_" + k: v for k, v in metrics_dict.items()}
-
+    @torch.inference_mode()
     def on_test_batch_end(
         self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx
     ):
@@ -344,6 +337,7 @@ class RecommendingMetricsCallback(pytorch_lightning.callbacks.Callback):
             user_ids=batch["user_ids"], ratings=pl_module(**batch), kind="test"
         )
 
+    @torch.inference_mode()
     def on_validation_batch_end(
         self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx
     ):
@@ -356,14 +350,13 @@ class RecommendingMetricsCallback(pytorch_lightning.callbacks.Callback):
             metrics = atk_metric.batch_metrics_from_ratings(
                 user_ids=user_ids, ratings=ratings
             )
-            if kind == "test" and self.aggregate_test_metrics:
-                self.define_test_metrics(metrics)
-            wandb.log(metrics)
+            self.log_metrics(metrics, kind=kind)
 
-    def define_test_metrics(self, metrics):
-        metrics = self.test_prefix(metrics)
+    def log_metrics(self, metrics: dict, kind: Literal["val", "test"]):
+        metrics = {kind + "_" + k: v for k, v in metrics.items()}
         for metric_name in metrics:
             wandb.define_metric(metric_name, summary="mean")
+        wandb.log(metrics)
 
     def on_test_epoch_end(self, trainer=None, pl_module=None):
         self.epoch_end(kind="test")
@@ -375,103 +368,4 @@ class RecommendingMetricsCallback(pytorch_lightning.callbacks.Callback):
         for atk_metric in self.metrics:
             if len(atk_metric.unique_recommended_items):
                 metrics = atk_metric.finalize_coverage()
-                if kind == "test" and self.aggregate_test_metrics:
-                    self.define_test_metrics(metrics)
-                wandb.log(metrics)
-
-
-class RecommendingIMDBCallback(pytorch_lightning.callbacks.Callback):
-    def __init__(
-        self,
-        path_to_imdb_ratings_csv="local/my_imdb_ratings.csv",
-        path_to_movielens_folder="local/ml-100k",
-        n_recommendations=10,
-    ):
-        imdb = ImdbRatings(path_to_imdb_ratings_csv, path_to_movielens_folder)
-        self.explicit_feedback = imdb.explicit_feedback_scipy()
-        self.item_df = imdb.movielens["u.item"]
-        self.n_recommendations = n_recommendations
-
-    def on_test_epoch_end(self, trainer=None, pl_module=None):
-        recommendations = pl_module.recommend(
-            users_explicit_feedback=self.explicit_feedback,
-            n_recommendations=self.n_recommendations,
-        )
-        self.log_recommendation(recommendations.cpu().numpy())
-
-    def on_validation_epoch_end(self, trainer=None, pl_module=None):
-        recommendations = pl_module.recommend(
-            users_explicit_feedback=self.explicit_feedback,
-            n_recommendations=self.n_recommendations,
-        )
-        self.log_recommendation(recommendations.cpu().numpy())
-
-    def log_recommendation(self, recommendations):
-        recommendations += 1
-        for i, recs in enumerate(recommendations):
-            items_description = self.item_df.loc[recs]
-            imdb_urls = "https://www.imdb.com/find?q=" + items_description[
-                "movie title"
-            ].str.split("(").str[0].str.replace(r"\s+", "+", regex=True)
-            items_description = pd.concat(
-                [items_description["movie title"], imdb_urls], axis="columns"
-            )
-            wandb.log(
-                {
-                    f"recommended_items_user_{i}": wandb.Table(
-                        dataframe=items_description.T
-                    )
-                }
-            )
-
-
-class ImdbRatings:
-    def __init__(
-        self,
-        path_to_imdb_ratings_csv="local/my_imdb_ratings.csv",
-        path_to_movielens_folder="local/ml-100k",
-    ):
-        self.path_to_imdb_ratings_csv = path_to_imdb_ratings_csv
-        self.movielens = MovieLens(path_to_movielens_folder)
-
-    @property
-    def imdb_ratings(self):
-        return pd.read_csv(self.path_to_imdb_ratings_csv)
-
-    @staticmethod
-    def normalize_titles(titles):
-        titles = (
-            titles.str.lower()
-            .str.normalize("NFC")
-            .str.replace(f"[{string.punctuation}]", "", regex=True)
-            .str.replace("the", "")
-            .str.replace(r"\s+", " ", regex=True)
-            .str.strip()
-        )
-        return titles
-
-    def explicit_feedback_scipy(self):
-        imdb_ratings = self.imdb_ratings
-        imdb_ratings["Title"] = self.normalize_titles(imdb_ratings["Title"])
-        imdb_ratings["Your Rating"] = (imdb_ratings["Your Rating"] + 1) // 2
-
-        movielens_titles = self.movielens["u.item"]["movie title"]
-        movielens_titles = self.normalize_titles(movielens_titles.str.split("(").str[0])
-
-        liked_items_ids = []
-        liked_items_ratings = []
-        for title, rating in zip(imdb_ratings["Title"], imdb_ratings["Your Rating"]):
-            for movie_id, ml_title in movielens_titles.items():
-                if title == ml_title:
-                    liked_items_ids.append(movie_id - 1)
-                    liked_items_ratings.append(rating)
-
-        data = liked_items_ratings
-        row = np.zeros(len(liked_items_ids))
-        col = np.array(liked_items_ids)
-        shape = (1, self.movielens.shape[1])
-        explicit_feedback = scipy.sparse.coo_matrix((data, (row, col)), shape=shape)
-        return explicit_feedback
-
-    def explicit_feedback_torch(self):
-        return scipy_coo_to_torch_sparse(self.explicit_feedback_scipy())
+                self.log_metrics(metrics, kind)

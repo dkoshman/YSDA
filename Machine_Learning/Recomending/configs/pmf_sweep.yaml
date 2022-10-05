@@ -1,50 +1,62 @@
 project: Recommending
 name: "PMF movielens sweep"
-method: bayes
+method: random
 metric:
-  goal: minimize
-  name: val_loss
+  goal: maximize
+  name: test_ndcg@10.mean
 parameters:
   model:
-    name: BayesianPMF
+    name:
+      values:
+        - ProbabilityMatrixFactorization
+        - ConstrainedProbabilityMatrixFactorization
     latent_dimension:
       min: 10
-      max: 20
+      max: 300
     weight_decay:
-      min: 1.0e-3
-      max: 1.0e-2
+      values:
+        - 1.0e-4
+        - 1.0e-3
+        - 1.0e-2
   loss:
-  data:
-    folder: local/movielens-100k
-    batch_size: 1.0e+8
-    num_workers: 4
+    name:
+      values:
+        - MSELoss
+        - ImplicitAwareSparseLoss
+        - PersonalizedRankingLoss
+  datamodule:
+    name: MovielensPMFDataModule
+    directory: local/ml-100k
   lightning_module:
     name: LitProbabilityMatrixFactorization
   optimizer:
-    name: ADAM
-  trainer:
-    max_epochs: 50
-    accelerator: gpu
-    default_root_dir: local
-    check_val_every_n_epoch: 3
-    amp_backend: native
-  callbacks:
-    EarlyStopping:
-      monitor: val_loss
-      mode: min
-      min_delta: 0
-      patience: 2
-    GradientAccumulationScheduler:
-      scheduling: "{0: 10}"
-    StochasticWeightAveraging:
-      swa_lrs:
-        min: 1.0e-3
-        max: 1.0e-2
-      swa_epoch_start:
-        min: 10
-        max: 15
-      annealing_epochs: 5
-      annealing_strategy: cos
+    name: Adam
   logger:
     name: WandbLogger
     save_dir: local
+  trainer:
+    max_epochs: 50
+    accelerator: gpu
+    devices: [5]
+    default_root_dir: local
+    check_val_every_n_epoch: 5
+    amp_backend: native
+  callbacks:
+    WandbWatcher:
+      log_every_n_steps: 50
+    EarlyStopping:
+      monitor: val_loss
+      mode: min
+      patience: 5
+#    GradientAccumulationScheduler:
+#      scheduling: "{0: 10}"
+#    StochasticWeightAveraging:
+#      swa_lrs:
+#        min: 1.0e-3
+#        max: 1.0e-2
+#      swa_epoch_start:
+#        min: 10
+#        max: 15
+#      annealing_epochs: 5
+#      annealing_strategy: cos
+sweep_id: grp8bsqp

@@ -13,8 +13,10 @@ def free_cuda():
 
 
 def sparse_dense_multiply(sparse: torch.Tensor, dense: torch.Tensor):
-    if not sparse.is_sparse or dense.is_sparse:
+    if not (sparse.is_sparse or sparse.is_sparse_csr) or dense.is_sparse:
         raise ValueError("Incorrect tensor layouts")
+    if sparse.is_sparse_csr:
+        sparse = sparse.to_sparse_coo()
 
     indices = sparse._indices()
     values = sparse._values() * dense[indices[0, :], indices[1, :]]
