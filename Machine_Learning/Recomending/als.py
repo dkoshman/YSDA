@@ -2,6 +2,7 @@ import numba
 import numpy as np
 import pandas as pd
 import scipy
+import torch
 import wandb
 from my_tools.utils import build_class
 
@@ -10,63 +11,64 @@ from typing_extensions import Literal
 
 from my_tools.entrypoints import ConfigDispenser
 
+from utils import build_weight, build_bias
 from movielens import MovielensDispatcher
 from entrypoints import Recommender, NonLitToLitAdapterRecommender
 
 
-class ALS:
+class ALS(torch.nn.Module):
     def __init__(
         self,
-        implicit_feedback: scipy.sparse.csr_matrix,
-        enable_logging=False,
+        n_users,
+        n_items,
         epochs=10,
         latent_dimension_size=10,
         regularization_lambda=10,
         confidence_alpha=40,
         lambda_decay=0.5,
+        enable_logging=False,
     ):
-        if set(implicit_feedback.data) != {1}:
-            raise ValueError(
-                "This als implementation works only with binary implicit feedback"
-            )
+        super().__init__()
 
-        self.implicit_feedback = implicit_feedback
         self.enable_logging = enable_logging
         self.epochs = epochs
         self.regularization_lambda = regularization_lambda
-
-        self.preference = implicit_feedback
-        self.confidence_minus_1 = implicit_feedback * confidence_alpha
-        self.confidence_minus_1.eliminate_zeros()
-        self.confidence_x_preference = (
-            self.confidence_minus_1.multiply(implicit_feedback) + implicit_feedback
-        )
+        self.confidence_alpha = confidence_alpha
         self.lambda_decay = lambda_decay
 
-        self.user_factors = self.parameter_init(
-            implicit_feedback.shape[0], latent_dimension_size
+        self.user_factors = build_weight(n_users, latent_dimension_size)
+        self.user_factors.requires_grad = False
+        self.item_factors = build_weight(n_items, latent_dimension_size)
+        self.item_factors.requires_grad = False
+
+        self.confidence_x_preference = None
+        self.confidence_minus_1 = None
+        self.preference = None
+
+    def init_preference_confidence(self, explicit_feedback):
+        implicit_feedback = explicit_feedback > 0
+        self.preference = implicit_feedback
+        self.confidence_minus_1 = implicit_feedback * self.confidence_alpha
+        self.confidence_minus_1.eliminate_zeros()
+        self.confidence_x_preference = (
+            self.confidence_minus_1.multiply(self.preference) + self.preference
         )
-        self.item_factors = self.parameter_init(
-            implicit_feedback.shape[1], latent_dimension_size
-        )
 
-    @staticmethod
-    def parameter_init(*dimensions):
-        return np.random.randn(*dimensions).astype(np.float32)
+    def fit(self, explicit_feedback):
+        self.init_preference_confidence(explicit_feedback)
 
-    def log(self, dict_to_log):
-        if self.enable_logging:
-            wandb.log(dict_to_log)
-
-    def on_train_epoch_start(self):
-        self.log(dict(regularization_lambda=self.regularization_lambda))
-
-    def fit(self):
         for epoch in tqdm(range(self.epochs), "Alternating"):
             self.on_train_epoch_start()
             self.least_squares_optimization_with_fixed_factors(fixed="items")
             self.least_squares_optimization_with_fixed_factors(fixed="users")
             self.regularization_lambda *= self.lambda_decay
+
+    def on_train_epoch_start(self):
+        self.log(dict(regularization_lambda=self.regularization_lambda))
+
+    def log(self, dict_to_log):
+        if self.enable_logging:
+            wandb.log(dict_to_log)
 
     def least_squares_optimization_with_fixed_factors(
         self, fixed: Literal["users", "items"]
@@ -76,12 +78,12 @@ class ALS:
 
     def preprocess_optimization_args(self, *, fixed):
         if fixed == "items":
-            X = self.user_factors
-            Y = self.item_factors
+            X = self.user_factors.numpy()
+            Y = self.item_factors.numpy()
             sparse_iterator = self.sparse_iterator()
         elif fixed == "users":
-            X = self.item_factors
-            Y = self.user_factors
+            X = self.item_factors.numpy()
+            Y = self.user_factors.numpy()
             sparse_iterator = self.sparse_iterator(transpose=True)
         else:
             raise ValueError
@@ -123,7 +125,7 @@ class ALS:
             ind_slice = slice(ind_begin, ind_end)
             yield ptr_id, indices[ind_slice], cm1_data[ind_slice], cp_data[ind_slice]
 
-    def __call__(self, user_ids=None, item_ids=None):
+    def forward(self, user_ids=None, item_ids=None):
         if user_ids is None:
             user_ids = slice(None)
 
@@ -136,9 +138,8 @@ class ALS:
     def recommendation_factors(self, user_id, n_recommendations=10):
         recommender = Recommender(self.implicit_feedback, model=self)
         recommended_item_ids = recommender(
-            user_ids=[user_id],
-            n_recommendations=n_recommendations,
-        ).numpy()[0]
+            user_ids=[user_id], n_recommendations=n_recommendations
+        )[0]
         user_ratings = self(user_ids=[user_id], item_ids=recommended_item_ids)[0]
 
         YtY_plus_lambdaI = item_factors_regularization_term = (
@@ -237,21 +238,27 @@ class ALSjit(ALS):
 class ALSjitBiased(ALSjit):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.bias = self.parameter_init(1)
-        self.user_factors = self.parameter_init(
+
+        self.bias = build_bias(1)
+        self.bias.requires_grad = False
+
+        self.user_factors = build_weight(
             self.user_factors.shape[0], self.user_factors.shape[1] + 2
         )
+        self.user_factors.requires_grad = False
         self.user_factors[:, 0] = 1
-        self.item_factors = self.parameter_init(
+
+        self.item_factors = build_weight(
             self.item_factors.shape[0], self.item_factors.shape[1] + 2
         )
+        self.item_factors.requires_grad = False
         self.item_factors[:, 1] = 1
 
     def on_train_epoch_start(self):
         super().on_train_epoch_start()
         self.log(
             dict(
-                bias=self.bias[0],
+                bias=self.bias.item(),
                 mean_user_bias=self.user_factors[:, 1].mean(),
                 mean_item_bias=self.item_factors[:, 0].mean(),
             )
@@ -273,12 +280,18 @@ class ALSjitBiased(ALSjit):
             X_constant_latent_index, X_constant_latent_index
         ] -= self.regularization_lambda
 
-        XY_sum = (self.user_factors.sum(axis=0) * self.item_factors.sum(axis=0)).sum()
+        XY_sum = (
+            (self.user_factors.sum(axis=0) * self.item_factors.sum(axis=0)).sum().item()
+        )
 
         self.bias[:] = (
             self.confidence_x_preference.sum()
             - XY_sum
-            - (self.user_factors.T @ self.confidence_minus_1 @ self.item_factors).sum()
+            - (
+                self.user_factors.T.numpy()
+                @ self.confidence_minus_1
+                @ self.item_factors.numpy()
+            ).sum()
         ) / (self.confidence_minus_1.sum() + np.prod(self.confidence_minus_1.shape))
 
         return {
@@ -295,7 +308,7 @@ class ALSjitBiased(ALSjit):
             },
             **{
                 "YtY_plus_lambdaI": YtY_plus_lambdaI,
-                "bias": self.bias,
+                "bias": self.bias.numpy(),
                 "X_constant_latent_index": X_constant_latent_index,
             },
         }
@@ -411,7 +424,8 @@ class ALSRecommender(NonLitToLitAdapterRecommender):
     def build_model(self):
         model = build_class(
             class_candidates=[ALS, ALSjit, ALSjitBiased],
-            implicit_feedback=self.trainer.datamodule.train_explicit > 0,
+            n_users=self.trainer.datamodule.train_explicit.shape[0],
+            n_items=self.trainer.datamodule.train_explicit.shape[1],
             **self.hparams["model_config"],
         )
         return model

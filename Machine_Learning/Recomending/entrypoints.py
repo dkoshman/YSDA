@@ -91,7 +91,7 @@ class NonLitToLitAdapterRecommender(LitRecommenderBase):
 
     def on_train_batch_start(self, batch, batch_idx):
         """Skip train dataloader."""
-        self.model.fit()
+        self.model.fit(explicit_feedback=self.trainer.datamodule.train_explicit)
         self.trainer.should_stop = True
         return -1
 

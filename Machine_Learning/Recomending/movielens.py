@@ -58,7 +58,7 @@ class MovielensDispatcher(ConfigConstructorBase, abc.ABC):
             ),
             RecommendingMetricsCallback=dict(
                 directory="local/ml-100k",
-                k=[10, 20],
+                k=100,
             ),
         )
         datamodule_candidates = list(datamodule_candidates) + [MovieLensDataModule]
