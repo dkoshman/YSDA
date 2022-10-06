@@ -3,34 +3,35 @@ from typing import Literal
 
 import pytorch_lightning as pl
 import torch
-from my_tools.entrypoints import ConfigDispenser
 
+from my_tools.entrypoints import ConfigConstructorBase
 from my_tools.utils import build_class
 
-import losses, baseline
-from baseline import ImplicitNearestNeighbors
-from movielens import MovielensDispatcher
+import baseline
+import losses
+from data import RecommendingDataModuleMixin
 
-# TODO:catboost, transformer, maybe other neural nets
+# TODO: catboost, transformer, maybe other neural nets, finetune existing models
 
 
-class LitRecommenderBase(pl.LightningModule):
+class LitRecommenderBase(RecommendingDataModuleMixin, pl.LightningModule):
     def __init__(
         self,
+        datamodule_config,
         model_config,
         optimizer_config=None,
         loss_config=None,
         recommender_config=None,
     ):
-        super().__init__()
+        super().__init__(**datamodule_config)
         self.save_hyperparameters()
-        self.model = None
-        self.loss = None
-        self.recommend = None
+        self.model = self.build_model()
+        self.loss = self.build_loss()
+        self.recommend = self.build_recommender()
 
     @abc.abstractmethod
     def build_model(self):
-        return "model"
+        return torch.nn.Module()
 
     def build_loss(self):
         if config := self.hparams["loss_config"]:
@@ -38,22 +39,12 @@ class LitRecommenderBase(pl.LightningModule):
             return loss
 
     def build_recommender(self):
-        config = self.hparams["recommender_config"]
-        if config is None:
-            config = dict()
-
         recommender = Recommender(
-            train_explicit=self.trainer.datamodule.train_explicit,
+            train_explicit=self.train_explicit,
             model=self,
-            **config,
+            **(self.hparams["recommender_config"] or {}),
         )
         return recommender
-
-    def setup(self, stage=None):
-        if self.model is None:
-            self.model = self.build_model()
-            self.loss = self.build_loss()
-            self.recommend = self.build_recommender()
 
     def configure_optimizers(self):
         optimizer = build_class(
@@ -78,27 +69,39 @@ class LitRecommenderBase(pl.LightningModule):
         pass
 
 
+class RecommendingConfigConstructor(ConfigConstructorBase):
+    def build_lightning_module(self):
+        lightning_module = self.build_class(
+            datamodule_config=self.config["datamodule"],
+            model_config=self.config["model"],
+            loss_config=self.config.get("loss"),
+            optimizer_config=self.config.get("optimizer"),
+            **self.config["lightning_module"],
+        )
+        return lightning_module
+
+
 class NonLitToLitAdapterRecommender(LitRecommenderBase):
     @abc.abstractmethod
     def build_model(self):
         model = build_class(
             class_candidates=[...],
             modules=[...],
-            explicit_feedback=self.trainer.datamodule.train_explicit,
+            explicit_feedback=self.train_explicit,
             **self.hparams["model_config"],
         )
         return model
 
     def on_train_batch_start(self, batch, batch_idx):
         """Skip train dataloader."""
-        self.model.fit(explicit_feedback=self.trainer.datamodule.train_explicit)
+        self.model.fit(explicit_feedback=self.train_explicit)
         self.trainer.should_stop = True
         return -1
 
     def configure_optimizers(self):
         """Placeholder optimizer."""
-        adam = torch.optim.Adam(params=[torch.empty(0)])
-        return adam
+        optimizer = torch.optim.Adam(params=[torch.zeros(0)])
+        return optimizer
 
 
 class Recommender:
@@ -121,11 +124,13 @@ class Recommender:
         :param num_neighbors: number of nearest neighbors to use
         """
         self.train_explicit = train_explicit
-        self.nearest_neighbours = ImplicitNearestNeighbors(
-            explicit_feedback=self.train_explicit,
-            name=nearest_neighbors_model,
-            num_neighbors=num_neighbors,
+        self.nearest_neighbours = baseline.ImplicitRecommender(
+            n_users=self.train_explicit.shape[0],
+            n_items=self.train_explicit.shape[1],
+            implicit_model=nearest_neighbors_model,
+            implicit_kwargs=dict(K=num_neighbors),
         )
+        self.nearest_neighbours.fit(self.train_explicit)
         self.model = model
 
     @torch.inference_mode()
@@ -193,23 +198,12 @@ class Recommender:
         return recommendations
 
 
-class LitBaselineRecommender(NonLitToLitAdapterRecommender):
+class BaselineRecommender(NonLitToLitAdapterRecommender):
     def build_model(self):
         model = build_class(
             modules=[baseline],
-            explicit_feedback=self.trainer.datamodule.train_explicit,
+            n_users=self.train_explicit.shape[0],
+            n_items=self.train_explicit.shape[1],
             **self.hparams["model_config"],
         )
         return model
-
-
-@ConfigDispenser
-def main(config):
-    MovielensDispatcher(
-        config=config,
-        lightning_candidates=[LitBaselineRecommender],
-    ).dispatch()
-
-
-if __name__ == "__main__":
-    main()

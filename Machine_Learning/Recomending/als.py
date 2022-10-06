@@ -1,7 +1,6 @@
 import numba
 import numpy as np
 import pandas as pd
-import scipy
 import torch
 import wandb
 from my_tools.utils import build_class
@@ -9,10 +8,8 @@ from my_tools.utils import build_class
 from tqdm.auto import tqdm
 from typing_extensions import Literal
 
-from my_tools.entrypoints import ConfigDispenser
 
 from utils import build_weight, build_bias
-from movielens import MovielensDispatcher
 from entrypoints import Recommender, NonLitToLitAdapterRecommender
 
 
@@ -23,14 +20,12 @@ class ALS(torch.nn.Module):
         n_items,
         epochs=10,
         latent_dimension_size=10,
-        regularization_lambda=10,
-        confidence_alpha=40,
-        lambda_decay=0.5,
-        enable_logging=False,
+        regularization_lambda=100,
+        confidence_alpha=10,
+        lambda_decay=0.75,
     ):
         super().__init__()
 
-        self.enable_logging = enable_logging
         self.epochs = epochs
         self.regularization_lambda = regularization_lambda
         self.confidence_alpha = confidence_alpha
@@ -67,7 +62,7 @@ class ALS(torch.nn.Module):
         self.log(dict(regularization_lambda=self.regularization_lambda))
 
     def log(self, dict_to_log):
-        if self.enable_logging:
+        if wandb.run is not None:
             wandb.log(dict_to_log)
 
     def least_squares_optimization_with_fixed_factors(
@@ -424,20 +419,8 @@ class ALSRecommender(NonLitToLitAdapterRecommender):
     def build_model(self):
         model = build_class(
             class_candidates=[ALS, ALSjit, ALSjitBiased],
-            n_users=self.trainer.datamodule.train_explicit.shape[0],
-            n_items=self.trainer.datamodule.train_explicit.shape[1],
+            n_users=self.hparams["n_users"],
+            n_items=self.hparams["n_items"],
             **self.hparams["model_config"],
         )
         return model
-
-
-@ConfigDispenser
-def main(config):
-    MovielensDispatcher(
-        config=config,
-        lightning_candidates=[ALSRecommender],
-    ).dispatch()
-
-
-if __name__ == "__main__":
-    main()

@@ -1,0 +1,15 @@
+project: Recommending
+name: "SVD run"
+stage: test
+model:
+  name: SVDRecommender
+  n_components: 200
+datamodule:
+  directory: local/ml-100k
+lightning_module:
+  name: MovieLensBaselineRecommender
+trainer:
+  num_sanity_val_steps: 0
+logger:
+  name: WandbLogger
+  save_dir: local

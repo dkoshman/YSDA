@@ -3,21 +3,30 @@ name: "SLIM debug run"
 stage: test
 model:
   name: SLIM
-  l2_coefficient: 1.0e-4
-  l1_coefficient: 1.0e-4
+  l2_coefficient:
+    values:
+      - 1.0e-5
+      - 1.0e-4
+      - 1.0e-3
+      - 1.0e-2
+  l1_coefficient:
+    values:
+      - 1.0e-5
+      - 1.0e-4
+      - 1.0e-3
+      - 1.0e-2
 loss:
-  name: MSELoss
-#  name: PersonalizedRankingLoss
-#  max_rating: 5
+  name:
+    values:
+      - MSELoss
+      - ImplicitAwareSparseLoss
+      - PersonalizedRankingLoss
 datamodule:
-  name: MovielensSlimDatamodule
   directory: local/ml-100k
   batch_size: 100
   num_workers: 4
-callbacks:
-  RecommendingDataOverviewCallback: {}
 lightning_module:
-  name: LitSLIM
+  name: MovieLensSLIMRecommender
 optimizer:
   name: Adam
 trainer:

@@ -4,12 +4,10 @@ import torch
 import torchmetrics as tm
 import wandb
 
-import als
-import entrypoints
-import bpmf
+
 import metrics
-import pmf
-import slim
+import main
+from Machine_Learning.Recomending.utils import fetch_checkpoint_path
 
 from callbacks import RecommendingDataOverviewCallback
 
@@ -18,9 +16,7 @@ def get_config_base():
     config_base = dict(
         config_path="configs/config_for_testing.yaml",
         logger=dict(name="WandbLogger", offline=True, anonymous=True, save_dir="local"),
-        datamodule=dict(
-            name="MovieLensDataModule", directory="local/ml-100k", batch_size=100
-        ),
+        datamodule=dict(directory="local/ml-100k", batch_size=100),
     )
     return config_base
 
@@ -119,27 +115,31 @@ def test_normalized_discounted_cumulative_gain():
 
 
 def test_slim():
-    config = get_config_base()
-    config["datamodule"]["name"] = "MovielensSlimDatamodule"
-    slim.main(**config, model=dict(name="SLIM"), lightning_module=dict(name="LitSLIM"))
-
-
-def test_pmf():
-    config = get_config_base()
-    config["datamodule"]["name"] = "MovielensPMFDataModule"
-    pmf.main(
-        **config,
-        model=dict(name="ProbabilityMatrixFactorization"),
-        lightning_module=dict(name="LitProbabilityMatrixFactorization"),
+    main.main(
+        **get_config_base(),
+        model=dict(name="SLIM"),
+        lightning_module=dict(name="MovieLensSLIMRecommender"),
     )
 
 
-def test_als():
-    for als_name in ["ALS", "ALSjit", "ALSjitBiased"]:
-        als.main(
+def test_pmf():
+    for name in [
+        "ProbabilityMatrixFactorization",
+        "ConstrainedProbabilityMatrixFactorization",
+    ]:
+        main.main(
             **get_config_base(),
-            model=dict(name=als_name),
-            lightning_module=dict(name="ALSRecommender"),
+            model=dict(name=name),
+            lightning_module=dict(name="MovieLensPMFRecommender"),
+        )
+
+
+def test_als():
+    for name in ["ALS", "ALSjit", "ALSjitBiased"]:
+        main.main(
+            **get_config_base(),
+            model=dict(name=name),
+            lightning_module=dict(name="MovieLensALSRecommender"),
         )
 
 
@@ -147,30 +147,45 @@ def test_baseline():
     for name in [
         "RandomRecommender",
         "PopularRecommender",
-        "ImplicitNearestNeighbors",
         "SVDRecommender",
         "NearestNeighbours",
     ]:
-        entrypoints.main(
+        main.main(
             **get_config_base(),
             model=dict(name=name),
-            lightning_module=dict(name="LitBaselineRecommender"),
+            lightning_module=dict(name="MovieLensBaselineRecommender"),
+        )
+
+
+def test_implicit_nearest_neighbors():
+    for implicit_model in [
+        "BM25Recommender",
+        "CosineRecommender",
+        "TFIDFRecommender",
+    ]:
+        main.main(
+            **get_config_base(),
+            model=dict(
+                name="ImplicitRecommender",
+                implicit_model=implicit_model,
+            ),
+            lightning_module=dict(name="MovieLensBaselineRecommender"),
         )
 
 
 def test_implicit_matrix_factorization():
-    for matrix_factorization_model in [
+    for implicit_model in [
         "AlternatingLeastSquares",
         "LogisticMatrixFactorization",
         "BayesianPersonalizedRanking",
     ]:
-        entrypoints.main(
+        main.main(
             **get_config_base(),
             model=dict(
-                name="ImplicitMatrixFactorization",
-                matrix_factorization_model=matrix_factorization_model,
+                name="ImplicitRecommender",
+                implicit_model=implicit_model,
             ),
-            lightning_module=dict(name="LitBaselineRecommender"),
+            lightning_module=dict(name="MovieLensBaselineRecommender"),
         )
 
 
@@ -238,21 +253,44 @@ def test_RecommendingMetrics():
 
 
 def test_bpmf():
-    bpmf.main(
+    main.main(
         **get_config_base(),
         model=dict(name="BayesianPMF"),
-        lightning_module=dict(name="BPMFRecommender"),
+        lightning_module=dict(name="MovieLensBPMFRecommender"),
     )
+
 
 def test_RecommendingDataOverviewCallback():
     explicit_feedback = scipy.sparse.csr_matrix(
-    np.random.choice(
-        np.arange(6),
-        size=(1300, 800),
-        replace=True,
-        p=[0.90, 0, 0.01, 0.02, 0.03, 0.04],
+        np.random.choice(
+            np.arange(6),
+            size=(1300, 800),
+            replace=True,
+            p=[0.90, 0, 0.01, 0.02, 0.03, 0.04],
+        )
     )
-)
-    callback = RecommendingDataOverviewCallback(explicit_feedback=explicit_feedback)
+    callback = RecommendingDataOverviewCallback()
+    callback.explicit = explicit_feedback
     with wandb.init(dir="local", mode="offline"):
         callback.log_data_overview()
+
+
+def test_wandb_artifact_checkpointing():
+    config = get_config_base()
+    config["logger"] = dict(name="WandbLogger", save_dir="local")
+    artifact_name = "PopularRecommenderTesting"
+    with wandb.init() as run:
+        main.main(
+            **config,
+            model=dict(name="PopularRecommender"),
+            lightning_module=dict(name="MovieLensBaselineRecommender"),
+            callbacks=dict(WandbCheckpointCallback=dict(artifact_name=artifact_name)),
+        )
+        checkpoint_path = fetch_checkpoint_path(
+            entity=run.entity, project=run.project, artifact_name=artifact_name
+        )
+
+    model = main.MovieLensBaselineRecommender.load_from_checkpoint(
+        checkpoint_path=checkpoint_path
+    )
+    model.recommend(user_ids=[0, 1])

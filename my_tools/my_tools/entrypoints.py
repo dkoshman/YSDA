@@ -250,19 +250,20 @@ class ConfigConstructorBase(abc.ABC):
     def __init__(
         self,
         config,
-        lightning_candidates=(),
-        datamodule_candidates=(),
-        callback_candidates=(),
+        class_candidates=(),
+        module_candidates=(),
     ):
-        self.lightning_candidates = lightning_candidates
-        self.datamodule_candidates = datamodule_candidates
-        self.callback_candidates = callback_candidates
+        self.class_candidates = class_candidates
+        self.module_candidates = list(module_candidates) + [pl.callbacks, pl.loggers]
         self.config = config.copy()
         super().__init__()
 
-    @property
-    def build_class(self):
-        return build_class
+    def build_class(self, **kwargs):
+        return build_class(
+            class_candidates=self.class_candidates,
+            modules=self.module_candidates,
+            **kwargs,
+        )
 
     def main(self):
         """Example implementation, feel free to override."""
@@ -273,21 +274,11 @@ class ConfigConstructorBase(abc.ABC):
         trainer.test(lightning_module, datamodule=datamodule)
 
     def build_lightning_module(self):
-        lightning_config = self.config["lightning_module"]
-        lightning_module = self.build_class(
-            class_candidates=self.lightning_candidates,
-            model_config=self.config["model"],
-            loss_config=self.config.get("loss"),
-            optimizer_config=self.config.get("optimizer"),
-            **lightning_config,
-        )
+        lightning_module = self.build_class(**self.config["lightning_module"])
         return lightning_module
 
     def build_datamodule(self):
-        datamodule = self.build_class(
-            class_candidates=self.datamodule_candidates,
-            **self.config["datamodule"],
-        )
+        datamodule = self.build_class(**self.config["datamodule"])
         return datamodule
 
     def build_callbacks(self) -> dict:
@@ -295,10 +286,7 @@ class ConfigConstructorBase(abc.ABC):
         if callbacks_config := self.config.get("callbacks"):
             for callback_name, single_callback_config in callbacks_config.items():
                 callback = self.build_class(
-                    class_candidates=self.callback_candidates,
-                    modules=[pl.callbacks],
-                    name=callback_name,
-                    **single_callback_config,
+                    name=callback_name, **single_callback_config
                 )
                 callbacks[callback_name] = callback
         return callbacks
@@ -306,7 +294,6 @@ class ConfigConstructorBase(abc.ABC):
     def build_logger(self):
         if logger_config := self.config.get("logger"):
             logger = self.build_class(
-                modules=[pl.loggers],
                 **logger_config,
                 project=self.config.get("project"),
             )

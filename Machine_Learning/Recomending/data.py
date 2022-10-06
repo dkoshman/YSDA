@@ -6,7 +6,6 @@ from typing import Literal, Optional
 
 import numpy as np
 import pandas as pd
-import pytorch_lightning
 import torch
 
 from scipy.sparse import coo_matrix, csr_matrix
@@ -118,23 +117,59 @@ class GridSampler:
         yield from ({"user_ids": i[0], "item_ids": i[1]} for i in batch_indices_product)
 
 
-class RecommendingDataModule(pytorch_lightning.LightningDataModule):
+def build_recommending_sampler(
+    batch_size,
+    n_users,
+    n_items,
+    sampler_type: Literal["grid", "user", "item"],
+    shuffle,
+):
+    match sampler_type:
+        case "grid":
+            grid_batch_size = int(batch_size**2 * n_items / n_users)
+            sampler = GridSampler(
+                dataset_shape=(n_users, n_items),
+                approximate_batch_size=grid_batch_size,
+                shuffle=shuffle,
+            )
+        case "user":
+            sampler = UserSampler(
+                size=n_users,
+                batch_size=batch_size,
+                shuffle=shuffle,
+            )
+        case "item":
+            sampler = ItemSampler(
+                size=n_items,
+                batch_size=batch_size,
+                shuffle=shuffle,
+            )
+        case _:
+            ValueError(f"Unknown sampler type {sampler_type}.")
+    return sampler
+
+
+class SparseDataModuleMixin:
+    def on_after_batch_transfer(self, batch, dataloader_idx=0):
+        """
+        Need to manually pack and then unpack sparse torch matrices because
+        they are unsupported in Dataloaders as of the moment of writing.
+        """
+        return SparseDataset.unpack_sparse_kwargs_to_torch_sparse_coo(batch)
+
+
+class RecommendingDataModuleMixin(SparseDataModuleMixin):
     def __init__(
-        self,
-        train_explicit_file=None,
-        val_explicit_file=None,
-        test_explicit_file=None,
-        batch_size=100,
-        num_workers=0,
-        **kwargs,
+        self, *args, batch_size=100, num_workers=0, persistent_workers=False, **kwargs
     ):
-        super().__init__()
-        self.common_dataloader_params = dict(
-            num_workers=num_workers,
-            pin_memory=isinstance(num_workers, int) and num_workers > 1,
-            batch_size=None,
+        super().__init__(*args, **kwargs)
+        self.save_hyperparameters(
+            dict(
+                batch_size=batch_size,
+                num_workers=num_workers,
+                persistent_workers=persistent_workers,
+            )
         )
-        self.save_hyperparameters()
 
     @property
     def train_explicit(self) -> Optional[csr_matrix]:
@@ -150,67 +185,48 @@ class RecommendingDataModule(pytorch_lightning.LightningDataModule):
 
     def build_dataloader(
         self,
+        explicit_feedback=None,
         dataset=None,
         sampler_type: Literal["grid", "user", "item"] = "user",
         shuffle=False,
     ):
         if dataset is None:
-            return
+            if explicit_feedback is None:
+                return
+            dataset = SparseDataset(explicit_feedback)
 
-        match sampler_type:
-            case "grid":
-                batch_size = int(
-                    self.hparams["batch_size"] ** 2
-                    * dataset.shape[1]
-                    / dataset.shape[0]
-                )
-                sampler = GridSampler(
-                    dataset_shape=dataset.shape,
-                    approximate_batch_size=batch_size,
-                    shuffle=shuffle,
-                )
-            case "user":
-                sampler = UserSampler(
-                    size=dataset.shape[0],
-                    batch_size=self.hparams["batch_size"],
-                    shuffle=shuffle,
-                )
-            case "item":
-                sampler = ItemSampler(
-                    size=dataset.shape[1],
-                    batch_size=self.hparams["batch_size"],
-                    shuffle=shuffle,
-                )
-            case _:
-                ValueError(f"Unknown sampler type{sampler_type}")
-
+        sampler = build_recommending_sampler(
+            batch_size=self.hparams["batch_size"],
+            n_users=dataset.shape[0],
+            n_items=dataset.shape[1],
+            sampler_type=sampler_type,
+            shuffle=shuffle,
+        )
+        num_workers = self.hparams["num_workers"]
         dataloader = DataLoader(
             dataset=dataset,
             sampler=sampler,
-            **self.common_dataloader_params,
+            batch_size=None,
+            num_workers=num_workers,
+            pin_memory=isinstance(num_workers, int) and num_workers > 1,
+            persistent_workers=self.hparams["persistent_workers"],
         )
         return dataloader
 
-    def on_after_batch_transfer(self, batch, dataloader_idx=0):
-        """
-        Need to manually pack and then unpack sparse torch matrices because
-        they are unsupported in Dataloaders as of the moment of writing.
-        """
-        return SparseDataset.unpack_sparse_kwargs_to_torch_sparse_coo(batch)
-
     def train_dataloader(self):
-        if (explicit := self.train_explicit) is not None:
-            return self.build_dataloader(
-                SparseDataset(explicit), sampler_type="user", shuffle=True
-            )
+        return self.build_dataloader(
+            explicit_feedback=self.train_explicit, sampler_type="user", shuffle=True
+        )
 
     def val_dataloader(self):
-        if (explicit := self.val_explicit) is not None:
-            return self.build_dataloader(SparseDataset(explicit), sampler_type="user")
+        return self.build_dataloader(
+            explicit_feedback=self.val_explicit, sampler_type="user"
+        )
 
     def test_dataloader(self):
-        if (explicit := self.test_explicit) is not None:
-            return self.build_dataloader(SparseDataset(explicit), sampler_type="user")
+        return self.build_dataloader(
+            explicit_feedback=self.test_explicit, sampler_type="user"
+        )
 
 
 class MovieLens:

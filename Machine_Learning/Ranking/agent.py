@@ -39,7 +39,7 @@ class Agent:
 
         data = pickle.load(open(f"data/{config['datasets']}.pickle", "rb"))
 
-        match config.model:
+        match config.implicit_model:
             case "dssm":
                 dssm = DSSM(
                     hidden_dimensions=[len(data["vectorizer"].vocabulary_)]

@@ -1,6 +1,9 @@
+import os
+
 import numpy as np
 import scipy.sparse
 import torch
+import wandb
 
 
 def build_weight(*dimensions):
@@ -64,3 +67,16 @@ def split_dataset(dataset, fraction):
     right_size = int(fraction * len_dataset)
     left_size = len_dataset - right_size
     return torch.utils.data.random_split(dataset, [left_size, right_size])
+
+
+def fetch_checkpoint_path(
+    *, entity="dkoshman", project="Recommending", artifact_name, alias="latest"
+):
+    api = wandb.Api()
+    artifact = api.artifact(f"{entity}/{project}/{artifact_name}:{alias}")
+    checkpoint = artifact.metadata.get("checkpoint")
+    if not checkpoint or not os.path.exists(checkpoint):
+        print("Downloading artifact")
+        artifact_dir = artifact.download()
+        checkpoint = os.path.join(artifact_dir, artifact.get_path("checkpoint").path)
+    return checkpoint

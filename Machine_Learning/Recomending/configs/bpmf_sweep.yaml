@@ -1,0 +1,38 @@
+project: Recommending
+name: "BPMF sweep"
+method: random
+metric:
+  goal: maximize
+  name: test_ndcg@100.mean
+parameters:
+  model:
+    name: [BayesianPMF]
+    n_feature_dimensions:
+      min: 10
+      max: 300
+    burn_in_steps:
+      min: 100
+      max: 1000
+    keeper_steps:
+      min: 10
+      max: 100
+    predictive_explicit_precision:
+      values:
+        - 1.0e-1
+        - 1.0
+        - 1.0e+1
+    features_hyper_precision_coefficient:
+      values:
+        - 1.0e-1
+        - 1.0
+        - 1.0e+1
+  datamodule:
+    directory: local/ml-100k
+    num_workers: 0
+  lightning_module:
+    name: MovieLensALSRecommender
+  logger:
+    name: WandbLogger
+    save_dir: local
+  trainer:
+    num_sanity_val_steps: 0

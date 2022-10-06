@@ -3,13 +3,11 @@ import warnings
 import scipy.sparse
 import torch
 
-from my_tools.entrypoints import ConfigDispenser
 from my_tools.models import register_regularization_hook
 from my_tools.utils import scipy_to_torch_sparse, StoppingMonitor, build_class
 
 from data import SparseDataset
 from entrypoints import LitRecommenderBase
-from movielens import MovielensDispatcher, MovieLensDataModule
 from utils import torch_sparse_slice
 
 
@@ -22,6 +20,7 @@ class SLIM(torch.nn.Module):
     due to sparsity. It may be beneficial to add biases to this implementation.
     """
 
+    # TODO: move explicit_feedback to fit
     def __init__(
         self,
         explicit_feedback: scipy.sparse.csr_matrix,
@@ -173,16 +172,57 @@ class SLIMDataset(SparseDataset):
         return item
 
 
-class SlimDataModuleMixin:
-    def setup(self, stage=None):
-        super().setup(stage)
+class SLIMRecommender(LitRecommenderBase):
+    def __init__(
+        self,
+        *args,
+        patience=0,
+        min_delta=0,
+        check_val_every_n_epoch=10,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.save_hyperparameters(
+            dict(
+                patience=patience,
+                min_delta=min_delta,
+                check_val_every_n_epoch=check_val_every_n_epoch,
+            )
+        )
+        self.stopping_monitor = None
         self.current_batch = None
         self.batch_is_fitted = False
-        slim_dataset = SLIMDataset(self.train_explicit, self.val_explicit)
-        item_dataloader = self.build_dataloader(
-            dataset=slim_dataset, sampler_type="item"
+        self.item_dataloader_iter = None
+
+    def setup(self, stage=None):
+        if stage == "fit":
+            if self.trainer.limit_val_batches != 0:
+                warnings.warn(
+                    "In this implementation when training model is iterating over items, "
+                    "and the user-wise metrics cannot be calculated while training. "
+                    "So validation should be manually disabled, and the model will validate "
+                    "when it is fitted."
+                )
+            self.stopping_monitor = StoppingMonitor(
+                self.hparams["patience"], self.hparams["min_delta"]
+            )
+            self.current_batch = None
+            self.batch_is_fitted = False
+            slim_dataset = SLIMDataset(self.train_explicit, self.val_explicit)
+            item_dataloader = self.build_dataloader(
+                dataset=slim_dataset, sampler_type="item"
+            )
+            self.item_dataloader_iter = iter(item_dataloader)
+
+        super().setup(stage)
+
+    def build_model(self):
+        model = build_class(
+            class_candidates=[SLIM],
+            explicit_feedback=self.train_explicit,
+            **self.hparams["model_config"],
         )
-        self.item_dataloader_iter = iter(item_dataloader)
+        return model
 
     def train_dataloader(self):
         try:
@@ -194,46 +234,9 @@ class SlimDataModuleMixin:
         while not self.batch_is_fitted:
             yield self.current_batch
 
-
-class MovielensSlimDatamodule(SlimDataModuleMixin, MovieLensDataModule):
-    pass
-
-
-class LitSLIM(LitRecommenderBase):
-    def __init__(
-        self,
-        *args,
-        patience=0,
-        min_delta=0,
-        checkpoint_path="local/slim_finalized.ckpt",
-        check_val_every_n_epoch=10,
-        **kwargs,
-    ):
-        self.save_hyperparameters("checkpoint_path", "check_val_every_n_epoch")
-        super().__init__(*args, **kwargs)
-        self.stopping_monitor = StoppingMonitor(patience, min_delta)
-
-    def setup(self, stage=None):
-        if self.trainer.limit_val_batches != 0:
-            warnings.warn(
-                "In this implementation when training model is iterating over items, "
-                "and the user-wise metrics cannot be calculated while training. "
-                "So validation should be manually disabled, and the model will validate "
-                "when it is fitted."
-            )
-        super().setup(stage)
-
-    def build_model(self):
-        model = build_class(
-            class_candidates=[SLIM],
-            **self.hparams["model_config"],
-            explicit_feedback=self.trainer.datamodule.train_explicit,
-        )
-        return model
-
     def on_train_batch_start(self, batch, batch_idx):
-        if self.trainer.datamodule.batch_is_fitted:
-            self.trainer.datamodule.batch_is_fitted = False
+        if self.batch_is_fitted:
+            self.batch_is_fitted = False
             return -1
         if self.model.is_uninitialized():
             self.model.init_dense_weight_slice(item_ids=batch["item_ids"])
@@ -248,9 +251,9 @@ class LitSLIM(LitRecommenderBase):
             self.log("val_loss", val_loss)
 
             if self.stopping_monitor.is_time_to_stop(val_loss):
-                self.trainer.datamodule.batch_is_fitted = True
+                self.batch_is_fitted = True
                 density = self.model.transform_dense_slice_to_sparse(
-                    item_ids=self.trainer.datamodule.current_batch["item_ids"]
+                    item_ids=self.current_batch["item_ids"]
                 )
                 self.log("Items similarity matrix density", density)
 
@@ -258,24 +261,10 @@ class LitSLIM(LitRecommenderBase):
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
         self.model.clip_parameter()
+        # Update parameters passed to optimizer.
         self.trainer.optimizers = [self.configure_optimizers()]
 
     def on_fit_end(self):
         self.model.finalize()
-        self.trainer.validate(self, datamodule=self.trainer.datamodule)
-        if checkpoint_path := self.hparams["checkpoint_path"]:
-            self.trainer.save_checkpoint(checkpoint_path)
+        self.trainer.validate(self)
         super().on_fit_end()
-
-
-@ConfigDispenser
-def main(config):
-    MovielensDispatcher(
-        config=config,
-        lightning_candidates=[LitSLIM],
-        datamodule_candidates=[MovielensSlimDatamodule],
-    ).dispatch()
-
-
-if __name__ == "__main__":
-    main()

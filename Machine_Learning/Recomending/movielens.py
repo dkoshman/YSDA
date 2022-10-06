@@ -3,23 +3,38 @@ import abc
 import torch
 import wandb
 
-from callbacks import (
-    RecommendingIMDBCallback,
-    RecommendingDataOverviewCallback,
-    WandbWatcher,
+import callbacks
+from data import MovieLens, RecommendingDataModuleMixin
+from entrypoints import (
+    LitRecommenderBase,
+    NonLitToLitAdapterRecommender,
+    RecommendingConfigConstructor,
 )
-from data import MovieLens, RecommendingDataModule
-from metrics import RecommendingMetricsCallback
-
-from my_tools.entrypoints import ConfigConstructorBase
+import metrics
 
 
-class MovieLensDataModule(RecommendingDataModule):
-    def __init__(self, directory, **kwargs):
+class MovieLensDataModuleMixin(RecommendingDataModuleMixin):
+    def __init__(
+        self,
+        directory,
+        train_explicit_file=None,
+        val_explicit_file=None,
+        test_explicit_file=None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.movielens = MovieLens(directory)
-        self.n_users, self.n_items = self.movielens.shape
-        self.save_hyperparameters(ignore="movielens")
+        n_users, n_items = self.movielens.shape
+        self.save_hyperparameters(
+            dict(
+                directory=directory,
+                train_explicit_file=train_explicit_file,
+                val_explicit_file=val_explicit_file,
+                test_explicit_file=test_explicit_file,
+                n_users=n_users,
+                n_items=n_items,
+            )
+        )
 
     @property
     def train_explicit(self):
@@ -37,13 +52,22 @@ class MovieLensDataModule(RecommendingDataModule):
             return self.movielens.explicit_feedback_scipy_csr(file)
 
 
-class MovielensDispatcher(ConfigConstructorBase, abc.ABC):
+class MovieLensLitRecommender(LitRecommenderBase, MovieLensDataModuleMixin, abc.ABC):
+    pass
+
+
+class MovieLensNonLitToLitAdapter(
+    NonLitToLitAdapterRecommender, MovieLensDataModuleMixin, abc.ABC
+):
+    pass
+
+
+class MovieLensDispatcher(RecommendingConfigConstructor, abc.ABC):
     def __init__(
         self,
         config,
-        lightning_candidates=(),
-        datamodule_candidates=(),
-        callback_candidates=(),
+        class_candidates=(),
+        module_candidates=(),
     ):
         # For some reason with some configuration it is necessary to manually init cuda.
         torch.cuda.init()
@@ -61,19 +85,17 @@ class MovielensDispatcher(ConfigConstructorBase, abc.ABC):
                 k=100,
             ),
         )
-        datamodule_candidates = list(datamodule_candidates) + [MovieLensDataModule]
-        callback_candidates = list(callback_candidates) + [
-            RecommendingIMDBCallback,
-            RecommendingMetricsCallback,
-            RecommendingDataOverviewCallback,
-            WandbWatcher,
-        ]
         super().__init__(
             config,
-            lightning_candidates=lightning_candidates,
-            datamodule_candidates=datamodule_candidates,
-            callback_candidates=callback_candidates,
+            class_candidates=class_candidates,
+            module_candidates=list(module_candidates) + [callbacks, metrics],
         )
+
+    def main(self):
+        lightning_module = self.build_lightning_module()
+        trainer = self.build_trainer()
+        trainer.fit(lightning_module)
+        trainer.test(lightning_module)
 
     def update_tune_data(self):
         self.config["datamodule"].update(

@@ -113,7 +113,7 @@ class RankingDataset(Dataset):
             train.groupby("query_id")
             .apply(
                 lambda df: {
-                    "query": transform(queries.loc[df.name]),
+                    "query": transform(queries.loc[df.artifact_name]),
                     "documents": transform(orgs.loc[df["org_id"]].values),
                     "pairwise_numeric_features": transform(
                         df.drop(

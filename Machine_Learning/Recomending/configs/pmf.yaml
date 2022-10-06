@@ -1,18 +1,18 @@
 project: Recommending
 name: "PMF run"
+stage: test
 model:
   name: ProbabilityMatrixFactorization
-  latent_dimension: 10
-  weight_decay: 1.0e-3
+  latent_dimension: 200
+  weight_decay: 1.0e-4
 loss:
-  name: ImplicitAwareSparseLoss
+  name: MSELoss
 datamodule:
-  name: MovielensPMFDataModule
   directory: local/ml-100k
   batch_size: 100
-  num_workers: 0
+  num_workers: 4
 lightning_module:
-  name: LitProbabilityMatrixFactorization
+  name: MovieLensPMFRecommender
 optimizer:
   name: Adam
 trainer:
@@ -34,11 +34,5 @@ callbacks:
     mode: min
     min_delta: 0
     patience: 2
-#  GradientAccumulationScheduler:
-#    scheduling: {0: 10}
-#  StochasticWeightAveraging:
-#    swa_lrs: 1.0e-2
-#    swa_epoch_start: 10
-#    annealing_epochs: 5
-#    annealing_strategy: cos
-
+  WandbCheckpointCallback:
+    artifact_name: pmf

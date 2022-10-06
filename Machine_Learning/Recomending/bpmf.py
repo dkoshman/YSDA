@@ -9,16 +9,15 @@ from my_tools.utils import build_class
 
 from tqdm.auto import tqdm
 
-from my_tools.entrypoints import ConfigDispenser
-
-from movielens import MovielensDispatcher
 from entrypoints import NonLitToLitAdapterRecommender
 
 
-class BayesianPMF:
+class BayesianPMF(torch.nn.Module):
     def __init__(
         self,
-        explicit: scipy.sparse.csr_matrix,
+        *,
+        n_users,
+        n_items,
         n_feature_dimensions=10,
         burn_in_steps=500,
         keeper_steps=100,
@@ -54,14 +53,13 @@ class BayesianPMF:
         it corresponds to lambda in the last wiki link
         """
 
-        self.explicit = explicit
-        self.implicit = explicit != 0
-        self.n_users, self.n_items = explicit.shape
+        super().__init__()
+        self.n_users = n_users
+        self.n_items = n_items
         self.n_feature_dimensions = n_feature_dimensions
         self.burn_in_steps = burn_in_steps
         self.keeper_steps = keeper_steps
         self.alpha = predictive_explicit_precision
-        self.alpha_x_implicit_x_explicit = self.alpha * self.implicit.multiply(explicit)
 
         # Coefficients for distribution of hyperparameters
         self.beta = features_hyper_precision_coefficient
@@ -80,7 +78,12 @@ class BayesianPMF:
         # The output of the model – means of normal distributions
         # with precision predictive_explicit_precision, the mixture
         # of which is the estimated distribution of explicit feedback.
-        self.step_explicit_normal_distribution_means = []
+        self.step_explicit_normal_distribution_means = torch.nn.Parameter(
+            torch.zeros(keeper_steps, n_users, n_items), requires_grad=False
+        )
+
+        self.implicit = None
+        self.alpha_x_implicit_x_explicit = None
 
     def init_hyper_mean(self):
         return 0
@@ -106,13 +109,18 @@ class BayesianPMF:
         """Override this method if you want to finetune a fitted MF model."""
         return self.init_features(self.n_items)
 
-    def fit(self):
-        for step in tqdm(range(self.burn_in_steps + self.keeper_steps), "Sampling"):
-            step_mean = self.step()
-            if step > self.burn_in_steps:
-                self.step_explicit_normal_distribution_means.append(step_mean)
+    def fit(self, explicit_feedback):
+        self.implicit = explicit_feedback != 0
+        self.alpha_x_implicit_x_explicit = self.alpha * self.implicit.multiply(
+            explicit_feedback
+        )
 
-        self.finalize()
+        for step in tqdm(range(self.burn_in_steps), "Sampling burn in steps"):
+            self.step()
+
+        for step in tqdm(range(self.keeper_steps), "Sampling keeper steps"):
+            step_means = torch.from_numpy(self.step())
+            self.step_explicit_normal_distribution_means[step] = step_means
 
     def step(self):
         user_hyperparameters = self.sample_hyperparameters(self.user_features)
@@ -185,6 +193,7 @@ class BayesianPMF:
         alpha_x_features_x_features_t = self.alpha * np.einsum(
             "j d, j k -> j d k", fixed_features, fixed_features
         )
+
         precalculated = (
             hyper_variance_inverse @ hyper_mean
             + alpha_x_implicit_x_ratings @ fixed_features
@@ -232,14 +241,7 @@ class BayesianPMF:
             means[i] = mean
             variances[i] = var
 
-    def finalize(self):
-        self.step_explicit_normal_distribution_means = np.array(
-            self.step_explicit_normal_distribution_means
-        )
-
     def aggregate_prediction_mean(self, user_ids):
-        if torch.is_tensor(user_ids):
-            user_ids = user_ids.numpy()
         return einops.reduce(
             self.step_explicit_normal_distribution_means[:, user_ids, :],
             "step user item -> user item",
@@ -248,9 +250,8 @@ class BayesianPMF:
 
     def aggregate_prediction_mode_approximation(self, user_ids):
         # Caution: very memory hungry
-        means = torch.from_numpy(
-            self.step_explicit_normal_distribution_means[:, user_ids, :]
-        )
+        means = self.step_explicit_normal_distribution_means[:, user_ids, :]
+
         normal = torch.distributions.Normal(loc=means, scale=self.alpha**-0.5)
         pdfs_at_means = normal.log_prob(
             einops.repeat(means, f"step user item -> step {means.shape[0]} user item")
@@ -259,11 +260,11 @@ class BayesianPMF:
         mode_means = torch.gather(means, 0, step_ids_with_highest_mean_pdf[None])[0]
         return mode_means
 
-    def __call__(
+    def forward(
         self,
-        user_ids,
-        aggregation_method: Literal["mean", "mode"] = "mean",
+        user_ids=None,
         item_ids=None,
+        aggregation_method: Literal["mean", "mode"] = "mean",
     ):
         match aggregation_method:
             case "mean":
@@ -282,19 +283,8 @@ class BPMFRecommender(NonLitToLitAdapterRecommender):
     def build_model(self):
         model = build_class(
             class_candidates=[BayesianPMF],
-            explicit=self.trainer.datamodule.train_explicit,
+            n_users=self.hparams["n_users"],
+            n_items=self.hparams["n_items"],
             **self.hparams["model_config"],
         )
         return model
-
-
-@ConfigDispenser
-def main(config):
-    MovielensDispatcher(
-        config=config,
-        lightning_candidates=[BPMFRecommender],
-    ).dispatch()
-
-
-if __name__ == "__main__":
-    main()

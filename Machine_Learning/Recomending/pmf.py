@@ -2,9 +2,7 @@ import torch
 
 from data import SparseDataset
 from entrypoints import LitRecommenderBase
-from movielens import MovielensDispatcher, MovieLensDataModule
 
-from my_tools.entrypoints import ConfigDispenser
 from my_tools.models import register_regularization_hook
 from my_tools.utils import build_class
 from utils import build_bias, build_weight, torch_sparse_slice
@@ -104,19 +102,7 @@ class ConstrainedProbabilityMatrixFactorization(ProbabilityMatrixFactorization):
         return rating
 
 
-class PMFDataModuleMixin:
-    def train_dataloader(self):
-        if (explicit := self.train_explicit) is not None:
-            return self.build_dataloader(
-                SparseDataset(explicit), sampler_type="grid", shuffle=True
-            )
-
-
-class MovielensPMFDataModule(PMFDataModuleMixin, MovieLensDataModule):
-    pass
-
-
-class LitProbabilityMatrixFactorization(LitRecommenderBase):
+class PMFRecommender(LitRecommenderBase):
     def build_model(self):
         model_config = self.hparams["model_config"]
         model_candidates = [
@@ -126,17 +112,20 @@ class LitProbabilityMatrixFactorization(LitRecommenderBase):
 
         if model_config["name"] == "ConstrainedProbabilityMatrixFactorization":
             model_config = model_config.copy()
-            model_config["implicit_feedback"] = (
-                self.trainer.datamodule.train_explicit > 0
-            )
+            model_config["implicit_feedback"] = self.train_explicit > 0
 
         model = build_class(
             class_candidates=model_candidates,
-            n_users=self.trainer.datamodule.train_explicit.shape[0],
-            n_items=self.trainer.datamodule.train_explicit.shape[1],
+            n_users=self.hparams["n_users"],
+            n_items=self.hparams["n_items"],
             **model_config,
         )
         return model
+
+    def train_dataloader(self):
+        return self.build_dataloader(
+            self.train_explicit, sampler_type="grid", shuffle=True
+        )
 
     def common_step(self, batch):
         ratings = self(**batch)
@@ -156,16 +145,3 @@ class LitProbabilityMatrixFactorization(LitRecommenderBase):
         loss = self.common_step(batch)
         self.log(f"val_loss", loss)
         return loss
-
-
-@ConfigDispenser
-def main(config):
-    MovielensDispatcher(
-        config=config,
-        lightning_candidates=[LitProbabilityMatrixFactorization],
-        datamodule_candidates=[MovielensPMFDataModule],
-    ).dispatch()
-
-
-if __name__ == "__main__":
-    main()
