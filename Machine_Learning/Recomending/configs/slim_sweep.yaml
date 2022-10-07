@@ -1,5 +1,5 @@
 project: Recommending
-name: "PMF movielens sweep"
+name: "SLIM movielens sweep 4"
 method: random
 metric:
   goal: maximize
@@ -7,19 +7,29 @@ metric:
 parameters:
   model:
     name: SLIM
-    l2_coefficient: 1.0e-4
-    l1_coefficient: 1.0e-4
-  loss:
-    name:
+    l2_coefficient:
       values:
-        - MSELoss
-        - ImplicitAwareSparseLoss
-        - PersonalizedRankingLoss
+        - 1.0e-5
+        - 1.0e-4
+        - 1.0e-3
+    l1_coefficient:
+      values:
+        - 1.0e-7
+        - 1.0e-6
+        - 1.0e-5
+  loss:
+    name: MSELoss
   datamodule:
     directory: local/ml-100k
     num_workers: 4
   lightning_module:
     name: MovieLensSLIMRecommender
+    patience: 3
+    min_delta:
+      values:
+        - 1.0e-6
+        - 1.0e-5
+        - 1.0e-4
   optimizer:
     name: Adam
   logger:
@@ -36,10 +46,3 @@ parameters:
     default_root_dir: local
     num_sanity_val_steps: 0
     max_epochs: -1
-  callbacks:
-    WandbWatcher:
-      log_every_n_steps: 50
-    EarlyStopping:
-      monitor: val_loss
-      mode: min
-      patience: 5

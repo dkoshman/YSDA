@@ -5,6 +5,7 @@ import numba
 import numpy as np
 import scipy
 import torch
+import wandb
 from my_tools.utils import build_class
 
 from tqdm.auto import tqdm
@@ -39,7 +40,6 @@ class BayesianPMF(torch.nn.Module):
         https://en.wikipedia.org/wiki/Markov_chain_Monte_Carlo
         https://en.wikipedia.org/wiki/Normal-Wishart_distribution
 
-        :param explicit: sparse matrix with explicit feedback
         :param n_feature_dimensions: size of latent dimension
         :param burn_in_steps: first samples are usually pretty biased,
         so we skip them in hopes that after that model has substantially converged
@@ -83,6 +83,7 @@ class BayesianPMF(torch.nn.Module):
         )
 
         self.implicit = None
+        self.explicit=None
         self.alpha_x_implicit_x_explicit = None
 
     def init_hyper_mean(self):
@@ -109,8 +110,13 @@ class BayesianPMF(torch.nn.Module):
         """Override this method if you want to finetune a fitted MF model."""
         return self.init_features(self.n_items)
 
+    def log(self, dict_to_log):
+        if wandb.run is not None:
+            wandb.log(dict_to_log)
+
     def fit(self, explicit_feedback):
-        self.implicit = explicit_feedback != 0
+        self.explicit = explicit_feedback
+        self.implicit = explicit_feedback > 0
         self.alpha_x_implicit_x_explicit = self.alpha * self.implicit.multiply(
             explicit_feedback
         )
@@ -143,6 +149,13 @@ class BayesianPMF(torch.nn.Module):
         self.item_features = item_features
 
         step_explicit_mean = user_features @ item_features.T
+
+        self.log(
+            dict(
+                mse=((step_explicit_mean - self.explicit.toarray()) ** 2).mean(),
+                mse_filtered=((self.implicit.multiply(step_explicit_mean).toarray() - self.explicit.toarray()) ** 2).mean()
+            )
+        )
         return step_explicit_mean
 
     def sample_hyperparameters(self, features):
@@ -227,7 +240,6 @@ class BayesianPMF(torch.nn.Module):
         variances,
     ):
         hyper_variance = np.linalg.inv(hyper_variance_inverse)
-
         for i in numba.prange(len(means)):
             col_indices = indices[indptr[i] : indptr[i + 1]]
             if col_indices.size:

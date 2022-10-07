@@ -77,14 +77,8 @@ class InMemoryRecommender(BaselineRecommender, abc.ABC):
 class ImplicitRecommender(InMemoryRecommender):
     def __init__(
         self,
-        implicit_model: Literal[
-            "BM25Recommender",
-            "CosineRecommender",
-            "TFIDFRecommender",
-            "AlternatingLeastSquares",
-            "LogisticMatrixFactorization",
-            "BayesianPersonalizedRanking",
-        ] = "BM25Recommender",
+        *,
+        implicit_model,
         implicit_kwargs=None,
         **kwargs,
     ):
@@ -113,21 +107,70 @@ class ImplicitRecommender(InMemoryRecommender):
         if item_ids is None:
             item_ids = slice(None)
 
-        ids, ratings = self.implicit_model.recommend(
+        explicit_feedback = torch_sparse_to_scipy_coo(self.explicit_feedback)
+        explicit_feedback = explicit_feedback.tocsr().astype(np.float32)
+        indices, item_ratings = self.implicit_model.recommend(
             user_ids,
-            torch_sparse_to_scipy_coo(self.explicit_feedback)
-            .tocsr()[user_ids]
-            .astype(np.float32),
+            explicit_feedback[user_ids],
             N=self.n_items,
+            filter_already_liked_items=False,
         )
-        return torch.from_numpy(ratings)[item_ids]
+        ratings = np.full(
+            [indices.shape[0], indices.shape[1] + 1], np.finfo(np.float32).min
+        )
+        np.put_along_axis(arr=ratings, indices=indices, values=item_ratings, axis=1)
+        ratings = ratings[:, :-1]
+        ratings = torch.from_numpy(ratings)[:, item_ids]
+        return ratings
+
+
+class ImplicitMatrixFactorizationRecommender(ImplicitRecommender):
+    def __init__(
+        self,
+        implicit_model: Literal[
+            "AlternatingLeastSquares",
+            "LogisticMatrixFactorization",
+            "BayesianPersonalizedRanking",
+        ] = "AlternatingLeastSquares",
+        factors=100,
+        learning_rate=1e-2,
+        regularization=1e-2,
+        num_threads=0,
+        use_gpu=False,
+        **kwargs,
+    ):
+        implicit_kwargs = dict(
+            factors=factors,
+            regularization=regularization,
+            num_threads=num_threads,
+            use_gpu=use_gpu,
+        )
+        if implicit_model != "AlternatingLeastSquares":
+            implicit_kwargs["learning_rate"] = learning_rate
+        else:
+            implicit_kwargs["use_gpu"] = True
+
+        super().__init__(
+            implicit_model=implicit_model, implicit_kwargs=implicit_kwargs, **kwargs
+        )
+
+
+class ImplicitNearestNeighborsRecommender(ImplicitRecommender):
+    def __init__(
+        self,
+        implicit_model: Literal[
+            "BM25Recommender", "CosineRecommender", "TFIDFRecommender"
+        ] = "BM25Recommender",
+        num_neighbors=20,
+        num_threads=0,
+        **kwargs,
+    ):
+        implicit_kwargs = dict(K=num_neighbors, num_threads=num_threads)
+        super().__init__(
+            implicit_model=implicit_model, implicit_kwargs=implicit_kwargs, **kwargs
+        )
 
     def similar_users(self, users_feedback=None, user_ids=None):
-        if not isinstance(
-            self.implicit_model, implicit.nearest_neighbours.ItemItemRecommender
-        ):
-            raise ValueError("Only nearest neighbours implement user similarity.")
-
         explicit_feedback = torch_sparse_to_scipy_coo(self.explicit_feedback)
         if users_feedback is not None:
             n_users = explicit_feedback.shape[0]

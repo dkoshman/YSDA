@@ -1,10 +1,9 @@
 project: Recommending
 name: "ALS run"
-#stage: test
+stage: test
 model:
   name: ALSjitBiased
-#  epochs: 30
-  epochs: 1
+  epochs: 15
   latent_dimension_size: 300
   regularization_lambda: 100
   confidence_alpha: 10
@@ -21,5 +20,3 @@ callbacks:
   RecommendingDataOverviewCallback: {}
   WandbCheckpointCallback:
     artifact_name: ALS
-#trainer:
-#  num_sanity_val_steps: 0

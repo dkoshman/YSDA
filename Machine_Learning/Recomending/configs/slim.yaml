@@ -1,37 +1,27 @@
 project: Recommending
-name: "SLIM debug run"
+name: "SLIM run"
 stage: test
 model:
   name: SLIM
-  l2_coefficient:
-    values:
-      - 1.0e-5
-      - 1.0e-4
-      - 1.0e-3
-      - 1.0e-2
-  l1_coefficient:
-    values:
-      - 1.0e-5
-      - 1.0e-4
-      - 1.0e-3
-      - 1.0e-2
+  l2_coefficient: 1.0e-5
+  l1_coefficient: 1.0e-6
 loss:
-  name:
-    values:
-      - MSELoss
-      - ImplicitAwareSparseLoss
-      - PersonalizedRankingLoss
+  name: MSELoss
 datamodule:
   directory: local/ml-100k
-  batch_size: 100
   num_workers: 4
 lightning_module:
   name: MovieLensSLIMRecommender
+  patience: 5
+  min_delta: 1.0e-5
 optimizer:
   name: Adam
+logger:
+  name: WandbLogger
+  save_dir: local
 trainer:
   accelerator: gpu
-  devices: [2]
+  devices: [4]
   reload_dataloaders_every_n_epochs: 1
   accumulate_grad_batches: 1
   enable_model_summary: false
@@ -40,6 +30,6 @@ trainer:
   default_root_dir: local
   num_sanity_val_steps: 0
   max_epochs: -1
-logger:
-  name: WandbLogger
-  save_dir: local
+callbacks:
+  WandbCheckpointCallback:
+    artifact_name: slim

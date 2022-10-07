@@ -11,8 +11,6 @@ import baseline
 import losses
 from data import RecommendingDataModuleMixin
 
-# TODO: catboost, transformer, maybe other neural nets, finetune existing models
-
 
 class LitRecommenderBase(RecommendingDataModuleMixin, pl.LightningModule):
     def __init__(
@@ -124,11 +122,11 @@ class Recommender:
         :param num_neighbors: number of nearest neighbors to use
         """
         self.train_explicit = train_explicit
-        self.nearest_neighbours = baseline.ImplicitRecommender(
+        self.nearest_neighbours = baseline.ImplicitNearestNeighborsRecommender(
             n_users=self.train_explicit.shape[0],
             n_items=self.train_explicit.shape[1],
             implicit_model=nearest_neighbors_model,
-            implicit_kwargs=dict(K=num_neighbors),
+            num_neighbors=num_neighbors,
         )
         self.nearest_neighbours.fit(self.train_explicit)
         self.model = model
@@ -175,6 +173,12 @@ class Recommender:
 
         if user_ids is None:
             ratings = self.nearest_neighbours_ratings(users_explicit_feedback)
+        # elif hasattr(self.model, "recommend_items"):
+        #     return self.model.recommend_items(
+        #         user_ids=user_ids,
+        #         n_recommendations=n_recommendations,
+        #         filter_already_liked_items=filter_already_liked_items,
+        #     )
         else:
             ratings = self.model(user_ids=user_ids)
 
@@ -187,8 +191,10 @@ class Recommender:
             else:
                 already_liked_items = self.train_explicit[user_ids] > 0
 
-            ratings -= (
-                torch.from_numpy(already_liked_items.toarray()) * torch.finfo().max / 2
+            ratings = torch.where(
+                torch.from_numpy(already_liked_items.toarray()),
+                torch.finfo().min,
+                ratings,
             )
 
         if n_recommendations is None:

@@ -20,7 +20,6 @@ class SLIM(torch.nn.Module):
     due to sparsity. It may be beneficial to add biases to this implementation.
     """
 
-    # TODO: move explicit_feedback to fit
     def __init__(
         self,
         explicit_feedback: scipy.sparse.csr_matrix,

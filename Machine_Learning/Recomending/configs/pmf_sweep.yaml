@@ -28,7 +28,7 @@ parameters:
     directory: local/ml-100k
     num_workers: 4
   lightning_module:
-    name: MovieLensBaselineRecommender
+    name: MovieLensPMFRecommender
   optimizer:
     name: Adam
   logger:
@@ -48,14 +48,4 @@ parameters:
       monitor: val_loss
       mode: min
       patience: 5
-#    GradientAccumulationScheduler:
-#      scheduling: "{0: 10}"
-#    StochasticWeightAveraging:
-#      swa_lrs:
-#        min: 1.0e-3
-#        max: 1.0e-2
-#      swa_epoch_start:
-#        min: 10
-#        max: 15
-#      annealing_epochs: 5
-#      annealing_strategy: cos
+sweep_id: js4nf6hq

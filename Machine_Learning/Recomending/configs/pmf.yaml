@@ -2,7 +2,7 @@ project: Recommending
 name: "PMF run"
 stage: test
 model:
-  name: ProbabilityMatrixFactorization
+  name: ConstrainedProbabilityMatrixFactorization
   latent_dimension: 200
   weight_decay: 1.0e-4
 loss:
@@ -33,6 +33,6 @@ callbacks:
     monitor: val_loss
     mode: min
     min_delta: 0
-    patience: 2
+    patience: 5
   WandbCheckpointCallback:
     artifact_name: pmf

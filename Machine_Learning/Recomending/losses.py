@@ -15,7 +15,7 @@ class ImplicitAwareSparseLoss:
     def __call__(self, explicit, model_ratings, implicit=None):
         """Loss = 1/|Explicit| * \\sum_{ij}Implicit_{ij} * (Explicit_{ij} - ModelRating_{ij})^2"""
         if implicit is None:
-            implicit = explicit > 0
+            implicit = explicit.to(bool).to(torch.float32)
         error = model_ratings.to_dense() - explicit.to_dense()
         error = sparse_dense_multiply(sparse_dense_multiply(implicit, error), error)
         error = error.coalesce()

@@ -13,7 +13,7 @@ parameters:
       max: 20
     latent_dimension_size:
       min: 50
-      max: 500
+      max: 300
     lambda_decay:
       min: 0.5
       max: 0.9
@@ -29,4 +29,3 @@ parameters:
     save_dir: local
   trainer:
     num_sanity_val_steps: 0
-sweep_id: 3xmqqhp9
