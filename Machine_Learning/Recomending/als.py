@@ -3,14 +3,12 @@ import numpy as np
 import pandas as pd
 import torch
 import wandb
-from my_tools.utils import build_class
 
 from tqdm.auto import tqdm
 from typing_extensions import Literal
 
-
+from recommender import RatingsToRecommendations
 from utils import build_weight, build_bias
-from entrypoints import Recommender, NonLitToLitAdapterRecommender
 
 
 class ALS(torch.nn.Module):
@@ -130,8 +128,8 @@ class ALS(torch.nn.Module):
         ratings = self.user_factors[user_ids] @ self.item_factors[item_ids].T
         return ratings
 
-    def recommendation_factors(self, user_id, n_recommendations=10):
-        recommender = Recommender(self.implicit_feedback, model=self)
+    def explain_recommendations(self, user_id, n_recommendations=10):
+        recommender = RatingsToRecommendations(self.implicit_feedback, model=self)
         recommended_item_ids = recommender(
             user_ids=[user_id], n_recommendations=n_recommendations
         )[0]
@@ -159,16 +157,69 @@ class ALS(torch.nn.Module):
         )
         similarity = Y_recommended @ user_latent_weight @ Y.T
 
-        return dict(
-            user_ratings=user_ratings,
-            recommended_item_ids=recommended_item_ids,
-            liked_item_ids=liked_item_ids,
-            similarity=similarity,
-            confidence=confidence_minus_1 + 1,
+        confidence = confidence_minus_1 + 1
+
+        explanations = {
+            "ratings": pd.Series(
+                user_ratings,
+                recommended_item_ids,
+                name=f"predicted relevance",
+            ).rename_axis(index="recommended items for user"),
+            "similarity": pd.DataFrame(
+                similarity, index=recommended_item_ids, columns=liked_item_ids
+            ).rename_axis(
+                index=f"recommended items for user",
+                columns=f"liked items by user",
+            ),
+            "confidence": pd.Series(
+                confidence,
+                liked_item_ids,
+                name=f"estimated confidence that user likes items",
+            ).rename_axis(index="liked items by user"),
+        }
+
+        dataframe = pd.concat(
+            [explanations["similarity"], explanations["ratings"]], axis="columns"
+        )
+        dataframe = pd.concat(
+            [dataframe.T, explanations["confidence"]], axis="columns"
+        ).T.rename_axis(index="recommended items", columns="liked items")
+
+        style = dataframe.style
+        style.set_caption(
+            f"Recommended items for user {user_id} based on personal similarity measure "
+            "between items and estimated confidence in these similarities."
+        ).set_table_styles(
+            [
+                dict(
+                    selector="caption",
+                    props=[
+                        ("text-align", "center"),
+                        ("font-size", "125%"),
+                        ("color", "black"),
+                    ],
+                )
+            ]
+        )
+        common_gradient_kwargs = dict(low=0.5, high=0.5)
+        style = style.background_gradient(
+            subset=(dataframe.index[-1], dataframe.columns[:-1]),
+            axis="columns",
+            **common_gradient_kwargs,
+            cmap="YlOrRd",
+        )
+        style = style.background_gradient(
+            subset=(dataframe.index[:-1], dataframe.columns[:-1]),
+            **common_gradient_kwargs,
+            cmap="coolwarm",
+        )
+        style = style.background_gradient(
+            subset=(dataframe.index[:-1], dataframe.columns[-1]),
+            **common_gradient_kwargs,
+            cmap="YlOrRd",
         )
 
-    def explain_recommendations(self, user_id, k=10):
-        return explain_recommendations(**self.recommendation_factors(user_id, k))
+        return dict(dataframe=dataframe, style=style)
 
 
 class ALSjit(ALS):
@@ -342,85 +393,3 @@ class ALSjitBiased(ALSjit):
 
     def explain_recommendations(self, user_ids, k=10):
         raise NotImplementedError("Need to add bias to existing implementation")
-
-
-def explain_recommendations(
-    user_id,
-    user_ratings,
-    recommended_item_ids,
-    liked_item_ids,
-    similarity,
-    confidence,
-):
-    explanations = {
-        "ratings": pd.Series(
-            user_ratings,
-            recommended_item_ids,
-            name=f"predicted relevance",
-        ).rename_axis(index="recommended items for user"),
-        "similarity": pd.DataFrame(
-            similarity, index=recommended_item_ids, columns=liked_item_ids
-        ).rename_axis(
-            index=f"recommended items for user",
-            columns=f"liked items by user",
-        ),
-        "confidence": pd.Series(
-            confidence,
-            liked_item_ids,
-            name=f"estimated confidence that user likes items",
-        ).rename_axis(index="liked items by user"),
-    }
-
-    dataframe = pd.concat(
-        [explanations["similarity"], explanations["ratings"]], axis="columns"
-    )
-    dataframe = pd.concat(
-        [dataframe.T, explanations["confidence"]], axis="columns"
-    ).T.rename_axis(index="recommended items", columns="liked items")
-
-    style = dataframe.style
-    style.set_caption(
-        f"Recommended items for user {user_id} based on personal similarity measure "
-        "between items and estimated confidence in these similarities."
-    ).set_table_styles(
-        [
-            dict(
-                selector="caption",
-                props=[
-                    ("text-align", "center"),
-                    ("font-size", "125%"),
-                    ("color", "black"),
-                ],
-            )
-        ]
-    )
-    common_gradient_kwargs = dict(low=0.5, high=0.5)
-    style = style.background_gradient(
-        subset=(dataframe.index[-1], dataframe.columns[:-1]),
-        axis="columns",
-        **common_gradient_kwargs,
-        cmap="YlOrRd",
-    )
-    style = style.background_gradient(
-        subset=(dataframe.index[:-1], dataframe.columns[:-1]),
-        **common_gradient_kwargs,
-        cmap="coolwarm",
-    )
-    style = style.background_gradient(
-        subset=(dataframe.index[:-1], dataframe.columns[-1]),
-        **common_gradient_kwargs,
-        cmap="YlOrRd",
-    )
-
-    return dict(dataframe=dataframe, style=style)
-
-
-class ALSRecommender(NonLitToLitAdapterRecommender):
-    def build_model(self):
-        model = build_class(
-            class_candidates=[ALS, ALSjit, ALSjitBiased],
-            n_users=self.hparams["n_users"],
-            n_items=self.hparams["n_items"],
-            **self.hparams["model_config"],
-        )
-        return model

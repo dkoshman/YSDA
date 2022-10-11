@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
 import scipy
+import torch
 import wandb
 
 from matplotlib import pyplot as plt
@@ -12,7 +13,7 @@ from sklearn.decomposition import TruncatedSVD
 import matplotlib.patheffects as pe
 
 from data import MovieLens
-from utils import scipy_coo_to_torch_sparse
+from utils import scipy_coo_to_torch_sparse, WandbAPI
 
 
 class WandbWatcher(pl.callbacks.Callback):
@@ -237,38 +238,53 @@ class ImdbRatings:
         return scipy_coo_to_torch_sparse(self.explicit_feedback_scipy())
 
 
-class WandbCheckpointCallback(pl.callbacks.Callback):
-    def __init__(
-        self,
-        artifact_name,
-        description=None,
-    ):
-        super().__init__()
+class WandbCheckpointCallback(pl.callbacks.ModelCheckpoint):
+    def __init__(self, *args, artifact_name, description=None, **kwargs):
+        super().__init__(*args, **kwargs)
         self.artifact_name = artifact_name
         self.description = description
 
     def on_test_end(self, trainer, pl_module):
         if run := wandb.run:
-            checkpoint_path = f"{self.artifact_name}.ckpt"
-
-            trainer.save_checkpoint(checkpoint_path)
-
-            metadata = {
-                k: v
-                for k, v in run._summary_get_current_summary_callback().items()
-                if not k.startswith("_")
-            }
-            metadata["pl_module_class"] = pl_module.__class__.__name__
-            metadata["checkpoint"] = checkpoint_path
-            metadata["config"] = run.config.as_dict()
-
-            artifact = wandb.Artifact(
-                name=self.artifact_name,
-                type="checkpoint",
-                metadata=metadata,
+            if not self.best_model_path:
+                self.save_checkpoint(trainer)
+            WandbAPI().save_checkpoint(
+                checkpoint_path=self.best_model_path,
+                pl_module_class=pl_module.__class__.__name__,
+                artifact_name=self.artifact_name,
                 description=self.description,
+                metadata=run.config.as_dict(),
             )
-            artifact.add_file(local_path=checkpoint_path, name="checkpoint")
-            run.log_artifact(artifact)
-
         super().on_test_end(trainer, pl_module)
+
+
+class CatBoostMetrics(pl.callbacks.Callback):
+    def on_test_epoch_end(self, trainer=None, pl_module=None):
+        self.log_feature_importance(pl_module)
+
+    def log_feature_importance(self, pl_module):
+        cb_module = pl_module.model
+        cb_model = cb_module.model
+        user_ids = torch.arange(min(100, pl_module.train_explicit.shape[0]))
+        for explicit, type in zip(
+            [pl_module.train_explicit, pl_module.test_explicit], ["train", "test"]
+        ):
+            dataframe = cb_module.topk_data(
+                user_ids=user_ids,
+                users_explicit_feedback=explicit[user_ids],
+            )
+            pool = cb_module.pool(dataframe, training=True)
+            feature_importance = cb_model.get_feature_importance(pool)
+            dataframe = (
+                pd.Series(feature_importance, cb_model.feature_names_)
+                .sort_values(ascending=False)
+                .to_frame()
+                .T
+            )
+            wandb.log(
+                {
+                    f"Catboost {type} feature importance": wandb.Table(
+                        dataframe=dataframe
+                    )
+                }
+            )

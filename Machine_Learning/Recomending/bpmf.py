@@ -6,11 +6,8 @@ import numpy as np
 import scipy
 import torch
 import wandb
-from my_tools.utils import build_class
 
 from tqdm.auto import tqdm
-
-from entrypoints import NonLitToLitAdapterRecommender
 
 
 class BayesianPMF(torch.nn.Module):
@@ -83,7 +80,7 @@ class BayesianPMF(torch.nn.Module):
         )
 
         self.implicit = None
-        self.explicit=None
+        self.explicit = None
         self.alpha_x_implicit_x_explicit = None
 
     def init_hyper_mean(self):
@@ -153,7 +150,13 @@ class BayesianPMF(torch.nn.Module):
         self.log(
             dict(
                 mse=((step_explicit_mean - self.explicit.toarray()) ** 2).mean(),
-                mse_filtered=((self.implicit.multiply(step_explicit_mean).toarray() - self.explicit.toarray()) ** 2).mean()
+                mse_filtered=(
+                    (
+                        self.implicit.multiply(step_explicit_mean).toarray()
+                        - self.explicit.toarray()
+                    )
+                    ** 2
+                ).mean(),
             )
         )
         return step_explicit_mean
@@ -289,14 +292,3 @@ class BayesianPMF(torch.nn.Module):
             return ratings
         else:
             return ratings[:, item_ids]
-
-
-class BPMFRecommender(NonLitToLitAdapterRecommender):
-    def build_model(self):
-        model = build_class(
-            class_candidates=[BayesianPMF],
-            n_users=self.hparams["n_users"],
-            n_items=self.hparams["n_items"],
-            **self.hparams["model_config"],
-        )
-        return model

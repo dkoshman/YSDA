@@ -1,15 +1,17 @@
+import time
+
 import numpy as np
 import scipy
 import torch
 import torchmetrics as tm
 import wandb
 
-
-import metrics
 import main
-from Machine_Learning.Recomending.utils import fetch_checkpoint_path
+import metrics
 
 from callbacks import RecommendingDataOverviewCallback
+from movielens import MovieLensNonGradientRecommender
+from utils import WandbAPI
 
 
 def get_config_base():
@@ -35,7 +37,7 @@ def test_mark_duplicate_recommended_items_as_invalid():
 
 def test_binary_relevance():
     relevance = metrics.binary_relevance(
-        relevant_pairs=np.array([[1, 2], [3, 4]]),
+        explicit_feedback=scipy.sparse.csr_matrix(([4, 5], ([1, 3], [2, 4]))),
         recommendee_user_ids=np.array([1, 3]),
         recommendations=np.array([[0, 2, 1], [3, 2, 4]]),
     )
@@ -91,7 +93,7 @@ def test_coverage():
 def test_surprisal():
     surprisal = metrics.surprisal(
         recommendations=np.array([[0, 2, 3], [1, 2, 0]]),
-        relevant_pairs=np.array([[0, 0], [2, 1], [1, 1]]),
+        explicit_feedback=scipy.sparse.csr_matrix(([3, 2, 5], ([0, 2, 1], [0, 1, 1]))),
     )
 
     assert np.isclose(
@@ -139,7 +141,7 @@ def test_als():
         main.main(
             **get_config_base(),
             model=dict(name=name),
-            lightning_module=dict(name="MovieLensALSRecommender"),
+            lightning_module=dict(name="MovieLensNonGradientRecommender"),
         )
 
 
@@ -153,7 +155,7 @@ def test_baseline():
         main.main(
             **get_config_base(),
             model=dict(name=name),
-            lightning_module=dict(name="MovieLensBaselineRecommender"),
+            lightning_module=dict(name="MovieLensNonGradientRecommender"),
         )
 
 
@@ -166,26 +168,26 @@ def test_implicit_nearest_neighbors():
         main.main(
             **get_config_base(),
             model=dict(
-                name="ImplicitRecommender",
+                name="ImplicitNearestNeighborsRecommender",
                 implicit_model=implicit_model,
             ),
-            lightning_module=dict(name="MovieLensBaselineRecommender"),
+            lightning_module=dict(name="MovieLensNonGradientRecommender"),
         )
 
 
 def test_implicit_matrix_factorization():
     for implicit_model in [
-        "AlternatingLeastSquares",
+        # "AlternatingLeastSquares",
         "LogisticMatrixFactorization",
         "BayesianPersonalizedRanking",
     ]:
         main.main(
             **get_config_base(),
             model=dict(
-                name="ImplicitRecommender",
+                name="ImplicitMatrixFactorizationRecommender",
                 implicit_model=implicit_model,
             ),
-            lightning_module=dict(name="MovieLensBaselineRecommender"),
+            lightning_module=dict(name="MovieLensNonGradientRecommender"),
         )
 
 
@@ -256,7 +258,7 @@ def test_bpmf():
     main.main(
         **get_config_base(),
         model=dict(name="BayesianPMF"),
-        lightning_module=dict(name="MovieLensBPMFRecommender"),
+        lightning_module=dict(name="MovieLensNonGradientRecommender"),
     )
 
 
@@ -278,19 +280,21 @@ def test_RecommendingDataOverviewCallback():
 def test_wandb_artifact_checkpointing():
     config = get_config_base()
     config["logger"] = dict(name="WandbLogger", save_dir="local")
+    config["trainer"] = dict(fast_dev_run=False)
     artifact_name = "PopularRecommenderTesting"
-    with wandb.init() as run:
+
+    with wandb.init():
         main.main(
             **config,
             model=dict(name="PopularRecommender"),
-            lightning_module=dict(name="MovieLensBaselineRecommender"),
+            lightning_module=dict(name="MovieLensNonGradientRecommender"),
             callbacks=dict(WandbCheckpointCallback=dict(artifact_name=artifact_name)),
         )
-        checkpoint_path = fetch_checkpoint_path(
-            entity=run.entity, project=run.project, artifact_name=artifact_name
-        )
+        wandb_api = WandbAPI()
+        artifact = wandb_api.artifact(artifact_name=artifact_name)
 
-    model = main.MovieLensBaselineRecommender.load_from_checkpoint(
-        checkpoint_path=checkpoint_path
+    time.sleep(1)  # Give time to upload.
+    model = wandb_api.build_from_checkpoint_artifact(
+        artifact, class_candidates=[MovieLensNonGradientRecommender]
     )
     model.recommend(user_ids=[0, 1])

@@ -10,7 +10,7 @@ model:
 datamodule:
   directory: local/ml-100k
 lightning_module:
-  name: MovieLensBaselineRecommender
+  name: MovieLensNonGradientRecommender
 trainer:
   num_sanity_val_steps: 0
 logger:

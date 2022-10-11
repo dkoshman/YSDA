@@ -78,25 +78,24 @@ def timeit(func):
     return _time_it
 
 
-def get_class(class_name, class_candidates=(), modules_to_try_to_import_from=()):
+def get_class(class_name, class_candidates=(), module_candidates=()):
     for cls in class_candidates:
         if cls.__name__ == class_name:
             return cls
-    for module in modules_to_try_to_import_from:
+    for module in module_candidates:
         if cls := getattr(module, class_name, False):
             return cls
     raise ValueError(
         f"Class {class_name} not found in classes {class_candidates}\n"
-        f"or modules{modules_to_try_to_import_from}"
+        f"or modules {module_candidates}"
     )
 
 
-def build_class(class_candidates=(), modules=(), **kwargs):
-    class_name = kwargs.pop("name")
+def build_class(*, class_candidates=(), module_candidates=(), name, **kwargs):
     cls = get_class(
-        class_name,
+        class_name=name,
         class_candidates=class_candidates,
-        modules_to_try_to_import_from=modules,
+        module_candidates=module_candidates,
     )
     return cls(**kwargs)
 

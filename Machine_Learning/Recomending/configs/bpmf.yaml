@@ -12,7 +12,7 @@ datamodule:
   directory: local/ml-100k
   num_workers: 0
 lightning_module:
-  name: MovieLensBPMFRecommender
+  name: MovieLensNonGradientRecommender
 trainer:
   num_sanity_val_steps: 0
 logger:

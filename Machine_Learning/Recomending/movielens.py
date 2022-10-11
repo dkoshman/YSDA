@@ -2,73 +2,77 @@ import abc
 
 import torch
 import wandb
+from my_tools.entrypoints import ConfigConstructorBase
 
+import als
+import baseline
+import bpmf
 import callbacks
-from data import MovieLens, RecommendingDataModuleMixin
-from entrypoints import (
-    LitRecommenderBase,
-    NonLitToLitAdapterRecommender,
-    RecommendingConfigConstructor,
-)
 import metrics
 
+from entrypoints import LitRecommenderBase, NonGradientRecommenderMixin
+from data import MovieLens
+from pmf import PMFRecommender
+from recommender import RatingsToRecommendations
+from slim import SLIMRecommender
 
-class MovieLensDataModuleMixin(RecommendingDataModuleMixin):
-    def __init__(
-        self,
-        directory,
-        train_explicit_file=None,
-        val_explicit_file=None,
-        test_explicit_file=None,
-        **kwargs,
-    ):
+
+class MovieLensRecommender(LitRecommenderBase):
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.movielens = MovieLens(directory)
-        n_users, n_items = self.movielens.shape
-        self.save_hyperparameters(
-            dict(
-                directory=directory,
-                train_explicit_file=train_explicit_file,
-                val_explicit_file=val_explicit_file,
-                test_explicit_file=test_explicit_file,
-                n_users=n_users,
-                n_items=n_items,
-            )
+        self.recommend = RatingsToRecommendations(
+            explicit_feedback=self.train_explicit, model=self
         )
 
     @property
+    def movielens(self):
+        return MovieLens(self.hparams["datamodule_config"]["directory"])
+
+    def build_model(self):
+        config = self.hparams["model_config"]
+        if "n_users" not in config:
+            config.update(
+                n_users=self.movielens.shape[0], n_items=self.movielens.shape[1]
+            )
+            self.save_hyperparameters(dict(model_config=config))
+        return self.build_class(**self.hparams["model_config"])
+
+    @property
     def train_explicit(self):
-        if file := self.hparams["train_explicit_file"]:
+        if file := self.hparams["datamodule_config"].get("train_explicit_file"):
             return self.movielens.explicit_feedback_scipy_csr(file)
 
     @property
     def val_explicit(self):
-        if file := self.hparams["val_explicit_file"]:
+        if file := self.hparams["datamodule_config"].get("val_explicit_file"):
             return self.movielens.explicit_feedback_scipy_csr(file)
 
     @property
     def test_explicit(self):
-        if file := self.hparams["test_explicit_file"]:
+        if file := self.hparams["datamodule_config"].get("test_explicit_file"):
             return self.movielens.explicit_feedback_scipy_csr(file)
 
 
-class MovieLensLitRecommender(LitRecommenderBase, MovieLensDataModuleMixin, abc.ABC):
-    pass
-
-
-class MovieLensNonLitToLitAdapter(
-    NonLitToLitAdapterRecommender, MovieLensDataModuleMixin, abc.ABC
+class MovieLensNonGradientRecommender(
+    NonGradientRecommenderMixin, MovieLensRecommender
 ):
+    def build_class(self, module_candidates=(), **kwargs):
+        return super().build_class(
+            module_candidates=list(module_candidates) + [als, baseline, bpmf],
+            **kwargs,
+        )
+
+
+class MovieLensPMFRecommender(PMFRecommender, MovieLensRecommender):
     pass
 
 
-class MovieLensDispatcher(RecommendingConfigConstructor, abc.ABC):
-    def __init__(
-        self,
-        config,
-        class_candidates=(),
-        module_candidates=(),
-    ):
+class MovieLensSLIMRecommender(SLIMRecommender, MovieLensRecommender):
+    pass
+
+
+class MovieLensDispatcher(ConfigConstructorBase, abc.ABC):
+    def __init__(self, config):
         # For some reason with some configuration it is necessary to manually init cuda.
         torch.cuda.init()
 
@@ -85,11 +89,29 @@ class MovieLensDispatcher(RecommendingConfigConstructor, abc.ABC):
                 k=100,
             ),
         )
-        super().__init__(
-            config,
-            class_candidates=class_candidates,
+        super().__init__(config)
+
+    def build_class(self, module_candidates=(), class_candidates=(), **kwargs):
+        return super().build_class(
             module_candidates=list(module_candidates) + [callbacks, metrics],
+            class_candidates=list(class_candidates)
+            + [
+                MovieLensNonGradientRecommender,
+                MovieLensPMFRecommender,
+                MovieLensSLIMRecommender,
+            ],
+            **kwargs,
         )
+
+    def build_lightning_module(self):
+        lightning_module = self.build_class(
+            datamodule_config=self.config["datamodule"],
+            model_config=self.config["model"],
+            loss_config=self.config.get("loss"),
+            optimizer_config=self.config.get("optimizer"),
+            **self.config["lightning_module"],
+        )
+        return lightning_module
 
     def main(self):
         lightning_module = self.build_lightning_module()

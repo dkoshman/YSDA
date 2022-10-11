@@ -1,10 +1,9 @@
 import torch
 
-from data import SparseDataset
-from entrypoints import LitRecommenderBase
-
 from my_tools.models import register_regularization_hook
-from my_tools.utils import build_class
+
+from entrypoints import LitRecommenderBase
+from data import SparseDataset
 from utils import build_bias, build_weight, torch_sparse_slice
 
 
@@ -105,26 +104,25 @@ class ConstrainedProbabilityMatrixFactorization(ProbabilityMatrixFactorization):
 class PMFRecommender(LitRecommenderBase):
     def build_model(self):
         model_config = self.hparams["model_config"]
-        model_candidates = [
-            ProbabilityMatrixFactorization,
-            ConstrainedProbabilityMatrixFactorization,
-        ]
-
         if model_config["name"] == "ConstrainedProbabilityMatrixFactorization":
             model_config = model_config.copy()
             model_config["implicit_feedback"] = self.train_explicit > 0
-
-        model = build_class(
-            class_candidates=model_candidates,
-            n_users=self.hparams["n_users"],
-            n_items=self.hparams["n_items"],
+        model = self.build_class(
+            class_candidates=[
+                ProbabilityMatrixFactorization,
+                ConstrainedProbabilityMatrixFactorization,
+            ],
+            n_users=self.train_explicit.shape[0],
+            n_items=self.train_explicit.shape[1],
             **model_config,
         )
         return model
 
     def train_dataloader(self):
         return self.build_dataloader(
-            self.train_explicit, sampler_type="grid", shuffle=True
+            dataset=SparseDataset(self.train_explicit),
+            sampler_type="grid",
+            shuffle=True,
         )
 
     def common_step(self, batch):

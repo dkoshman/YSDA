@@ -2,16 +2,16 @@ project: Recommending
 name: "ALS run"
 stage: test
 model:
-  name: ALSjitBiased
-  epochs: 15
-  latent_dimension_size: 300
+  name: ALSjit
+  epochs: 10
+  latent_dimension_size: 200
   regularization_lambda: 100
   confidence_alpha: 10
   lambda_decay: 0.75
 datamodule:
   directory: local/ml-100k
 lightning_module:
-  name: MovieLensALSRecommender
+  name: MovieLensNonGradientRecommender
 logger:
   name: WandbLogger
   save_dir: local
@@ -19,4 +19,4 @@ callbacks:
   WandbWatcher: {}
   RecommendingDataOverviewCallback: {}
   WandbCheckpointCallback:
-    artifact_name: ALS
+    artifact_name: als

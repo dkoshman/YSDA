@@ -4,6 +4,7 @@ import numpy as np
 import scipy.sparse
 import torch
 import wandb
+from my_tools.utils import get_class
 
 
 def build_weight(*dimensions):
@@ -69,14 +70,109 @@ def split_dataset(dataset, fraction):
     return torch.utils.data.random_split(dataset, [left_size, right_size])
 
 
-def fetch_checkpoint_path(
-    *, entity="dkoshman", project="Recommending", artifact_name, alias="latest"
-):
-    api = wandb.Api()
-    artifact = api.artifact(f"{entity}/{project}/{artifact_name}:{alias}")
-    checkpoint = artifact.metadata.get("checkpoint")
-    if not checkpoint or not os.path.exists(checkpoint):
-        print("Downloading artifact")
-        artifact_dir = artifact.download()
-        checkpoint = os.path.join(artifact_dir, artifact.get_path("checkpoint").path)
-    return checkpoint
+class WandbAPI:
+    CHECKPOINT_TYPE = "checkpoint"
+    CHECKPOINT_PATH = "checkpoint_path"
+    PL_MODULE_CLASS = "pl_module_class"
+    CHECKPOINT_IN_ARTIFACT_HIERARCHY = "checkpoint"
+
+    def __init__(self, api_key=None, entity=None):
+        self.api = wandb.Api(api_key=api_key)
+        self.entity = entity or wandb.run.entity
+
+    def save_artifact(
+        self, name, type, metadata=None, description=None, local_paths=None
+    ):
+        artifact = wandb.Artifact(
+            name=name,
+            type=type,
+            metadata=metadata,
+            description=description,
+        )
+        if local_paths is not None:
+            for name, path in local_paths.items():
+                artifact.add_file(local_path=path, name=name)
+        wandb.run.log_artifact(artifact)
+
+    def save_checkpoint(
+        self,
+        checkpoint_path,
+        artifact_name,
+        pl_module_class,
+        description=None,
+        metadata=None,
+        add_run_summary=True,
+    ):
+        if metadata is None:
+            metadata = {}
+        metadata.update(
+            {
+                self.PL_MODULE_CLASS: pl_module_class,
+                self.CHECKPOINT_PATH: os.path.abspath(checkpoint_path),
+            }
+        )
+        if add_run_summary:
+            metadata.update(
+                {
+                    k: v
+                    for k, v in wandb.run._summary_get_current_summary_callback().items()
+                    if not k.startswith("_")
+                }
+            )
+        self.save_artifact(
+            name=artifact_name,
+            type=self.CHECKPOINT_TYPE,
+            metadata=metadata,
+            description=description,
+            local_paths={self.CHECKPOINT_IN_ARTIFACT_HIERARCHY: checkpoint_path},
+        )
+
+    def verify_checkpoint_artifact(self, artifact):
+        if artifact.type != self.CHECKPOINT_TYPE:
+            raise ValueError(
+                f"Expected artifact type to be {self.CHECKPOINT_TYPE}, "
+                f"but found type {artifact.type}."
+            )
+        if (
+            self.CHECKPOINT_PATH not in artifact.metadata
+            or self.PL_MODULE_CLASS not in artifact.metadata
+        ):
+            raise ValueError(
+                f"Malformed checkpoint artifact: '{self.CHECKPOINT_PATH}' "
+                f"or '{self.PL_MODULE_CLASS}' "
+                f"not in metadata keys {list(artifact.metadata)}"
+            )
+
+    def artifact(self, *, entity=None, project=None, artifact_name, alias="latest"):
+        entity = entity or self.entity or wandb.run.entity
+        project = project or wandb.run.project
+        artifact = self.api.artifact(f"{entity}/{project}/{artifact_name}:{alias}")
+        return artifact
+
+    def fetch_checkpoint_dict(self, artifact):
+        self.verify_checkpoint_artifact(artifact)
+        checkpoint_path = artifact.metadata[self.CHECKPOINT_PATH]
+        if not os.path.exists(checkpoint_path):
+            artifact_dir = artifact.download()
+            checkpoint_path = os.path.join(
+                artifact_dir,
+                artifact.get_path(self.CHECKPOINT_IN_ARTIFACT_HIERARCHY).path,
+            )
+        return {
+            "checkpoint_path": checkpoint_path,
+            self.PL_MODULE_CLASS: artifact.metadata[self.PL_MODULE_CLASS],
+        }
+
+    def build_from_checkpoint_artifact(
+        self, artifact, class_candidates=(), module_candidates=()
+    ):
+        checkpoint_dict = self.fetch_checkpoint_dict(artifact)
+        Model = get_class(
+            class_name=checkpoint_dict["pl_module_class"],
+            class_candidates=class_candidates,
+            module_candidates=module_candidates,
+        )
+        model = Model.load_from_checkpoint(
+            checkpoint_path=checkpoint_dict["checkpoint_path"]
+        )
+        return model

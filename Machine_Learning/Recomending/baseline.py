@@ -1,4 +1,6 @@
 import abc
+import io
+import pickle
 from typing import Literal
 
 import implicit
@@ -84,7 +86,7 @@ class ImplicitRecommender(InMemoryRecommender):
     ):
         super().__init__(**kwargs)
         self.implicit_model = build_class(
-            modules=[
+            module_candidates=[
                 implicit.nearest_neighbours,
                 implicit.als,
                 implicit.bpr,
@@ -123,6 +125,16 @@ class ImplicitRecommender(InMemoryRecommender):
         ratings = torch.from_numpy(ratings)[:, item_ids]
         return ratings
 
+    def save(self):
+        bytes = io.BytesIO()
+        self.implicit_model.save(bytes)
+        return bytes
+
+    def load(self, bytes):
+        bytes.seek(0)
+        print(self.implicit_model, "\nLoaded\n")
+        self.implicit_model.load(bytes)
+
 
 class ImplicitMatrixFactorizationRecommender(ImplicitRecommender):
     def __init__(
@@ -136,19 +148,20 @@ class ImplicitMatrixFactorizationRecommender(ImplicitRecommender):
         learning_rate=1e-2,
         regularization=1e-2,
         num_threads=0,
-        use_gpu=False,
+        use_gpu=True,
         **kwargs,
     ):
         implicit_kwargs = dict(
             factors=factors,
+            learning_rate=learning_rate,
             regularization=regularization,
             num_threads=num_threads,
             use_gpu=use_gpu,
         )
-        if implicit_model != "AlternatingLeastSquares":
-            implicit_kwargs["learning_rate"] = learning_rate
+        if implicit_model == "AlternatingLeastSquares":
+            implicit_kwargs.pop("learning_rate")
         else:
-            implicit_kwargs["use_gpu"] = True
+            implicit_kwargs["use_gpu"] = False
 
         super().__init__(
             implicit_model=implicit_model, implicit_kwargs=implicit_kwargs, **kwargs
@@ -186,7 +199,10 @@ class ImplicitNearestNeighborsRecommender(ImplicitRecommender):
         similar_users_ids, similarity = self.implicit_model.similar_items(
             user_ids, filter_items=user_ids
         )
-        return dict(similar_users=similar_users_ids, similarity=similarity)
+        return dict(
+            similar_users=torch.from_numpy(similar_users_ids).to(torch.int64),
+            similarity=torch.from_numpy(similarity),
+        )
 
 
 class SVDRecommender(InMemoryRecommender):
@@ -208,7 +224,13 @@ class SVDRecommender(InMemoryRecommender):
         explicit_feedback = torch_sparse_to_scipy_coo(self.explicit_feedback).tocsr()
         embedding = self.model.transform(explicit_feedback[user_ids].A)
         ratings = self.model.inverse_transform(embedding)[:, item_ids]
-        return ratings
+        return torch.from_numpy(ratings)
+
+    def save(self):
+        return pickle.dumps(self.model)
+
+    def load(self, bytes):
+        self.model = pickle.load(io.BytesIO(bytes))
 
 
 class NearestNeighbours(InMemoryRecommender):

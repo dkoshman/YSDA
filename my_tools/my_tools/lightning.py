@@ -1,7 +1,7 @@
-from pytorch_lightning.callbacks import Callback
+import pytorch_lightning
 
 
-class ConvenientCheckpointLogCallback(Callback):
+class ConvenientCheckpointLogCallback(pytorch_lightning.Callback):
     def on_fit_end(self, trainer, pl_module):
         super().on_fit_end(trainer, pl_module)
         if logger := trainer.logger:

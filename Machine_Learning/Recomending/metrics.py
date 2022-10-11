@@ -37,12 +37,10 @@ def mark_duplicate_recommended_items_as_invalid(recommendations, invalid_mark=-1
     return recommendations
 
 
-@njit
-def binary_relevance(relevant_pairs, recommendee_user_ids, recommendations):
+def binary_relevance(explicit_feedback, recommendee_user_ids, recommendations):
     """
     Determine whether recommended items are relevant to users based on provided relevant pairs.
-    :param relevant_pairs: numpy array of shape [n_pairs, 2] containing [user_id, item_id] pairs
-    indicating that user meaningfully interacted with item; implicit feedback in format of pairs.
+    :param explicit_feedback: csr_matrix with explicit feedback
     :param recommendee_user_ids: numpy array of shape [n_users] indicating users for whom the
     recommendations were generated.
     :param recommendations: numpy array of shape [n_users, n_items] with recommended item ids,
@@ -51,38 +49,21 @@ def binary_relevance(relevant_pairs, recommendee_user_ids, recommendations):
     :return: numpy bool array of shape [n_users, n_items] indicating whether the recommended
     [user_id, item_id] pair is in relevant_pairs.
     """
-    relevant_pairs = set([(i, j) for (i, j) in relevant_pairs])
-    relevance = np.zeros_like(recommendations)
-    for i, (user, items) in enumerate(zip(recommendee_user_ids, recommendations)):
-        for j, item in enumerate(items):
-            relevance[i, j] = (user, item) in relevant_pairs
+    explicit = explicit_feedback[recommendee_user_ids]
+    relevance = njit_binary_relevance(
+        explicit.indptr, explicit.indices, recommendations
+    )
     return relevance
 
 
 @njit
-def binary_relevance_optimized(relevant_pairs, recommendee_user_ids, recommendations):
-    """A more optimized, but convoluted and bug prone version of binary relevance."""
-    user_ids_sorted, item_ids = relevant_pairs[np.argsort(relevant_pairs[:, 0])].T
-    splits = np.flatnonzero(user_ids_sorted[1:] != user_ids_sorted[:-1]) + 1
-    starts = np.concatenate((np.array([0]), splits))
-
-    start_indices = np.zeros(user_ids_sorted.max() + 1)
-    end_indices = np.zeros_like(start_indices)
-    unique_users = user_ids_sorted[starts]
-
-    start_indices[unique_users] = starts
-    end_indices[unique_users] = np.concatenate(
-        (splits, np.array([len(user_ids_sorted)]))
-    )
-
-    relevance = np.empty_like(recommendations)
-    for i, (user_id, items_for_user) in enumerate(
-        zip(recommendee_user_ids, recommendations)
+def njit_binary_relevance(indptr, indices, recommendations):
+    relevance = np.zeros_like(recommendations)
+    for i, (begin, end, item_ids) in enumerate(
+        zip(indptr, indptr[1:], recommendations)
     ):
-        relevant_items = item_ids[start_indices[user_id] : end_indices[user_id]]
-        for j, item_id in enumerate(items_for_user):
-            relevance[i, j] = item_id in relevant_items
-
+        for j, item_id in enumerate(item_ids):
+            relevance[i, j] = item_id in indices[begin:end]
     return relevance
 
 
@@ -174,14 +155,15 @@ def coverage(recommendations, all_possible_item_ids):
     return len(set(recommendations.flat) & all_items) / len(all_items)
 
 
-def normalized_items_self_information(relevant_pairs):
+def normalized_items_self_information(explicit_feedback):
     """
     Computes self information of each item, representing how much information
     an item occurrence brings. The higher the information, the more niche the
     item is.
-    :param relevant_pairs: dataframe or array of user-item pairs from implicit feedback
     :return: pandas Series with item ids in index and self information in values
     """
+    explicit_feedback = explicit_feedback.tocoo()
+    relevant_pairs = np.stack([explicit_feedback.row, explicit_feedback.col]).T
     relevant_pairs = relevant_pairs_to_frame(relevant_pairs)
     n_item_interactions = relevant_pairs.groupby("item_id").size()
     information = np.log2(len(relevant_pairs)) - np.log2(n_item_interactions)
@@ -202,22 +184,21 @@ def jit_surpisal(item_ids, self_information_per_item, recommendations):
     return np.mean(recommendations_information)
 
 
-def surprisal(recommendations, relevant_pairs=None, items_information=None):
+def surprisal(recommendations, explicit_feedback=None, items_information=None):
     """
     Computes average normalized self information for each recommended item.
     The higher the surprisal, the more specific recommendations the model gives.
 
     :param recommendations: recommended item ids per user
-    :param relevant_pairs: if passed, it should contain ALL the relevant pairs
-    containing recommended items
+    :param explicit_feedback: explicit feedback csr_matrix
     :param items_information: precomputed items self information
     """
     if items_information is None:
-        if relevant_pairs is None:
+        if explicit_feedback is None:
             raise ValueError(
-                "Either relevant_pairs or items_information must be passed."
+                "Either explicit_feedback or items_information must be passed."
             )
-        items_information = normalized_items_self_information(relevant_pairs)
+        items_information = normalized_items_self_information(explicit_feedback)
     return jit_surpisal(
         item_ids=items_information.index.to_numpy(),
         self_information_per_item=items_information.values,
@@ -244,10 +225,7 @@ class RecommendingMetrics:
     def __init__(self, explicit_feedback: csr_matrix, k=10):
         self.explicit_feedback = explicit_feedback
         self.k = k
-
-        explicit_feedback = explicit_feedback.tocoo()
-        self.relevant_pairs = np.stack([explicit_feedback.row, explicit_feedback.col]).T
-        self.items_information = normalized_items_self_information(self.relevant_pairs)
+        self.items_information = normalized_items_self_information(explicit_feedback)
         self.all_items = self.items_information.index.to_numpy()
         self.unique_recommended_items = np.empty(0, dtype=np.int32)
         self.n_relevant_items_per_user = (explicit_feedback > 0).sum(axis=1).A1
@@ -276,7 +254,7 @@ class RecommendingMetrics:
         return self.atk_suffix(metrics)
 
     def batch_metrics(self, user_ids, recommendations):
-        relevance = binary_relevance(self.relevant_pairs, user_ids, recommendations)
+        relevance = binary_relevance(self.explicit_feedback, user_ids, recommendations)
         n_relevant_items_per_user = self.n_relevant_items_per_user[user_ids]
         self.update_coverage(recommendations)
         metrics = dict(

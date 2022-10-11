@@ -61,6 +61,15 @@ class SparseDataset(Dataset):
         return batch
 
 
+class SparseDataModuleMixin:
+    def on_after_batch_transfer(self, batch, dataloader_idx=0):
+        """
+        Need to manually pack and then unpack sparse torch matrices because
+        they are unsupported in Dataloaders as of the moment of writing.
+        """
+        return SparseDataset.unpack_sparse_kwargs_to_torch_sparse_coo(batch)
+
+
 class Sampler:
     def __init__(self, size, batch_size, shuffle=True):
         indices = torch.randperm(size) if shuffle else torch.arange(size)
@@ -149,84 +158,30 @@ def build_recommending_sampler(
     return sampler
 
 
-class SparseDataModuleMixin:
-    def on_after_batch_transfer(self, batch, dataloader_idx=0):
-        """
-        Need to manually pack and then unpack sparse torch matrices because
-        they are unsupported in Dataloaders as of the moment of writing.
-        """
-        return SparseDataset.unpack_sparse_kwargs_to_torch_sparse_coo(batch)
-
-
-class RecommendingDataModuleMixin(SparseDataModuleMixin):
-    def __init__(
-        self, *args, batch_size=100, num_workers=0, persistent_workers=False, **kwargs
-    ):
-        super().__init__(*args, **kwargs)
-        self.save_hyperparameters(
-            dict(
-                batch_size=batch_size,
-                num_workers=num_workers,
-                persistent_workers=persistent_workers,
-            )
-        )
-
-    @property
-    def train_explicit(self) -> Optional[csr_matrix]:
-        return
-
-    @property
-    def val_explicit(self) -> Optional[csr_matrix]:
-        return
-
-    @property
-    def test_explicit(self) -> Optional[csr_matrix]:
-        return
-
-    def build_dataloader(
-        self,
-        explicit_feedback=None,
-        dataset=None,
-        sampler_type: Literal["grid", "user", "item"] = "user",
-        shuffle=False,
-    ):
-        if dataset is None:
-            if explicit_feedback is None:
-                return
-            dataset = SparseDataset(explicit_feedback)
-
-        sampler = build_recommending_sampler(
-            batch_size=self.hparams["batch_size"],
-            n_users=dataset.shape[0],
-            n_items=dataset.shape[1],
-            sampler_type=sampler_type,
-            shuffle=shuffle,
-        )
-        num_workers = self.hparams["num_workers"]
-        dataloader = DataLoader(
-            dataset=dataset,
-            sampler=sampler,
-            batch_size=None,
-            num_workers=num_workers,
-            pin_memory=isinstance(num_workers, int) and num_workers > 1,
-            persistent_workers=self.hparams["persistent_workers"],
-        )
-        return dataloader
-
-    def train_dataloader(self):
-        return self.build_dataloader(
-            explicit_feedback=self.train_explicit, sampler_type="user", shuffle=True
-        )
-
-    def val_dataloader(self):
-        return self.build_dataloader(
-            explicit_feedback=self.val_explicit, sampler_type="user"
-        )
-
-    def test_dataloader(self):
-        return self.build_dataloader(
-            explicit_feedback=self.test_explicit, sampler_type="user"
-        )
+def build_recommending_dataloader(
+    dataset,
+    sampler_type: Literal["grid", "user", "item"] = "user",
+    batch_size=100,
+    num_workers=0,
+    persistent_workers=False,
+    shuffle=False,
+):
+    sampler = build_recommending_sampler(
+        batch_size=batch_size,
+        n_users=dataset.shape[0],
+        n_items=dataset.shape[1],
+        sampler_type=sampler_type,
+        shuffle=shuffle,
+    )
+    dataloader = DataLoader(
+        dataset=dataset,
+        sampler=sampler,
+        batch_size=None,
+        num_workers=num_workers,
+        pin_memory=isinstance(num_workers, int) and num_workers > 1,
+        persistent_workers=persistent_workers,
+    )
+    return dataloader
 
 
 class MovieLens:

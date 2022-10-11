@@ -174,19 +174,19 @@ class SLIMDataset(SparseDataset):
 class SLIMRecommender(LitRecommenderBase):
     def __init__(
         self,
-        *args,
         patience=0,
         min_delta=0,
         check_val_every_n_epoch=10,
         **kwargs,
     ):
-        super().__init__(*args, **kwargs)
+        super().__init__(**kwargs)
         self.save_hyperparameters(
-            dict(
-                patience=patience,
-                min_delta=min_delta,
-                check_val_every_n_epoch=check_val_every_n_epoch,
-            )
+            ignore=kwargs.keys()
+            # dict(
+            #     patience=patience,
+            #     min_delta=min_delta,
+            #     check_val_every_n_epoch=check_val_every_n_epoch,
+            # )
         )
         self.stopping_monitor = None
         self.current_batch = None
@@ -216,12 +216,11 @@ class SLIMRecommender(LitRecommenderBase):
         super().setup(stage)
 
     def build_model(self):
-        model = build_class(
+        return self.build_class(
             class_candidates=[SLIM],
             explicit_feedback=self.train_explicit,
             **self.hparams["model_config"],
         )
-        return model
 
     def train_dataloader(self):
         try:

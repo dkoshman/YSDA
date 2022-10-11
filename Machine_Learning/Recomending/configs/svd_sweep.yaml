@@ -13,10 +13,9 @@ parameters:
   datamodule:
     directory: local/ml-100k
   lightning_module:
-    name: MovieLensBaselineRecommender
+    name: MovieLensNonGradientRecommender
   trainer:
     num_sanity_val_steps: 0
   logger:
     name: WandbLogger
     save_dir: local
-sweep_id: znz6ne7u

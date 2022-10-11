@@ -1,4 +1,3 @@
-import abc
 import sys
 
 from argparse import ArgumentParser
@@ -9,7 +8,7 @@ import pytorch_lightning as pl
 import wandb
 import yaml
 
-from my_tools.utils import full_traceback, build_class
+from my_tools.utils import build_class, full_traceback
 
 
 class WandbSweepDispatcher:
@@ -246,22 +245,13 @@ class Hooker:
         assert not hasattr(super(), "on_after_main")
 
 
-class ConfigConstructorBase(abc.ABC):
-    def __init__(
-        self,
-        config,
-        class_candidates=(),
-        module_candidates=(),
-    ):
-        self.class_candidates = class_candidates
-        self.module_candidates = list(module_candidates) + [pl.callbacks, pl.loggers]
+class ConfigConstructorBase:
+    def __init__(self, config):
         self.config = config.copy()
-        super().__init__()
 
-    def build_class(self, **kwargs):
+    def build_class(self, module_candidates=(), **kwargs):
         return build_class(
-            class_candidates=self.class_candidates,
-            modules=self.module_candidates,
+            module_candidates=list(module_candidates) + [pl.callbacks, pl.loggers],
             **kwargs,
         )
 
@@ -274,12 +264,10 @@ class ConfigConstructorBase(abc.ABC):
         trainer.test(lightning_module, datamodule=datamodule)
 
     def build_lightning_module(self):
-        lightning_module = self.build_class(**self.config["lightning_module"])
-        return lightning_module
+        return self.build_class(**self.config["lightning_module"])
 
     def build_datamodule(self):
-        datamodule = self.build_class(**self.config["datamodule"])
-        return datamodule
+        return self.build_class(**self.config["datamodule"])
 
     def build_callbacks(self) -> dict:
         callbacks = {}

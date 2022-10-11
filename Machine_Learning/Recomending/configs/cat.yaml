@@ -1,0 +1,25 @@
+project: Recommending
+name: "Catboost run"
+#stage: test
+model:
+  name: CatboostRecommenderModule
+  model_artifact_names: [als, svd, pmf, slim] # implicit_als, implicit_als have trouble loading
+  n_recommendations: 100
+#  task_type: GPU
+#  devices: "0"
+  # If errors with OOM errors on other gpus, try running script with CUDA_VISIBLE_DEVICES=0,1
+  train_dir: local
+datamodule:
+  directory: local/ml-100k
+  batch_size: 100
+lightning_module:
+  name: MovieLensCatBoostRecommender
+logger:
+  name: WandbLogger
+  save_dir: local
+trainer:
+  num_sanity_val_steps: 0
+callbacks:
+  CatBoostMetrics: {}
+#  WandbCheckpointCallback:
+#    artifact_name: catboost
