@@ -1,0 +1,38 @@
+project: Recommending
+name: "PMF run"
+stage: test
+model:
+  name: ConstrainedProbabilityMatrixFactorization
+  latent_dimension: 200
+  weight_decay: 1.0e-4
+loss:
+  name: MSELoss
+datamodule:
+  directory: local/ml-100k
+  batch_size: 100
+  num_workers: 4
+lightning_module:
+  name: MovieLensPMFRecommender
+optimizer:
+  name: Adam
+trainer:
+  max_epochs: 50
+  accelerator: gpu
+  devices: [5]
+  default_root_dir: local
+  check_val_every_n_epoch: 5
+  amp_backend: native
+  log_every_n_steps: 1
+logger:
+  name: WandbLogger
+  save_dir: local
+callbacks:
+  WandbWatcher:
+    log_every_n_steps: 50
+  EarlyStopping:
+    monitor: val_loss
+    mode: min
+    min_delta: 0
+    patience: 5
+  WandbCheckpointCallback:
+    artifact_name: pmf

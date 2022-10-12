@@ -3,7 +3,7 @@ import shutil
 
 import torch
 
-import my_ml_tools.utils as utils
+import my_tools.utils as utils
 
 
 def test_free_cuda():
