@@ -47,7 +47,8 @@ class RatingsToRecommendations:
         )
         similar_users = nn_dict["similar_users"]
         similarity = nn_dict["similarity"]
-        similarity /= similarity.sum(axis=0)
+        similarity /= similarity.sum(axis=1)[:, None]
+        print(similarity.shape)
 
         ratings = torch.empty(*explicit_feedback.shape, dtype=torch.float32)
         for i, (similar_users_row, similarity_row) in enumerate(

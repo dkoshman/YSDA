@@ -1,8 +1,8 @@
 project: Recommending
 name: "PMF run"
-stage: test
+#stage: test
 model:
-  name: ConstrainedProbabilityMatrixFactorization
+  name: ProbabilityMatrixFactorization
   latent_dimension: 200
   weight_decay: 1.0e-4
 loss:

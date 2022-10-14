@@ -176,3 +176,18 @@ class WandbAPI:
             checkpoint_path=checkpoint_dict["checkpoint_path"]
         )
         return model
+
+
+def pl_module_from_checkpoint_artifact(
+    artifact_name, class_candidates=(), module_candidates=()
+):
+    if wandb.run is None:
+        ValueError("Wandb run must be initialized.")
+    wandb_api = WandbAPI()
+    artifact = wandb_api.artifact(artifact_name=artifact_name)
+    model = wandb_api.build_from_checkpoint_artifact(
+        artifact=artifact,
+        class_candidates=class_candidates,
+        module_candidates=module_candidates,
+    )
+    return model

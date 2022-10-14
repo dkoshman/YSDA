@@ -18,24 +18,28 @@ from .slim import SLIMRecommender
 
 
 class MovieLensRecommender(LitRecommenderBase):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.recommend = RatingsToRecommendations(
-            explicit_feedback=self.train_explicit, model=self
-        )
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.ratings_to_recommendations = None
+
+    def recommend(self, *args, **kwargs):
+        if self.ratings_to_recommendations is None:
+            self.ratings_to_recommendations = RatingsToRecommendations(
+                explicit_feedback=self.train_explicit, model=self
+            )
+        return self.ratings_to_recommendations(*args, **kwargs)
 
     @property
     def movielens(self):
         return MovieLens(self.hparams["datamodule_config"]["directory"])
 
-    def build_model(self):
-        config = self.hparams["model_config"]
-        if "n_users" not in config:
-            config.update(
-                n_users=self.movielens.shape[0], n_items=self.movielens.shape[1]
-            )
-            self.save_hyperparameters(dict(model_config=config))
-        return self.build_class(**self.hparams["model_config"])
+    # def build_model(self):
+    #     config = self.hparams["model_config"]
+    #     if "n_users" not in config:
+    #         config.update(
+    #             n_users=self.movielens.shape[0], n_items=self.movielens.shape[1]
+    #         )
+    #     return self.build_class(**self.hparams["model_config"])
 
     @property
     def train_explicit(self):
@@ -56,11 +60,9 @@ class MovieLensRecommender(LitRecommenderBase):
 class MovieLensNonGradientRecommender(
     NonGradientRecommenderMixin, MovieLensRecommender
 ):
-    def build_class(self, module_candidates=(), **kwargs):
-        return super().build_class(
-            module_candidates=list(module_candidates) + [als, baseline, bpmf],
-            **kwargs,
-        )
+    @property
+    def module_candidates(self):
+        return super().module_candidates + [als, baseline, bpmf]
 
 
 class MovieLensPMFRecommender(PMFRecommender, MovieLensRecommender):

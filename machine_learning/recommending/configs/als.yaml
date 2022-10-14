@@ -1,6 +1,6 @@
 project: Recommending
 name: "ALS run"
-stage: test
+#stage: test
 model:
   name: ALSjit
   epochs: 10

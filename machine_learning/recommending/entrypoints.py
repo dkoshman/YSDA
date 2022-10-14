@@ -1,4 +1,5 @@
-from typing import Optional
+import abc
+from typing import Optional, Any, Callable
 
 import pytorch_lightning
 import torch
@@ -9,20 +10,21 @@ from my_tools.utils import build_class
 
 from . import losses
 from .data import build_recommending_dataloader, SparseDataset, SparseDataModuleMixin
+from .interface import RecommenderModuleInterface
 
 
 class ExtraDataCheckpointingMixin:
     EXTRA_MODEL_DATA = "extra_model_data"
 
     def on_save_checkpoint(self, checkpoint):
-        if hasattr(self.model, "save"):
-            checkpoint[self.EXTRA_MODEL_DATA] = self.model.save()
+        super().on_save_checkpoint(checkpoint)
+        checkpoint[self.EXTRA_MODEL_DATA] = self.model.save()
 
     def on_load_checkpoint(self, checkpoint):
-        if hasattr(self.model, "load"):
-            if self.EXTRA_MODEL_DATA not in checkpoint:
-                raise ValueError("Malformed checkpoint.")
-            self.model.load(checkpoint[self.EXTRA_MODEL_DATA])
+        super().on_load_checkpoint(checkpoint)
+        if self.EXTRA_MODEL_DATA not in checkpoint:
+            raise ValueError("Malformed checkpoint.")
+        self.model.load(checkpoint[self.EXTRA_MODEL_DATA])
 
 
 class LitRecommenderBase(
@@ -32,19 +34,35 @@ class LitRecommenderBase(
 ):
     def __init__(
         self,
-        datamodule_config: dict,
         model_config: dict,
+        datamodule_config: dict = None,
         optimizer_config: dict = None,
         loss_config: dict = None,
     ):
         super().__init__()
         self.save_hyperparameters()
-        self.model = self.build_model()
-        self.loss = self.build_loss()
+        if "n_users" not in model_config or "n_items" not in model_config:
+            n_users, n_items = self.train_explicit.shape
+            model_config.update(n_users=n_users, n_items=n_items)
+            self.save_hyperparameters()
 
-    def build_class(self, module_candidates=(), **kwargs):
+        self.model: RecommenderModuleInterface = self.build_class(**model_config)
+        self.loss: Callable = (
+            None if loss_config is None else self.build_class(**loss_config)
+        )
+
+    @property
+    def module_candidates(self):
+        return [losses, torch.optim]
+
+    @property
+    def class_candidates(self):
+        return []
+
+    def build_class(self, **kwargs):
         return build_class(
-            module_candidates=list(module_candidates) + [losses, torch.optim],
+            class_candidates=self.class_candidates,
+            module_candidates=self.module_candidates,
             **kwargs,
         )
 
@@ -88,14 +106,6 @@ class LitRecommenderBase(
             sampler_type="user",
         )
 
-    def build_model(self):
-        return self.build_class(**self.hparams["model_config"])
-
-    def build_loss(self):
-        if config := self.hparams["loss_config"]:
-            loss = self.build_class(**config)
-            return loss
-
     def configure_optimizers(self):
         optimizer = self.build_class(
             params=self.parameters(),
@@ -116,6 +126,11 @@ class LitRecommenderBase(
 
     def test_step(self, batch, batch_idx):
         pass
+
+    def on_save_checkpoint(self, checkpoint):
+        checkpoint["hyper_parameters"]["model_config"].update(
+            n_users=self.model.n_users, n_items=self.model.n_items
+        )
 
 
 class NonGradientRecommenderMixin:

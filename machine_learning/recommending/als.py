@@ -1,37 +1,81 @@
+import abc
+
 import numba
 import numpy as np
 import pandas as pd
 import torch
-import wandb
 
 from tqdm.auto import tqdm
 from typing_extensions import Literal
 
+from .interface import (
+    RecommenderModuleInterface,
+    FitExplicitInterfaceMixin,
+    WandbLoggerMixin,
+)
 from .recommender import RatingsToRecommendations
 from .utils import build_weight, build_bias
 
 
-class ALS(torch.nn.Module):
+class ALSInterface:
+    """Skeleton to expose main als logic."""
+
+    @abc.abstractmethod
+    def fit(self, explicit_feedback):
+        """Where "alternating" in als comes from."""
+        for epoch in range(epochs := 10):
+            self.least_squares_optimization_with_fixed_factors(fixed="items")
+            self.least_squares_optimization_with_fixed_factors(fixed="users")
+
+    def least_squares_optimization_with_fixed_factors(
+        self, fixed: Literal["users", "items"]
+    ):
+        """Decoupler function to enable dispatcher independence on what features are currently fixed"""
+        kwargs = self.preprocess_optimization_args(fixed=fixed)
+        self.analytic_optimum_dispatcher(**kwargs)
+
+    @abc.abstractmethod
+    def preprocess_optimization_args(self, *, fixed: Literal["users", "items"]) -> dict:
+        """
+        Prepare arguments for dispatcher to facilitate its
+        independence on what features are currently fixed.
+        """
+
+    @abc.abstractmethod
+    def analytic_optimum_dispatcher(self, **kwargs) -> None:
+        """
+        Main optimization logic to calculate analytic
+        MSE minimum with one of users or items features fixed.
+        This method is agnostic about what features are fixed.
+        Where "least squares" in als comes from.
+        """
+
+
+class ALS(
+    ALSInterface,
+    RecommenderModuleInterface,
+    FitExplicitInterfaceMixin,
+    WandbLoggerMixin,
+):
     def __init__(
         self,
-        n_users,
-        n_items,
         epochs=10,
         latent_dimension_size=10,
         regularization_lambda=100,
         confidence_alpha=10,
         lambda_decay=0.75,
+        **kwargs,
     ):
-        super().__init__()
+        super().__init__(**kwargs)
 
         self.epochs = epochs
         self.regularization_lambda = regularization_lambda
         self.confidence_alpha = confidence_alpha
         self.lambda_decay = lambda_decay
 
-        self.user_factors = build_weight(n_users, latent_dimension_size)
+        self.user_factors = build_weight(self.n_users, latent_dimension_size)
         self.user_factors.requires_grad = False
-        self.item_factors = build_weight(n_items, latent_dimension_size)
+        self.item_factors = build_weight(self.n_items, latent_dimension_size)
         self.item_factors.requires_grad = False
 
         self.confidence_x_preference = None
@@ -58,10 +102,6 @@ class ALS(torch.nn.Module):
 
     def on_train_epoch_start(self):
         self.log(dict(regularization_lambda=self.regularization_lambda))
-
-    def log(self, dict_to_log):
-        if wandb.run is not None:
-            wandb.log(dict_to_log)
 
     def least_squares_optimization_with_fixed_factors(
         self, fixed: Literal["users", "items"]
@@ -101,11 +141,6 @@ class ALS(torch.nn.Module):
         confidence_minus_1 = self.confidence_minus_1
         confidence_x_preference = self.confidence_x_preference
 
-        assert confidence_minus_1.indices.shape == confidence_x_preference.indices.shape
-        assert (confidence_minus_1.indices == confidence_x_preference.indices).all()
-        assert confidence_minus_1.indptr.shape == confidence_x_preference.indptr.shape
-        assert (confidence_minus_1.indptr == confidence_x_preference.indptr).all()
-
         if transpose:
             confidence_minus_1 = confidence_minus_1.tocsc()
             confidence_x_preference = confidence_x_preference.tocsc()
@@ -118,15 +153,19 @@ class ALS(torch.nn.Module):
             ind_slice = slice(ind_begin, ind_end)
             yield ptr_id, indices[ind_slice], cm1_data[ind_slice], cp_data[ind_slice]
 
-    def forward(self, user_ids=None, item_ids=None):
-        if user_ids is None:
-            user_ids = slice(None)
-
-        if item_ids is None:
-            item_ids = slice(None)
-
-        ratings = self.user_factors[user_ids] @ self.item_factors[item_ids].T
+    def forward(self, user_ids):
+        ratings = self.user_factors[user_ids] @ self.item_factors.T
         return ratings
+
+    def _new_users(self, n_new_users):
+        new_users_factors = self.user_factors.mean(dim=0).repeat(n_new_users, 1)
+        user_factors = torch.cat([self.user_factors, new_users_factors])
+        self.user_factors = torch.nn.Parameter(user_factors)
+
+    def _new_items(self, n_new_items):
+        new_item_factors = self.item_factors.mean(dim=0).repeat(n_new_items, 1)
+        item_factors = torch.cat([self.item_factors, new_item_factors])
+        self.item_factors = torch.nn.Parameter(item_factors)
 
     def explain_recommendations(self, user_id, n_recommendations=10):
         recommender = RatingsToRecommendations(self.implicit_feedback, model=self)

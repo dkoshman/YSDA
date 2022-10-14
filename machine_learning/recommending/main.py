@@ -1,7 +1,7 @@
 from my_tools.entrypoints import ConfigDispenser
 
-from .cat import MovieLensCatBoostRecommender
-from .movielens import MovieLensDispatcher
+from recommending.cat import MovieLensCatBoostRecommender
+from recommending.movielens import MovieLensDispatcher
 
 
 class AllDispatcher(MovieLensDispatcher):

@@ -1,41 +1,31 @@
 import torch
 
 from my_tools.models import register_regularization_hook
+from my_tools.utils import scipy_to_torch_sparse
 
 from .entrypoints import LitRecommenderBase
 from .data import SparseDataset
+from .interface import RecommenderModuleInterface, InMemoryRecommender
 from .utils import build_bias, build_weight, torch_sparse_slice
 
 
-class ProbabilityMatrixFactorization(torch.nn.Module):
+class ProbabilityMatrixFactorization(RecommenderModuleInterface):
     """Predicted_rating = user_factors @ item_factors, with bias and L2 regularization"""
 
-    def __init__(
-        self,
-        n_users,
-        n_items,
-        latent_dimension=10,
-        weight_decay=1.0e-3,
-    ):
-        super().__init__()
+    def __init__(self, latent_dimension=10, weight_decay=1.0e-3, **kwargs):
+        super().__init__(**kwargs)
         self.weight_decay = weight_decay
-        self.user_weight = build_weight(n_users, latent_dimension)
-        self.user_bias = build_bias(n_users, 1)
-        self.item_weight = build_weight(n_items, latent_dimension)
-        self.item_bias = build_bias(n_items, 1)
+        self.user_weight = build_weight(self.n_users, latent_dimension)
+        self.user_bias = build_bias(self.n_users, 1)
+        self.item_weight = build_weight(self.n_items, latent_dimension)
+        self.item_bias = build_bias(self.n_items, 1)
         self.bias = torch.nn.Parameter(torch.zeros(1))
 
-    def forward(self, user_ids=None, item_ids=None):
-        if user_ids is None:
-            user_ids = slice(None)
-
-        if item_ids is None:
-            item_ids = slice(None)
-
+    def forward(self, user_ids):
         user_weight = self.user_weight[user_ids]
         user_bias = self.user_bias[user_ids]
-        item_weight = self.item_weight[item_ids]
-        item_bias = self.item_bias[item_ids]
+        item_weight = self.item_weight
+        item_bias = self.item_bias
 
         rating = user_weight @ item_weight.T + user_bias + item_bias.T + self.bias
 
@@ -47,40 +37,50 @@ class ProbabilityMatrixFactorization(torch.nn.Module):
 
         return rating
 
+    def _new_users(self, n_new_users):
+        new_users_weight = self.user_weight.mean(dim=0).repeat(n_new_users, 1)
+        user_weight = torch.cat([self.user_weight, new_users_weight])
+        self.user_weight = torch.nn.Parameter(user_weight)
 
-class ConstrainedProbabilityMatrixFactorization(ProbabilityMatrixFactorization):
-    def __init__(
-        self,
-        n_users,
-        n_items,
-        implicit_feedback,
-        latent_dimension=10,
-        weight_decay=1e-3,
-    ):
-        super().__init__(
-            n_users=n_users,
-            n_items=n_items,
-            latent_dimension=latent_dimension,
-            weight_decay=weight_decay,
+        user_bias = torch.cat([self.user_bias, torch.zeros(n_new_users, 1)])
+        self.user_bias = torch.nn.Parameter(user_bias)
+
+    def _new_items(self, n_new_items):
+        new_items_weight = self.item_weight.mean(dim=0).repeat(n_new_items, 1)
+        item_weight = torch.cat([self.item_weight, new_items_weight])
+        self.item_weight = torch.nn.Parameter(item_weight)
+
+        item_bias = torch.cat([self.item_bias, torch.zeros(n_new_items, 1)])
+        self.item_bias = torch.nn.Parameter(item_bias)
+
+
+class ConstrainedProbabilityMatrixFactorization(
+    ProbabilityMatrixFactorization, InMemoryRecommender
+):
+    def __init__(self, *args, latent_dimension=10, explicit_feedback=None, **kwargs):
+        super().__init__(*args, latent_dimension=latent_dimension, **kwargs)
+        self.item_rating_effect_weight = build_weight(self.n_items, latent_dimension)
+        self.implicit_feedback_normalized = None
+        if explicit_feedback is not None:
+            self.save_explicit_feedback(explicit_feedback)
+
+    def init_implicit_feedback_normalized(self):
+        implicit_feedback = self.explicit_feedback_scipy_coo > 0
+        implicit_feedback_normalized = implicit_feedback.multiply(
+            1 / (implicit_feedback.sum(axis=1) + 1e-8)
+        ).astype("float32")
+        self.implicit_feedback_normalized = scipy_to_torch_sparse(
+            implicit_feedback_normalized
         )
-        self.item_rating_effect_weight = build_weight(n_items, latent_dimension)
-        self.implicit_feedback_normalized = (
-            implicit_feedback.multiply(1 / (implicit_feedback.sum(axis=1) + 1e-8))
-            .tocsr()
-            .astype("float32")
-        )
 
-    def forward(self, user_ids=None, item_ids=None):
-        if user_ids is None:
-            user_ids = slice(None)
-
-        if item_ids is None:
-            item_ids = slice(None)
+    def forward(self, user_ids):
+        if self.implicit_feedback_normalized is None:
+            self.init_implicit_feedback_normalized()
 
         # Need to clone to avoid gradient hook accumulation on same tensor and subsequent memory leak
         item_rating_effect_weight = self.item_rating_effect_weight.clone()
 
-        item_weight = self.item_weight[item_ids]
+        item_weight = self.item_weight
 
         users_implicit_feedback = torch_sparse_slice(
             self.implicit_feedback_normalized, row_ids=user_ids, device=self.bias.device
@@ -89,8 +89,8 @@ class ConstrainedProbabilityMatrixFactorization(ProbabilityMatrixFactorization):
             users_implicit_feedback @ item_rating_effect_weight
         )
 
-        rating = super().forward(user_ids, item_ids)
-        rating += user_weights_offset_caused_by_their_ratings @ item_weight.T
+        ratings = super().forward(user_ids)
+        ratings += user_weights_offset_caused_by_their_ratings @ item_weight.T
 
         # Scale down regularization because item_rating_effect_weight is decayed
         # for each batch, whereas other parameters have only their slices decayed.
@@ -98,25 +98,37 @@ class ConstrainedProbabilityMatrixFactorization(ProbabilityMatrixFactorization):
         register_regularization_hook(
             item_rating_effect_weight, self.weight_decay / scale_down
         )
-        return rating
+        return ratings
+
+    def _new_users(self, n_new_users) -> None:
+        self.init_implicit_feedback_normalized()
+        super()._new_users(n_new_users)
+
+    def _new_items(self, n_new_items) -> None:
+        self.init_implicit_feedback_normalized()
+        new_effect = self.item_rating_effect_weight.mean(dim=0).repeat(n_new_items, 1)
+        item_rating_effect_weight = torch.cat(
+            [self.item_rating_effect_weight, new_effect]
+        )
+        self.item_rating_effect_weight = torch.nn.Parameter(item_rating_effect_weight)
+        super()._new_items(n_new_items)
 
 
 class PMFRecommender(LitRecommenderBase):
-    def build_model(self):
-        model_config = self.hparams["model_config"]
-        if model_config["name"] == "ConstrainedProbabilityMatrixFactorization":
-            model_config = model_config.copy()
-            model_config["implicit_feedback"] = self.train_explicit > 0
-        model = self.build_class(
-            class_candidates=[
-                ProbabilityMatrixFactorization,
-                ConstrainedProbabilityMatrixFactorization,
-            ],
-            n_users=self.train_explicit.shape[0],
-            n_items=self.train_explicit.shape[1],
-            **model_config,
-        )
-        return model
+    @property
+    def class_candidates(self):
+        return super().class_candidates + [
+            ProbabilityMatrixFactorization,
+            ConstrainedProbabilityMatrixFactorization,
+        ]
+
+    def setup(self, stage=None):
+        if (
+            stage == "fit"
+            and self.hparams["model_config"]["name"]
+            == "ConstrainedProbabilityMatrixFactorization"
+        ):
+            self.model.save_explicit_feedback(self.train_explicit)
 
     def train_dataloader(self):
         return self.build_dataloader(
@@ -136,10 +148,10 @@ class PMFRecommender(LitRecommenderBase):
 
     def training_step(self, batch, batch_idx):
         loss = self.common_step(batch)
-        self.log(f"train_loss", loss)
+        self.log("train_loss", loss)
         return loss
 
     def validation_step(self, batch, batch_idx):
         loss = self.common_step(batch)
-        self.log(f"val_loss", loss)
+        self.log("val_loss", loss)
         return loss

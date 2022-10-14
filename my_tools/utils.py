@@ -23,8 +23,8 @@ def sparse_dense_multiply(sparse: torch.Tensor, dense: torch.Tensor):
     return torch.sparse_coo_tensor(indices, values, sparse.size(), device=sparse.device)
 
 
-def scipy_to_torch_sparse(scipy_sparse_csr_matrix, device="cpu"):
-    sparse = scipy_sparse_csr_matrix.tocoo()
+def scipy_to_torch_sparse(scipy_sparse_matrix, device="cpu"):
+    sparse = scipy_sparse_matrix.tocoo()
     torch_sparse_tensor = torch.sparse_coo_tensor(
         indices=np.stack([sparse.row, sparse.col]),
         values=sparse.data,

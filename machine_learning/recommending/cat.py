@@ -3,40 +3,129 @@ from collections import Counter
 import catboost
 import pandas as pd
 import torch
-from tqdm.auto import tqdm
 
 from .data import MovieLens
 from .entrypoints import NonGradientRecommenderMixin, LitRecommenderBase
+from .interface import RecommenderModuleInterface
 from .movielens import (
     MovieLensNonGradientRecommender,
     MovieLensPMFRecommender,
     MovieLensSLIMRecommender,
     MovieLensRecommender,
 )
-from .utils import WandbAPI
+from .utils import pl_module_from_checkpoint_artifact, torch_sparse_to_scipy_coo
 
 
-class CatboostRecommenderModule(torch.nn.Module):
+class CatboostMixin:
+    def explicit_dataframe(self, explicit_feedback):
+        explicit_feedback = explicit_feedback.tocoo()
+        return pd.DataFrame(
+            dict(
+                user_id=explicit_feedback.row,
+                item_id=explicit_feedback.col,
+                explicit=explicit_feedback.data,
+            )
+        )
+
+    @property
+    def cat_features(self):
+        return []
+
+    @property
+    def text_features(self):
+        return []
+
+    def save(self):
+        self.model.save_model("tmp")
+        with open("tmp", "rb") as f:
+            bytes = f.read()
+        return bytes
+
+    def load(self, bytes):
+        with open("tmp", "wb") as f:
+            f.write(bytes)
+        self.model.load_model("tmp")
+
+
+class CatboostModule(CatboostMixin):
+    def __init__(self, n_users, n_items, **cb_params):
+        super().__init__(n_users=n_users, n_items=n_items)
+        self.model = catboost.CatBoostRanker(**cb_params)
+
+    def fit(self, explicit_feedback):
+        super().fit(explicit_feedback)
+        explicit_feedback = explicit_feedback.tocoo()
+        pool = catboost.Pool(
+            pd.DataFrame(
+                dict(user_id=explicit_feedback.row, item_id=explicit_feedback.col)
+            ),
+            label=explicit_feedback.data,
+            group_id=explicit_feedback.row,
+            cat_features=["user_id", "item_id"],
+        )
+        self.model.fit(pool, verbose=100)
+
+    def forward(self, user_ids=None, item_ids=None):
+        if not torch.is_tensor(user_ids):
+            user_ids = torch.from_numpy(user_ids)
+        explicit_feedback = torch_sparse_to_scipy_coo(self.explicit_feedback)
+        batch = self.topk_data(user_ids.to(torch.int64))
+        pool = self.pool(**batch)
+        grouped_ratings = self.model.predict(pool)
+        grouped_ratings = (
+            torch.from_numpy(grouped_ratings)
+            .reshape(len(user_ids), -1)
+            .to(torch.float32)
+        )
+        grouped_item_ids = torch.from_numpy(
+            batch["dataframe"]["item_id"]
+            .values.reshape(len(user_ids), -1)
+            .astype("int64")
+        )
+        ratings = torch.full(
+            (len(user_ids), self.n_items),
+            torch.finfo(torch.float32).min,
+            dtype=torch.float32,
+        )
+        ratings = ratings.scatter(1, grouped_item_ids, grouped_ratings)
+        return ratings
+
+    def feature_importance(self, user_ids, users_explicit_feedback):
+        pool = self.pool(
+            **self.topk_data(
+                user_ids=user_ids,
+                users_explicit_feedback=users_explicit_feedback,
+            )
+        )
+        feature_importance = self.model.get_feature_importance(pool)
+        dataframe = (
+            pd.Series(feature_importance, self.model.feature_names_)
+            .sort_values(ascending=False)
+            .to_frame()
+            .T
+        )
+        return dataframe
+
+
+class CatboostRecommenderModule(CatboostMixin, RecommenderModuleInterface):
     def __init__(
         self,
+        n_users,
+        n_items,
         models,
         model_names=None,
         n_recommendations=10,
-        batch_size=100,
         **cb_params,
     ):
         if model_names is not None and len(models) != len(model_names):
             raise ValueError("Models and their names must be of equal length.")
-        super().__init__()
-        self.n_items = None
+        super().__init__(n_users=n_users, n_items=n_items)
         self.models = models
         self.model_names = (
             self.generate_model_names(models) if model_names is None else model_names
         )
         self.n_recommendations = n_recommendations
-        self.batch_size = batch_size
-        self.cb_params = cb_params
-        self.model = catboost.CatBoostRanker(**self.cb_params)
+        self.model = catboost.CatBoostRanker(**cb_params)
 
     @staticmethod
     def generate_model_names(models):
@@ -52,15 +141,6 @@ class CatboostRecommenderModule(torch.nn.Module):
         return pd.DataFrame(
             columns=["user_id", "item_id", "explicit"] + self.model_names
         )
-
-    @staticmethod
-    def dataframe_as_type(dataframe, type_to_columns, default_type="float32"):
-        leftover_columns = dataframe.columns.drop(
-            [i for j in type_to_columns.values() for i in j]
-        )
-        type_to_columns.update({default_type: leftover_columns})
-        reverse = {v: key for key, values in type_to_columns.items() for v in values}
-        return dataframe.astype(reverse)
 
     def topk_data(self, user_ids, users_explicit_feedback=None):
         ratings = []
@@ -106,12 +186,6 @@ class CatboostRecommenderModule(torch.nn.Module):
         )
         for column in dataframe.columns.drop(cat_features + text_features):
             dataframe[column] = pd.to_numeric(dataframe[column])
-        print(
-            dataframe.head(10),
-            dataframe.shape,
-            dataframe.dtypes,
-            list(dataframe.select_dtypes("category").columns),
-        )
         pool = catboost.Pool(
             data=dataframe.drop(["explicit"], axis="columns"),
             cat_features=cat_features,
@@ -123,24 +197,28 @@ class CatboostRecommenderModule(torch.nn.Module):
         )
         return pool
 
-    def fit(self, explicit_feedback):
-        self.n_items = explicit_feedback.shape[1]
+    def batched_topk_data(self, user_ids=None, explicit_feedback=None, batch_size=100):
+        if user_ids is None:
+            user_ids = torch.arange(self.n_users)
         dataframe = self.skeleton_dataframe()
-        for user_ids in tqdm(
-            torch.randperm(explicit_feedback.shape[0]).split(self.batch_size),
-            "Extracting topk recommendations",
-        ):
-            batch = self.topk_data(user_ids, explicit_feedback[user_ids])
+        for batch_user_ids in user_ids.split(batch_size):
+            batch_explicit = (
+                None if explicit_feedback is None else explicit_feedback[user_ids]
+            )
+            batch = self.topk_data(batch_user_ids, batch_explicit)
             dataframe = pd.concat([dataframe, batch["dataframe"]])
-
-        pool = self.pool(
-            dataframe,
+        return dict(
+            dataframe=dataframe,
             cat_features=batch["cat_features"],
             text_features=batch["text_features"],
         )
+
+    def fit(self, explicit_feedback):
+        data = self.batched_topk_data(explicit_feedback=explicit_feedback)
+        pool = self.pool(**data)
         self.model.fit(pool, verbose=50)
 
-    def forward(self, user_ids, item_ids=None):
+    def forward(self, user_ids=None, item_ids=None):
         if not torch.is_tensor(user_ids):
             user_ids = torch.from_numpy(user_ids)
         batch = self.topk_data(user_ids.to(torch.int64))
@@ -163,17 +241,6 @@ class CatboostRecommenderModule(torch.nn.Module):
         )
         ratings = ratings.scatter(1, grouped_item_ids, grouped_ratings)
         return ratings
-
-    def save(self):
-        self.model.save_model("tmp")
-        with open("tmp", "rb") as f:
-            bytes = f.read()
-        return bytes
-
-    def load(self, bytes):
-        with open("tmp", "wb") as f:
-            f.write(bytes)
-        self.model.load_model("tmp")
 
     def feature_importance(self, user_ids, users_explicit_feedback):
         pool = self.pool(
@@ -249,17 +316,13 @@ class CatboostMovieLensRecommenderModule(CatboostRecommenderModule):
         )
 
 
-class CatboostRecommender(NonGradientRecommenderMixin, LitRecommenderBase):
-    def build_model(self):
-        config = self.hparams["model_config"].copy()
-        artifact_names = config.pop("model_artifact_names")
+class CatboostRecommenderModuleFromArtifacts(CatboostMovieLensRecommenderModule):
+    def __init__(self, *args, model_artifact_names, **kwargs):
         models = []
-        wandb_api = WandbAPI()
-        for artifact_name in artifact_names:
-            artifact = wandb_api.artifact(artifact_name=artifact_name)
+        for artifact_name in model_artifact_names:
             models.append(
-                wandb_api.build_from_checkpoint_artifact(
-                    artifact,
+                pl_module_from_checkpoint_artifact(
+                    artifact_name=artifact_name,
                     class_candidates=[
                         MovieLensNonGradientRecommender,
                         MovieLensPMFRecommender,
@@ -267,21 +330,19 @@ class CatboostRecommender(NonGradientRecommenderMixin, LitRecommenderBase):
                     ],
                 )
             )
-        if config["name"] == "CatboostMovieLensRecommenderModule":
-            config["movielens_directory"] = self.hparams["datamodule_config"][
-                "directory"
-            ]
-        model = self.build_class(
-            class_candidates=[
-                CatboostRecommenderModule,
-                CatboostMovieLensRecommenderModule,
-            ],
-            models=models,
-            model_names=artifact_names,
-            batch_size=self.hparams["datamodule_config"]["batch_size"],
-            **config,
+        super().__init__(
+            *args, models=models, model_names=model_artifact_names, **kwargs
         )
-        return model
+
+
+class CatboostRecommender(NonGradientRecommenderMixin, LitRecommenderBase):
+    @property
+    def class_candidates(self):
+        return super().class_candidates + [
+            CatboostRecommenderModule,
+            CatboostMovieLensRecommenderModule,
+            CatboostRecommenderModuleFromArtifacts,
+        ]
 
 
 class MovieLensCatBoostRecommender(CatboostRecommender, MovieLensRecommender):

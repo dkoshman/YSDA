@@ -6,12 +6,26 @@ import torch
 import torchmetrics as tm
 import wandb
 
-from . import main
-from . import metrics
+from . import als, baseline, main, metrics, pmf, slim
 
 from .callbacks import RecommendingDataOverviewCallback
+from .interface import FitExplicitInterfaceMixin
 from .movielens import MovieLensNonGradientRecommender
 from .utils import WandbAPI
+
+recommender_modules = [
+    als.ALS,
+    als.ALSjit,
+    als.ALSjitBiased,
+    baseline.RandomRecommender,
+    baseline.PopularRecommender,
+    baseline.SVDRecommender,
+    baseline.ImplicitNearestNeighborsRecommender,
+    baseline.ImplicitMatrixFactorizationRecommender,
+    pmf.ProbabilityMatrixFactorization,
+    pmf.ConstrainedProbabilityMatrixFactorization,
+    slim.SLIM,
+]
 
 
 def get_config_base():
@@ -145,6 +159,46 @@ def test_als():
         )
 
 
+def random_sparse_binary_csr(size, density=0.05):
+    return scipy.sparse.csr_matrix(
+        np.random.choice([0, 1], p=[1 - density, density], size=size)
+    )
+
+
+def test_new_users_items():
+    explicit = random_sparse_binary_csr(size=(1007, 113))
+    for Module in recommender_modules:
+        module = Module(n_users=explicit.shape[0], n_items=explicit.shape[1])
+        if isinstance(module, FitExplicitInterfaceMixin):
+            try:
+                module.fit(explicit)
+            except RuntimeError as e:
+                if str(e).startswith("CURAND error"):
+                    continue
+                else:
+                    raise e
+        module.new_users(10)
+        module.new_items(10)
+        new_users = module.new_users(100)
+        module.new_items(100)
+        ratings = module(new_users)
+        assert ratings.shape == (100, explicit.shape[1] + 110)
+        assert not ratings.isnan().any()
+
+
+def test_save_load():
+    explicit = random_sparse_binary_csr(size=(1007, 113))
+    for Module in recommender_modules:
+        module = Module(n_users=explicit.shape[0], n_items=explicit.shape[1])
+        if isinstance(module, FitExplicitInterfaceMixin):
+            module.fit(explicit)
+        pickleable = module.save()
+        module = Module(n_users=explicit.shape[0], n_items=explicit.shape[1])
+        module.load(pickleable)
+        ratings = module(user_ids=torch.tensor([5, 3, 2, 9, 1, 7]))
+        assert not ratings.isnan().any()
+
+
 def test_baseline():
     for name in [
         "RandomRecommender",
@@ -177,7 +231,7 @@ def test_implicit_nearest_neighbors():
 
 def test_implicit_matrix_factorization():
     for implicit_model in [
-        # "AlternatingLeastSquares",
+        "AlternatingLeastSquares",
         "LogisticMatrixFactorization",
         "BayesianPersonalizedRanking",
     ]:

@@ -4,14 +4,15 @@ import scipy.sparse
 import torch
 
 from my_tools.models import register_regularization_hook
-from my_tools.utils import scipy_to_torch_sparse, StoppingMonitor
+from my_tools.utils import StoppingMonitor
 
 from .data import SparseDataset
 from .entrypoints import LitRecommenderBase
+from .interface import InMemoryRecommender, WandbLoggerMixin
 from .utils import torch_sparse_slice
 
 
-class SLIM(torch.nn.Module):
+class SLIM(InMemoryRecommender, WandbLoggerMixin):
     """
     The fitted model has sparse matrix W of shape [n_items, n_items],
     which it uses to predict ratings for users with feedback matrix
@@ -22,25 +23,22 @@ class SLIM(torch.nn.Module):
 
     def __init__(
         self,
-        explicit_feedback: scipy.sparse.csr_matrix,
+        explicit_feedback=None,
         l2_coefficient=1.0e-4,
         l1_coefficient=1.0e-4,
+        **kwargs,
     ):
-        super().__init__()
-
+        super().__init__(**kwargs)
         self.l2_coefficient = l2_coefficient
         self.l1_coefficient = l1_coefficient
-        self.n_items = explicit_feedback.shape[1]
+        if explicit_feedback is not None:
+            self.save_explicit_feedback(explicit_feedback)
 
-        self.register_buffer(
-            name="explicit_feedback",
-            tensor=scipy_to_torch_sparse(explicit_feedback),
-        )
-        self.dense_weight_slice = torch.nn.parameter.Parameter(torch.empty(0))
         self.register_buffer(
             name="sparse_weight",
             tensor=torch.sparse_coo_tensor(size=(self.n_items, self.n_items)),
         )
+        self.dense_weight_slice = torch.nn.parameter.Parameter(torch.empty(0))
 
         self._sparse_values = torch.empty(0)
         self._sparse_indices = torch.empty(2, 0, dtype=torch.int32)
@@ -69,18 +67,17 @@ class SLIM(torch.nn.Module):
             torch.empty(0, device=self.dense_weight_slice.device)
         )
 
-        # Return density for logging.
         density = len(sparse.values()) / sparse.numel()
-        return density
+        self.log({"Items similarity matrix density": density})
 
-    def finalize(self):
+    def finalize_training(self):
         self.sparse_weight = torch.sparse_coo_tensor(
             indices=self._sparse_indices,
             values=self._sparse_values,
             size=(self.n_items, self.n_items),
         )
 
-    def clip_parameter(self):
+    def clip_negative_parameter_values(self):
         self.dense_weight_slice = torch.nn.parameter.Parameter(
             self.dense_weight_slice.clip(0)
         )
@@ -100,17 +97,22 @@ class SLIM(torch.nn.Module):
             dense_weight_slice.register_hook(hook)
         return ratings
 
-    def forward(self, user_ids=None, item_ids=None):
-        if user_ids is None:
-            user_ids = slice(None)
-
-        if item_ids is None:
-            item_ids = slice(None)
-
+    def forward(self, user_ids):
         explicit_feedback = torch_sparse_slice(self.explicit_feedback, row_ids=user_ids)
-        items_sparse_weight = torch_sparse_slice(self.sparse_weight, col_ids=item_ids)
+        items_sparse_weight = torch_sparse_slice(self.sparse_weight)
         ratings = explicit_feedback.to(torch.float32) @ items_sparse_weight
         return ratings
+
+    def _new_users(self, n_new_users):
+        pass
+
+    def _new_items(self, n_new_items):
+        self.sparse_weight = self.sparse_weight.coalesce()
+        self.sparse_weight = torch.sparse_coo_tensor(
+            indices=self.sparse_weight.indices(),
+            values=self.sparse_weight.values(),
+            size=torch.tensor(self.sparse_weight.size) + n_new_items,
+        )
 
 
 class SLIMHook:
@@ -180,6 +182,10 @@ class SLIMRecommender(LitRecommenderBase):
         self.batch_is_fitted = False
         self.item_dataloader_iter = None
 
+    @property
+    def class_candidates(self):
+        return super().class_candidates + [SLIM]
+
     def setup(self, stage=None):
         if stage == "fit":
             if self.trainer.limit_val_batches != 0:
@@ -189,6 +195,7 @@ class SLIMRecommender(LitRecommenderBase):
                     "So validation should be manually disabled, and the model will validate "
                     "when it is fitted."
                 )
+            self.model.save_explicit_feedback(self.train_explicit)
             self.stopping_monitor = StoppingMonitor(
                 self.hparams["patience"], self.hparams["min_delta"]
             )
@@ -200,13 +207,6 @@ class SLIMRecommender(LitRecommenderBase):
             )
             self.item_dataloader_iter = iter(item_dataloader)
         super().setup(stage)
-
-    def build_model(self):
-        return self.build_class(
-            class_candidates=[SLIM],
-            explicit_feedback=self.train_explicit,
-            **self.hparams["model_config"],
-        )
 
     def train_dataloader(self):
         try:
@@ -236,19 +236,18 @@ class SLIMRecommender(LitRecommenderBase):
 
             if self.stopping_monitor.is_time_to_stop(val_loss):
                 self.batch_is_fitted = True
-                density = self.model.transform_dense_slice_to_sparse(
+                self.model.transform_dense_slice_to_sparse(
                     item_ids=self.current_batch["item_ids"]
                 )
-                self.log("Items similarity matrix density", density)
 
         return train_loss
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
-        self.model.clip_parameter()
+        self.model.clip_negative_parameter_values()
         # Update parameters passed to optimizer.
         self.trainer.optimizers = [self.configure_optimizers()]
 
     def on_train_end(self):
-        self.model.finalize()
+        self.model.finalize_training()
         self.trainer.validate(self)
         super().on_train_end()

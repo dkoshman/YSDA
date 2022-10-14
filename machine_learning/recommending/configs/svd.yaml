@@ -1,6 +1,6 @@
 project: Recommending
 name: "SVD run"
-stage: test
+#stage: test
 model:
   name: SVDRecommender
   n_components: 200
