@@ -10,20 +10,20 @@ from sklearn.decomposition import TruncatedSVD
 
 from my_tools.utils import build_class
 
-from .interface import (
+from ..interface import (
     RecommenderModuleInterface,
     FitExplicitInterfaceMixin,
     InMemoryRecommender,
 )
-from .utils import torch_sparse_to_scipy_coo
+from ..utils import torch_sparse_to_scipy_coo
 
 
 class RandomRecommender(RecommenderModuleInterface, FitExplicitInterfaceMixin):
     def fit(self, explicit_feedback):
         pass
 
-    def forward(self, user_ids):
-        ratings = torch.randn(len(user_ids), self.n_items)
+    def forward(self, user_ids, item_ids):
+        ratings = torch.randn(len(user_ids), len(item_ids))
         return ratings
 
     def _new_users(self, n_new_users) -> None:
@@ -42,8 +42,8 @@ class PopularRecommender(RecommenderModuleInterface, FitExplicitInterfaceMixin):
         implicit_feedback = explicit_feedback > 0
         self.items_count = torch.from_numpy(implicit_feedback.sum(axis=0).A.squeeze())
 
-    def forward(self, user_ids):
-        ratings = self.items_count.repeat(len(user_ids), 1)
+    def forward(self, user_ids, item_ids):
+        ratings = self.items_count[item_ids].repeat(len(user_ids), 1)
         return ratings
 
     def _new_users(self, n_new_users) -> None:
@@ -62,10 +62,10 @@ class SVDRecommender(InMemoryRecommender, FitExplicitInterfaceMixin):
         self.save_explicit_feedback(explicit_feedback)
         self.model.fit(explicit_feedback)
 
-    def forward(self, user_ids):
+    def forward(self, user_ids, item_ids):
         explicit_feedback = self.explicit_feedback_scipy_coo.tocsr()
         embedding = self.model.transform(explicit_feedback[user_ids].A)
-        ratings = self.model.inverse_transform(embedding)
+        ratings = self.model.inverse_transform(embedding)[:, item_ids]
         return torch.from_numpy(ratings)
 
     def _new_users(self, n_new_users) -> None:
@@ -75,11 +75,11 @@ class SVDRecommender(InMemoryRecommender, FitExplicitInterfaceMixin):
         self.fit(self.explicit_feedback_scipy_coo)
 
     def save(self):
-        bytes = pickle.dumps(self.model)
-        return bytes
+        pickled_bytes = pickle.dumps(self.model)
+        return pickled_bytes
 
-    def load(self, bytes):
-        self.model = pickle.load(io.BytesIO(bytes))
+    def load(self, pickled_bytes):
+        self.model = pickle.load(io.BytesIO(pickled_bytes))
 
 
 class ImplicitRecommenderBase(InMemoryRecommender, FitExplicitInterfaceMixin):
@@ -100,9 +100,9 @@ class ImplicitRecommenderBase(InMemoryRecommender, FitExplicitInterfaceMixin):
         self.save_explicit_feedback(explicit_feedback.astype(np.float32))
         self.model.fit(explicit_feedback)
 
-    def forward(self, user_ids):
+    def forward(self, user_ids, item_ids):
         explicit_feedback = self.explicit_feedback_scipy_coo.tocsr()
-        indices, item_ratings = self.model.recommend(
+        recommended_item_ids, item_ratings = self.model.recommend(
             userid=user_ids.numpy(),
             user_items=explicit_feedback[user_ids],
             N=self.n_items,
@@ -112,9 +112,21 @@ class ImplicitRecommenderBase(InMemoryRecommender, FitExplicitInterfaceMixin):
             shape=(len(user_ids), self.n_items + 1),
             fill_value=np.finfo(np.float32).min,
         )
-        np.put_along_axis(arr=ratings, indices=indices, values=item_ratings, axis=1)
+        np.put_along_axis(
+            arr=ratings, indices=recommended_item_ids, values=item_ratings, axis=1
+        )
         ratings = torch.from_numpy(ratings[:, :-1])
-        return ratings
+        return ratings[:, item_ids]
+
+    @torch.inference_mode()
+    def recommend(self, user_ids, n_recommendations=10):
+        item_ids, item_ratings = self.model.recommend(
+            userid=user_ids.numpy(),
+            user_items=self.explicit_feedback_scipy_coo.tocsr()[user_ids],
+            N=n_recommendations,
+            filter_already_liked_items=False,
+        )
+        return torch.from_numpy(item_ids)
 
     def _new_users(self, n_new_users) -> None:
         explicit_feedback = self.explicit_feedback_scipy_coo

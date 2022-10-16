@@ -8,7 +8,9 @@ import pytorch_lightning as pl
 import wandb
 import yaml
 
-from my_tools.utils import build_class, full_traceback
+from pytorch_lightning import loggers as pl_loggers
+
+from my_tools.utils import full_traceback, BuilderMixin
 
 
 class WandbSweepDispatcher:
@@ -210,6 +212,7 @@ class ConfigDispenser:
             args.update(config_path=config_path)
 
         config = yaml.safe_load(open(args["config_path"]))
+        config = self.update_config(config)
 
         if self.is_sweep(config):
             return WandbSweepDispatcher(self.main, config, args).dispatch()
@@ -220,7 +223,6 @@ class ConfigDispenser:
             config["trainer"]["accelerator"] = "gpu"
             config["trainer"]["devices"] = [gpu]
         config.update(args)
-        config = self.update_config(config)
         self.main(config)
 
     __call__ = launch
@@ -245,15 +247,13 @@ class Hooker:
         assert not hasattr(super(), "on_after_main")
 
 
-class ConfigConstructorBase:
+class ConfigConstructorBase(BuilderMixin):
     def __init__(self, config):
         self.config = config.copy()
 
-    def build_class(self, module_candidates=(), **kwargs):
-        return build_class(
-            module_candidates=list(module_candidates) + [pl.callbacks, pl.loggers],
-            **kwargs,
-        )
+    @property
+    def module_candidates(self):
+        return [pl.callbacks, pl_loggers]
 
     def main(self):
         """Example implementation, feel free to override."""

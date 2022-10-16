@@ -1,21 +1,22 @@
-import functools
 import itertools
-import os
 
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
 
 import numpy as np
-import pandas as pd
 import torch
 
-from scipy.sparse import coo_matrix, csr_matrix
 from torch.utils.data import DataLoader, Dataset
 
 from .utils import torch_sparse_slice
 
 
+if TYPE_CHECKING:
+    import pytorch_lightning as pl
+    from scipy.sparse import csr_matrix
+
+
 class SparseDataset(Dataset):
-    def __init__(self, explicit_feedback: csr_matrix):
+    def __init__(self, explicit_feedback: "csr_matrix"):
         self.explicit_feedback = explicit_feedback
 
     def __len__(self):
@@ -61,8 +62,8 @@ class SparseDataset(Dataset):
         return batch
 
 
-class SparseDataModuleMixin:
-    def on_after_batch_transfer(self, batch, dataloader_idx=0):
+class SparseTensorUnpacker:
+    def on_after_batch_transfer(self: "pl.LightningModule", batch, dataloader_idx=0):
         """
         Need to manually pack and then unpack sparse torch matrices because
         they are unsupported in Dataloaders as of the moment of writing.
@@ -154,7 +155,7 @@ def build_recommending_sampler(
                 shuffle=shuffle,
             )
         case _:
-            ValueError(f"Unknown sampler type {sampler_type}.")
+            raise ValueError(f"Unknown sampler type {sampler_type}.")
     return sampler
 
 
@@ -184,92 +185,42 @@ def build_recommending_dataloader(
     return dataloader
 
 
-class MovieLens:
-    def __init__(self, path_to_movielens_folder="local/ml-100k"):
-        self.path_to_movielens_folder = path_to_movielens_folder
-
-    def __getitem__(self, filename):
-        match filename:
-            case "u.info":
-                return self.read(
-                    filename=filename,
-                    names=["quantity", "index"],
-                    index_col="index",
-                    sep=" ",
-                )
-            case "u.genre":
-                return self.read(
-                    filename=filename, names=["name", "id"], index_col="id"
-                )
-            case "u.occupation":
-                return self.read(filename=filename, names=["occupation"])
-            case "u.user":
-                return self.read(
-                    filename=filename,
-                    names=["user id", "age", "gender", "occupation", "zip code"],
-                    index_col="user id",
-                )
-            case "u.item":
-                return self.read(
-                    filename=filename,
-                    names=[
-                        "movie id",
-                        "movie title",
-                        "release date",
-                        "video release date",
-                        "IMDb URL",
-                        "unknown",
-                        "Action",
-                        "Adventure",
-                        "Animation",
-                        "Children's",
-                        "Comedy",
-                        "Crime",
-                        "Documentary",
-                        "Drama",
-                        "Fantasy",
-                        "Film-Noir",
-                        "Horror",
-                        "Musical",
-                        "Mystery",
-                        "Romance",
-                        "Sci-Fi",
-                        "Thriller",
-                        "War",
-                        "Western",
-                    ],
-                    index_col="movie id",
-                    encoding_errors="backslashreplace",
-                )
-        if filename in ["u.data"] + [
-            i + j
-            for i in ["u1", "u2", "u3", "u4", "u5", "ua", "ub"]
-            for j in [".base", ".test"]
-        ]:
-            return self.read(
-                filename=filename,
-                names=["user_id", "item_id", "rating", "timestamp"],
-                sep="\t",
-                dtype="int32",
-            )
-        raise ValueError(f"File {filename} not found.")
-
-    def read(self, filename, sep="|", header=None, **kwargs):
-        path = os.path.join(self.path_to_movielens_folder, filename)
-        dataframe = pd.read_csv(path, sep=sep, header=header, **kwargs)
-        return dataframe.squeeze()
+class SparseDataModuleInterface:
+    @property
+    def train_explicit(self) -> "csr_matrix" or None:
+        return
 
     @property
-    @functools.cache
-    def shape(self):
-        info = self["u.info"]
-        return info["users"], info["items"]
+    def val_explicit(self) -> "csr_matrix" or None:
+        return
 
-    def explicit_feedback_scipy_csr(self, name):
-        dataframe = self[name]
-        data = dataframe["rating"].to_numpy()
-        # Stored ids start with 1.
-        row_ids = dataframe["user_id"].to_numpy() - 1
-        col_ids = dataframe["item_id"].to_numpy() - 1
-        explicit_feedback = coo_matrix((data, (row_ids, col_ids)), shape=self.shape)
-        return explicit_feedback.tocsr()
+    @property
+    def test_explicit(self) -> "csr_matrix" or None:
+        return
+
+
+class SparseDataModuleBase(SparseDataModuleInterface, SparseTensorUnpacker):
+    def build_dataloader(self, **kwargs):
+        return build_recommending_dataloader(**kwargs)
+
+    def train_dataloader(self):
+        if (explicit := self.train_explicit) is not None:
+            return self.build_dataloader(
+                dataset=SparseDataset(explicit),
+                sampler_type="user",
+                shuffle=True,
+            )
+
+    def val_dataloader(self):
+        if (explicit := self.val_explicit) is not None:
+            return self.build_dataloader(
+                dataset=SparseDataset(explicit),
+                sampler_type="user",
+            )
+
+    def test_dataloader(self):
+        if (explicit := self.test_explicit) is not None:
+            return self.build_dataloader(
+                dataset=SparseDataset(explicit),
+                sampler_type="user",
+            )

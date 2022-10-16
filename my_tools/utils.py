@@ -3,6 +3,7 @@ import traceback
 
 import numpy as np
 import torch
+import wandb
 
 
 def free_cuda():
@@ -12,15 +13,15 @@ def free_cuda():
     torch.cuda.empty_cache()
 
 
-def sparse_dense_multiply(sparse: torch.Tensor, dense: torch.Tensor):
-    if not (sparse.is_sparse or sparse.is_sparse_csr) or dense.is_sparse:
-        raise ValueError("Incorrect tensor layouts")
-    if sparse.is_sparse_csr:
-        sparse = sparse.to_sparse_coo()
-
-    indices = sparse._indices()
-    values = sparse._values() * dense[indices[0, :], indices[1, :]]
-    return torch.sparse_coo_tensor(indices, values, sparse.size(), device=sparse.device)
+# def sparse_dense_multiply(sparse: torch.Tensor, dense: torch.Tensor):
+#     if not (sparse.is_sparse or sparse.is_sparse_csr) or dense.is_sparse:
+#         raise ValueError("Incorrect tensor layouts")
+#     if sparse.is_sparse_csr:
+#         sparse = sparse.to_sparse_coo()
+#
+#     indices = sparse._indices()
+#     values = sparse._values() * dense[indices[0, :], indices[1, :]]
+#     return torch.sparse_coo_tensor(indices, values, sparse.size(), device=sparse.device)
 
 
 def scipy_to_torch_sparse(scipy_sparse_matrix, device="cpu"):
@@ -100,6 +101,23 @@ def build_class(*, class_candidates=(), module_candidates=(), name, **kwargs):
     return cls(**kwargs)
 
 
+class BuilderMixin:
+    @property
+    def module_candidates(self):
+        return []
+
+    @property
+    def class_candidates(self):
+        return []
+
+    def build_class(self, **kwargs):
+        return build_class(
+            class_candidates=self.class_candidates,
+            module_candidates=self.module_candidates,
+            **kwargs,
+        )
+
+
 class StoppingMonitor:
     def __init__(self, patience, min_delta):
         self.patience = patience
@@ -131,3 +149,9 @@ def full_traceback(function):
             raise exception
 
     return wrapper
+
+
+class WandbLoggerMixin:
+    def log(self, dict_to_log: dict) -> None:
+        if wandb.run is not None:
+            wandb.log(dict_to_log)

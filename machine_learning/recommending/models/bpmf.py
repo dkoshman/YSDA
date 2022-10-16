@@ -1,3 +1,5 @@
+raise NotImplementedError("There's something wrong with this implementation")
+
 from typing import Literal
 
 import einops
@@ -5,23 +7,25 @@ import numba
 import numpy as np
 import scipy
 import torch
-import wandb
 
 from tqdm.auto import tqdm
 
+from my_tools.utils import WandbLoggerMixin
 
-class BayesianPMF(torch.nn.Module):
-    # TODO: there's something wrong with this implementation.
+from ..interface import RecommenderModuleInterface, FitExplicitInterfaceMixin
+
+
+class BayesianPMF(
+    RecommenderModuleInterface, FitExplicitInterfaceMixin, WandbLoggerMixin
+):
     def __init__(
         self,
-        *,
-        n_users,
-        n_items,
         n_feature_dimensions=10,
         burn_in_steps=500,
         keeper_steps=100,
         predictive_explicit_precision=1,
         features_hyper_precision_coefficient=1,
+        **kwargs,
     ):
         """
         This model approximates not just a single point estimate in parameter space,
@@ -51,9 +55,7 @@ class BayesianPMF(torch.nn.Module):
         it corresponds to lambda in the last wiki link
         """
 
-        super().__init__()
-        self.n_users = n_users
-        self.n_items = n_items
+        super().__init__(**kwargs)
         self.n_feature_dimensions = n_feature_dimensions
         self.burn_in_steps = burn_in_steps
         self.keeper_steps = keeper_steps
@@ -77,7 +79,7 @@ class BayesianPMF(torch.nn.Module):
         # with precision predictive_explicit_precision, the mixture
         # of which is the estimated distribution of explicit feedback.
         self.step_explicit_normal_distribution_means = torch.nn.Parameter(
-            torch.zeros(keeper_steps, n_users, n_items), requires_grad=False
+            torch.zeros(keeper_steps, self.n_users, self.n_items), requires_grad=False
         )
 
         self.implicit = None
@@ -108,10 +110,6 @@ class BayesianPMF(torch.nn.Module):
         """Override this method if you want to finetune a fitted MF model."""
         return self.init_features(self.n_items)
 
-    def log(self, dict_to_log):
-        if wandb.run is not None:
-            wandb.log(dict_to_log)
-
     def fit(self, explicit_feedback):
         self.explicit = explicit_feedback
         self.implicit = explicit_feedback > 0
@@ -119,7 +117,7 @@ class BayesianPMF(torch.nn.Module):
             explicit_feedback
         )
 
-        for step in tqdm(range(self.burn_in_steps), "Sampling burn in steps"):
+        for _ in tqdm(range(self.burn_in_steps), "Sampling burn in steps"):
             self.step()
 
         for step in tqdm(range(self.keeper_steps), "Sampling keeper steps"):
@@ -276,12 +274,7 @@ class BayesianPMF(torch.nn.Module):
         mode_means = torch.gather(means, 0, step_ids_with_highest_mean_pdf[None])[0]
         return mode_means
 
-    def forward(
-        self,
-        user_ids=None,
-        item_ids=None,
-        aggregation_method: Literal["mean", "mode"] = "mean",
-    ):
+    def forward(self, user_ids, aggregation_method: Literal["mean", "mode"] = "mean"):
         match aggregation_method:
             case "mean":
                 ratings = self.aggregate_prediction_mean(user_ids)
@@ -289,7 +282,10 @@ class BayesianPMF(torch.nn.Module):
                 ratings = self.aggregate_prediction_mode_approximation(user_ids)
             case _:
                 raise ValueError(f"Unknown aggregation method {aggregation_method}")
-        if item_ids is None:
-            return ratings
-        else:
-            return ratings[:, item_ids]
+        return ratings
+
+    def _new_users(self, n_new_users) -> None:
+        raise NotImplementedError
+
+    def _new_items(self, n_new_items: int) -> None:
+        raise NotImplementedError

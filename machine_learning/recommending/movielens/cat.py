@@ -16,37 +16,6 @@ from .movielens import (
 from .utils import pl_module_from_checkpoint_artifact, torch_sparse_to_scipy_coo
 
 
-class CatboostMixin:
-    def explicit_dataframe(self, explicit_feedback):
-        explicit_feedback = explicit_feedback.tocoo()
-        return pd.DataFrame(
-            dict(
-                user_id=explicit_feedback.row,
-                item_id=explicit_feedback.col,
-                explicit=explicit_feedback.data,
-            )
-        )
-
-    @property
-    def cat_features(self):
-        return []
-
-    @property
-    def text_features(self):
-        return []
-
-    def save(self):
-        self.model.save_model("tmp")
-        with open("tmp", "rb") as f:
-            bytes = f.read()
-        return bytes
-
-    def load(self, bytes):
-        with open("tmp", "wb") as f:
-            f.write(bytes)
-        self.model.load_model("tmp")
-
-
 class CatboostModule(CatboostMixin):
     def __init__(self, n_users, n_items, **cb_params):
         super().__init__(n_users=n_users, n_items=n_items)
@@ -107,7 +76,7 @@ class CatboostModule(CatboostMixin):
         return dataframe
 
 
-class CatboostRecommenderModule(CatboostMixin, RecommenderModuleInterface):
+class CatboostRecommenderAggregatorModule(CatboostMixin, RecommenderModuleInterface):
     def __init__(
         self,
         n_users,
@@ -259,7 +228,7 @@ class CatboostRecommenderModule(CatboostMixin, RecommenderModuleInterface):
         return dataframe
 
 
-class CatboostMovieLensRecommenderModule(CatboostRecommenderModule):
+class CatboostMovieLensRecommenderModule(CatboostRecommenderAggregatorModule):
     def __init__(self, *args, movielens_directory, **kwargs):
         super().__init__(*args, **kwargs)
         self.movielens = MovieLens(movielens_directory)
@@ -339,7 +308,7 @@ class CatboostRecommender(NonGradientRecommenderMixin, LitRecommenderBase):
     @property
     def class_candidates(self):
         return super().class_candidates + [
-            CatboostRecommenderModule,
+            CatboostRecommenderAggregatorModule,
             CatboostMovieLensRecommenderModule,
             CatboostRecommenderModuleFromArtifacts,
         ]

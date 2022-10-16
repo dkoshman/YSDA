@@ -1,26 +1,26 @@
-import abc
-from typing import Optional, Any, Callable
-
-import pytorch_lightning
+import pytorch_lightning as pl
 import torch
 
-from scipy.sparse import csr_matrix
-
-from my_tools.utils import build_class
+from my_tools.utils import BuilderMixin
 
 from . import losses
-from .data import build_recommending_dataloader, SparseDataset, SparseDataModuleMixin
-from .interface import RecommenderModuleInterface
+from .data import build_recommending_dataloader, SparseDataModuleBase
+from .interface import (
+    RecommenderModuleInterface,
+    RecommendingLossInterface,
+    InMemoryRecommender,
+)
 
 
 class ExtraDataCheckpointingMixin:
     EXTRA_MODEL_DATA = "extra_model_data"
+    model: RecommenderModuleInterface
 
-    def on_save_checkpoint(self, checkpoint):
+    def on_save_checkpoint(self: pl.LightningModule, checkpoint: dict) -> None:
         super().on_save_checkpoint(checkpoint)
         checkpoint[self.EXTRA_MODEL_DATA] = self.model.save()
 
-    def on_load_checkpoint(self, checkpoint):
+    def on_load_checkpoint(self: pl.LightningModule, checkpoint: dict) -> None:
         super().on_load_checkpoint(checkpoint)
         if self.EXTRA_MODEL_DATA not in checkpoint:
             raise ValueError("Malformed checkpoint.")
@@ -28,9 +28,10 @@ class ExtraDataCheckpointingMixin:
 
 
 class LitRecommenderBase(
-    SparseDataModuleMixin,
+    SparseDataModuleBase,
+    pl.LightningModule,
+    BuilderMixin,
     ExtraDataCheckpointingMixin,
-    pytorch_lightning.LightningModule,
 ):
     def __init__(
         self,
@@ -44,39 +45,17 @@ class LitRecommenderBase(
         if "n_users" not in model_config or "n_items" not in model_config:
             n_users, n_items = self.train_explicit.shape
             model_config.update(n_users=n_users, n_items=n_items)
-            self.save_hyperparameters()
+            self.save_hyperparameters("model_config")
 
         self.model: RecommenderModuleInterface = self.build_class(**model_config)
-        self.loss: Callable = (
-            None if loss_config is None else self.build_class(**loss_config)
-        )
+        self.loss: RecommendingLossInterface or None = None
+        if loss_config is not None:
+            self.loss = self.build_class(**loss_config)
+        self.recommend = self.model.recommend
 
     @property
     def module_candidates(self):
         return [losses, torch.optim]
-
-    @property
-    def class_candidates(self):
-        return []
-
-    def build_class(self, **kwargs):
-        return build_class(
-            class_candidates=self.class_candidates,
-            module_candidates=self.module_candidates,
-            **kwargs,
-        )
-
-    @property
-    def train_explicit(self) -> Optional[csr_matrix]:
-        return
-
-    @property
-    def val_explicit(self) -> Optional[csr_matrix]:
-        return
-
-    @property
-    def test_explicit(self) -> Optional[csr_matrix]:
-        return
 
     def build_dataloader(self, **kwargs):
         config = self.hparams["datamodule_config"]
@@ -87,36 +66,23 @@ class LitRecommenderBase(
             **kwargs,
         )
 
-    def train_dataloader(self):
-        return self.build_dataloader(
-            dataset=SparseDataset(self.train_explicit),
-            sampler_type="user",
-            shuffle=True,
-        )
-
-    def val_dataloader(self):
-        return self.build_dataloader(
-            dataset=SparseDataset(self.val_explicit),
-            sampler_type="user",
-        )
-
-    def test_dataloader(self):
-        return self.build_dataloader(
-            dataset=SparseDataset(self.test_explicit),
-            sampler_type="user",
-        )
-
     def configure_optimizers(self):
-        optimizer = self.build_class(
-            params=self.parameters(),
-            **(self.hparams["optimizer_config"] or {}),
-        )
+        if (config := self.hparams["optimizer_config"]) is None:
+            config = dict(name="Adam")
+        optimizer = self.build_class(params=self.parameters(), **config)
         return optimizer
 
+    def setup(self, stage=None):
+        super().setup(stage=stage)
+        if stage == "fit" and isinstance(self.model, InMemoryRecommender):
+            self.model.save_explicit_feedback(self.train_explicit)
+
     def forward(self, **batch):
-        return self.model(
-            user_ids=batch.get("user_ids"), item_ids=batch.get("item_ids")
-        )
+        if (user_ids := batch.get("user_ids")) is None:
+            user_ids = torch.arange(self.model.n_users)
+        if (item_ids := batch.get("item_ids")) is None:
+            item_ids = torch.arange(self.model.n_items)
+        return self.model(user_ids=user_ids, item_ids=item_ids)
 
     def training_step(self, batch, batch_idx):
         pass
@@ -128,19 +94,22 @@ class LitRecommenderBase(
         pass
 
     def on_save_checkpoint(self, checkpoint):
+        super().on_save_checkpoint(checkpoint)
+        # In case new users/items were added, for proper checkpoint
+        # loading parameters need to be initialized in proper shape.
         checkpoint["hyper_parameters"]["model_config"].update(
             n_users=self.model.n_users, n_items=self.model.n_items
         )
 
 
 class NonGradientRecommenderMixin:
-    def on_train_batch_start(self, batch, batch_idx):
+    def on_train_batch_start(self: LitRecommenderBase, batch, batch_idx):
         """Skip train dataloader."""
         self.model.fit(explicit_feedback=self.train_explicit)
         self.trainer.should_stop = True
         return -1
 
-    def configure_optimizers(self):
+    def configure_optimizers(self: pl.LightningModule):
         """Placeholder optimizer."""
         optimizer = torch.optim.Adam(params=[torch.zeros(0)])
         return optimizer

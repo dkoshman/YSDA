@@ -1,9 +1,12 @@
 import os
 
 import numpy as np
-import scipy.sparse
 import torch
 import wandb
+
+from torch.utils.data import random_split
+from scipy.sparse import coo_matrix
+
 from my_tools.utils import get_class
 
 
@@ -28,7 +31,7 @@ def to_sparse_coo(tensor):
 
 def torch_sparse_to_scipy_coo(sparse_tensor):
     sparse_tensor = to_sparse_coo(sparse_tensor).coalesce().cpu()
-    sparse_tensor = scipy.sparse.coo_matrix(
+    sparse_tensor = coo_matrix(
         (sparse_tensor.values().numpy(), sparse_tensor.indices().numpy()),
         shape=sparse_tensor.shape,
     )
@@ -37,7 +40,7 @@ def torch_sparse_to_scipy_coo(sparse_tensor):
 
 def scipy_coo_to_torch_sparse(sparse_matrix, device=None):
     return torch.sparse_coo_tensor(
-        indices=np.stack([sparse_matrix.row, sparse_matrix.col]),
+        indices=torch.from_numpy(np.stack([sparse_matrix.row, sparse_matrix.col])),
         values=sparse_matrix.data,
         size=sparse_matrix.shape,
         device=device,
@@ -67,7 +70,7 @@ def split_dataset(dataset, fraction):
     len_dataset = len(dataset)
     right_size = int(fraction * len_dataset)
     left_size = len_dataset - right_size
-    return torch.utils.data.random_split(dataset, [left_size, right_size])
+    return random_split(dataset, [left_size, right_size])
 
 
 class WandbAPI:
@@ -81,11 +84,11 @@ class WandbAPI:
         self.entity = entity or wandb.run.entity
 
     def save_artifact(
-        self, name, type, metadata=None, description=None, local_paths=None
+        self, name, artifact_type, metadata=None, description=None, local_paths=None
     ):
         artifact = wandb.Artifact(
             name=name,
-            type=type,
+            type=artifact_type,
             metadata=metadata,
             description=description,
         )
@@ -121,7 +124,7 @@ class WandbAPI:
             )
         self.save_artifact(
             name=artifact_name,
-            type=self.CHECKPOINT_TYPE,
+            artifact_type=self.CHECKPOINT_TYPE,
             metadata=metadata,
             description=description,
             local_paths={self.CHECKPOINT_IN_ARTIFACT_HIERARCHY: checkpoint_path},

@@ -11,8 +11,8 @@ parameters:
         - ProbabilityMatrixFactorization
         - ConstrainedProbabilityMatrixFactorization
     latent_dimension:
-      min: 10
-      max: 300
+      min: 50
+      max: 150
     weight_decay:
       values:
         - 1.0e-4
@@ -48,4 +48,3 @@ parameters:
       monitor: val_loss
       mode: min
       patience: 5
-sweep_id: js4nf6hq

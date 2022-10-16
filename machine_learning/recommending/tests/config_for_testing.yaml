@@ -1,5 +1,5 @@
 loss:
-  name: MSELoss
+  name: MSEConfidenceLoss
 optimizer:
   name: Adam
 trainer:

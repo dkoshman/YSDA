@@ -1,10 +1,8 @@
-import string
 from typing import Literal
 
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
-import scipy
 import torch
 import wandb
 
@@ -12,8 +10,7 @@ from matplotlib import pyplot as plt
 from sklearn.decomposition import TruncatedSVD
 import matplotlib.patheffects as pe
 
-from .data import MovieLens
-from .utils import scipy_coo_to_torch_sparse, WandbAPI
+from .utils import WandbAPI
 
 
 class WandbWatcher(pl.callbacks.Callback):
@@ -140,102 +137,6 @@ class RecommendingDataOverviewCallback(pl.callbacks.Callback):
         ):
             self.plot_explained_variance()
 
-
-class RecommendingIMDBCallback(pl.callbacks.Callback):
-    def __init__(
-        self,
-        path_to_imdb_ratings_csv="local/my_imdb_ratings.csv",
-        path_to_movielens_folder="local/ml-100k",
-        n_recommendations=10,
-    ):
-        imdb = ImdbRatings(path_to_imdb_ratings_csv, path_to_movielens_folder)
-        self.explicit_feedback = imdb.explicit_feedback_scipy()
-        self.item_df = imdb.movielens["u.item"]
-        self.n_recommendations = n_recommendations
-
-    def on_test_epoch_end(self, trainer=None, pl_module=None):
-        recommendations = pl_module.recommend(
-            users_explicit_feedback=self.explicit_feedback,
-            n_recommendations=self.n_recommendations,
-        )
-        self.log_recommendation(recommendations.cpu().numpy())
-
-    def on_validation_epoch_end(self, trainer=None, pl_module=None):
-        recommendations = pl_module.recommend(
-            users_explicit_feedback=self.explicit_feedback,
-            n_recommendations=self.n_recommendations,
-        )
-        self.log_recommendation(recommendations.cpu().numpy())
-
-    def log_recommendation(self, recommendations):
-        recommendations += 1
-        for i, recs in enumerate(recommendations):
-            items_description = self.item_df.loc[recs]
-            imdb_urls = "https://www.imdb.com/find?q=" + items_description[
-                "movie title"
-            ].str.split("(").str[0].str.replace(r"\s+", "+", regex=True)
-            items_description = pd.concat(
-                [items_description["movie title"], imdb_urls], axis="columns"
-            )
-            wandb.log(
-                {
-                    f"recommended_items_user_{i}": wandb.Table(
-                        dataframe=items_description.T
-                    )
-                }
-            )
-
-
-class ImdbRatings:
-    def __init__(
-        self,
-        path_to_imdb_ratings_csv="local/my_imdb_ratings.csv",
-        path_to_movielens_folder="local/ml-100k",
-    ):
-        self.path_to_imdb_ratings_csv = path_to_imdb_ratings_csv
-        self.movielens = MovieLens(path_to_movielens_folder)
-
-    @property
-    def imdb_ratings(self):
-        return pd.read_csv(self.path_to_imdb_ratings_csv)
-
-    @staticmethod
-    def normalize_titles(titles):
-        titles = (
-            titles.str.lower()
-            .str.normalize("NFC")
-            .str.replace(f"[{string.punctuation}]", "", regex=True)
-            .str.replace("the", "")
-            .str.replace(r"\s+", " ", regex=True)
-            .str.strip()
-        )
-        return titles
-
-    def explicit_feedback_scipy(self):
-        imdb_ratings = self.imdb_ratings
-        imdb_ratings["Title"] = self.normalize_titles(imdb_ratings["Title"])
-        imdb_ratings["Your Rating"] = (imdb_ratings["Your Rating"] + 1) // 2
-
-        movielens_titles = self.movielens["u.item"]["movie title"]
-        movielens_titles = self.normalize_titles(movielens_titles.str.split("(").str[0])
-
-        liked_items_ids = []
-        liked_items_ratings = []
-        for title, rating in zip(imdb_ratings["Title"], imdb_ratings["Your Rating"]):
-            for movie_id, ml_title in movielens_titles.items():
-                if title == ml_title:
-                    liked_items_ids.append(movie_id - 1)
-                    liked_items_ratings.append(rating)
-
-        data = liked_items_ratings
-        row = np.zeros(len(liked_items_ids))
-        col = np.array(liked_items_ids)
-        shape = (1, self.movielens.shape[1])
-        explicit_feedback = scipy.sparse.coo_matrix((data, (row, col)), shape=shape)
-        return explicit_feedback
-
-    def explicit_feedback_torch(self):
-        return scipy_coo_to_torch_sparse(self.explicit_feedback_scipy())
 
 
 class WandbCheckpointCallback(pl.callbacks.ModelCheckpoint):

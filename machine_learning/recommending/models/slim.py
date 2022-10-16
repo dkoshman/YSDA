@@ -4,12 +4,12 @@ import scipy.sparse
 import torch
 
 from my_tools.models import register_regularization_hook
-from my_tools.utils import StoppingMonitor
+from my_tools.utils import StoppingMonitor, WandbLoggerMixin
 
-from .data import SparseDataset
-from .entrypoints import LitRecommenderBase
-from .interface import InMemoryRecommender, WandbLoggerMixin
-from .utils import torch_sparse_slice
+from ..data import SparseDataset
+from ..lit import LitRecommenderBase
+from ..interface import InMemoryRecommender
+from ..utils import torch_sparse_slice
 
 
 class SLIM(InMemoryRecommender, WandbLoggerMixin):
@@ -97,9 +97,9 @@ class SLIM(InMemoryRecommender, WandbLoggerMixin):
             dense_weight_slice.register_hook(hook)
         return ratings
 
-    def forward(self, user_ids):
+    def forward(self, user_ids, item_ids):
         explicit_feedback = torch_sparse_slice(self.explicit_feedback, row_ids=user_ids)
-        items_sparse_weight = torch_sparse_slice(self.sparse_weight)
+        items_sparse_weight = torch_sparse_slice(self.sparse_weight, col_ids=item_ids)
         ratings = explicit_feedback.to(torch.float32) @ items_sparse_weight
         return ratings
 
@@ -111,7 +111,7 @@ class SLIM(InMemoryRecommender, WandbLoggerMixin):
         self.sparse_weight = torch.sparse_coo_tensor(
             indices=self.sparse_weight.indices(),
             values=self.sparse_weight.values(),
-            size=torch.tensor(self.sparse_weight.size) + n_new_items,
+            size=list(torch.tensor(self.sparse_weight.size()) + n_new_items),
         )
 
 
@@ -187,6 +187,7 @@ class SLIMRecommender(LitRecommenderBase):
         return super().class_candidates + [SLIM]
 
     def setup(self, stage=None):
+        super().setup(stage)
         if stage == "fit":
             if self.trainer.limit_val_batches != 0:
                 warnings.warn(
@@ -195,7 +196,6 @@ class SLIMRecommender(LitRecommenderBase):
                     "So validation should be manually disabled, and the model will validate "
                     "when it is fitted."
                 )
-            self.model.save_explicit_feedback(self.train_explicit)
             self.stopping_monitor = StoppingMonitor(
                 self.hparams["patience"], self.hparams["min_delta"]
             )
@@ -206,7 +206,6 @@ class SLIMRecommender(LitRecommenderBase):
                 dataset=slim_dataset, sampler_type="item"
             )
             self.item_dataloader_iter = iter(item_dataloader)
-        super().setup(stage)
 
     def train_dataloader(self):
         try:

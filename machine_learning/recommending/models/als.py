@@ -8,13 +8,11 @@ import torch
 from tqdm.auto import tqdm
 from typing_extensions import Literal
 
-from .interface import (
-    RecommenderModuleInterface,
-    FitExplicitInterfaceMixin,
-    WandbLoggerMixin,
-)
-from .recommender import RatingsToRecommendations
-from .utils import build_weight, build_bias
+from my_tools.utils import WandbLoggerMixin
+
+from ..interface import RecommenderModuleInterface, FitExplicitInterfaceMixin
+from ..recommender import RatingsToRecommendations
+from ..utils import build_weight, build_bias
 
 
 class ALSInterface:
@@ -23,7 +21,7 @@ class ALSInterface:
     @abc.abstractmethod
     def fit(self, explicit_feedback):
         """Where "alternating" in als comes from."""
-        for epoch in range(epochs := 10):
+        for epoch in range(10):
             self.least_squares_optimization_with_fixed_factors(fixed="items")
             self.least_squares_optimization_with_fixed_factors(fixed="users")
 
@@ -94,7 +92,7 @@ class ALS(
     def fit(self, explicit_feedback):
         self.init_preference_confidence(explicit_feedback)
 
-        for epoch in tqdm(range(self.epochs), "Alternating"):
+        for _ in tqdm(range(self.epochs), "Alternating"):
             self.on_train_epoch_start()
             self.least_squares_optimization_with_fixed_factors(fixed="items")
             self.least_squares_optimization_with_fixed_factors(fixed="users")
@@ -153,8 +151,8 @@ class ALS(
             ind_slice = slice(ind_begin, ind_end)
             yield ptr_id, indices[ind_slice], cm1_data[ind_slice], cp_data[ind_slice]
 
-    def forward(self, user_ids):
-        ratings = self.user_factors[user_ids] @ self.item_factors.T
+    def forward(self, user_ids, item_ids):
+        ratings = self.user_factors[user_ids] @ self.item_factors[item_ids].T
         return ratings
 
     def _new_users(self, n_new_users):
@@ -264,7 +262,7 @@ class ALS(
 class ALSjit(ALS):
     def __init__(self, *args, num_threads=8, **kwargs):
         super().__init__(*args, **kwargs)
-        numba.config.NUMBA_NUM_THREADS = 48
+        numba.config.NUMBA_NUM_THREADS = 32
         numba.config.THREADING_LAYER = "threadsafe"
         numba.set_num_threads(num_threads)
 

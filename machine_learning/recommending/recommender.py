@@ -2,7 +2,7 @@ from typing import Literal
 
 import torch
 
-from . import baseline
+from .models import baseline
 
 
 class RatingsToRecommendations:
