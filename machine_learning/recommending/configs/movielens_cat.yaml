@@ -1,6 +1,7 @@
-name: "Catboost run"
+name: "Catboost movielens run"
 model:
-  class_name: CatboostExplicitRecommender
+  class_name: CatboostMovieLensFeatureRecommender
+  movielens_directory: local/ml-100k
   task_type: GPU
   devices: [0]
 #   If errors with OOM errors on other gpus, try running script with CUDA_VISIBLE_DEVICES=0,1
@@ -12,4 +13,4 @@ trainer:
 callbacks:
   CatBoostMetrics: {}
   WandbCheckpointCallback:
-    artifact_name: catboost
+    artifact_name: catboost_movielens

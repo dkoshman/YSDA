@@ -1,8 +1,23 @@
+project: Testing
+model:
+  class_name: SVDRecommender
+  n_components: 10
+datamodule:
+  directory: local/ml-100k
+  train_explicit_file: u1.base
+  val_explicit_file: u1.test
+  test_explicit_file: u1.test
 loss:
-  name: MSEConfidenceLoss
+  class_name: MSEConfidenceLoss
+  confidence: 0.9
+lightning_module:
+  class_name: MovieLensNonGradientRecommender
 optimizer:
-  name: Adam
+  class_name: Adam
+logger:
+  class_name: WandbLogger
+  save_dir: local
 trainer:
-  fast_dev_run: true
+  num_sanity_val_steps: 0
+  max_epochs: 10
   default_root_dir: local
-  enable_progress_bar: false

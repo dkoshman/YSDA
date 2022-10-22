@@ -8,10 +8,9 @@ import torch
 from tqdm.auto import tqdm
 from typing_extensions import Literal
 
-from my_tools.utils import WandbLoggerMixin
+from my_tools.models import WandbLoggerMixin
 
-from ..interface import RecommenderModuleInterface, FitExplicitInterfaceMixin
-from ..recommender import RatingsToRecommendations
+from ..interface import RecommenderModuleBase, FitExplicitInterfaceMixin
 from ..utils import build_weight, build_bias
 
 
@@ -19,7 +18,7 @@ class ALSInterface:
     """Skeleton to expose main als logic."""
 
     @abc.abstractmethod
-    def fit(self, explicit_feedback):
+    def fit(self):
         """Where "alternating" in als comes from."""
         for epoch in range(10):
             self.least_squares_optimization_with_fixed_factors(fixed="items")
@@ -51,21 +50,20 @@ class ALSInterface:
 
 class ALS(
     ALSInterface,
-    RecommenderModuleInterface,
+    RecommenderModuleBase,
     FitExplicitInterfaceMixin,
     WandbLoggerMixin,
 ):
     def __init__(
         self,
+        explicit=None,
         epochs=10,
         latent_dimension_size=10,
         regularization_lambda=100,
         confidence_alpha=10,
         lambda_decay=0.75,
-        **kwargs,
     ):
-        super().__init__(**kwargs)
-
+        super().__init__(explicit=explicit)
         self.epochs = epochs
         self.regularization_lambda = regularization_lambda
         self.confidence_alpha = confidence_alpha
@@ -81,7 +79,7 @@ class ALS(
         self.preference = None
 
     def init_preference_confidence(self, explicit_feedback):
-        implicit_feedback = explicit_feedback > 0
+        implicit_feedback = (explicit_feedback > 0).astype(np.float32)
         self.preference = implicit_feedback
         self.confidence_minus_1 = implicit_feedback * self.confidence_alpha
         self.confidence_minus_1.eliminate_zeros()
@@ -89,9 +87,8 @@ class ALS(
             self.confidence_minus_1.multiply(self.preference) + self.preference
         )
 
-    def fit(self, explicit_feedback):
-        self.init_preference_confidence(explicit_feedback)
-
+    def fit(self):
+        self.init_preference_confidence(self.explicit_scipy_coo())
         for _ in tqdm(range(self.epochs), "Alternating"):
             self.on_train_epoch_start()
             self.least_squares_optimization_with_fixed_factors(fixed="items")
@@ -155,27 +152,15 @@ class ALS(
         ratings = self.user_factors[user_ids] @ self.item_factors[item_ids].T
         return ratings
 
-    def _new_users(self, n_new_users):
-        new_users_factors = self.user_factors.mean(dim=0).repeat(n_new_users, 1)
-        user_factors = torch.cat([self.user_factors, new_users_factors])
-        self.user_factors = torch.nn.Parameter(user_factors)
-
-    def _new_items(self, n_new_items):
-        new_item_factors = self.item_factors.mean(dim=0).repeat(n_new_items, 1)
-        item_factors = torch.cat([self.item_factors, new_item_factors])
-        self.item_factors = torch.nn.Parameter(item_factors)
-
-    def explain_recommendations(self, user_id, n_recommendations=10):
-        recommender = RatingsToRecommendations(self.implicit_feedback, model=self)
-        recommended_item_ids = recommender(
-            user_ids=[user_id], n_recommendations=n_recommendations
-        )[0]
-        user_ratings = self(user_ids=[user_id], item_ids=recommended_item_ids)[0]
-
+    def explain_recommendations(self, user_id, recommended_item_ids):
+        recommended_item_ids = recommended_item_ids.numpy()
+        user_ratings = self(
+            user_ids=torch.tensor([user_id]), item_ids=recommended_item_ids
+        )[0].numpy()
         YtY_plus_lambdaI = item_factors_regularization_term = (
             self.item_factors.T @ self.item_factors
             + self.regularization_lambda * np.eye(self.item_factors.shape[1])
-        )
+        ).numpy()
         relative_row_ids, liked_item_ids = self.preference[user_id].nonzero()
         if liked_item_ids.size == 0:
             raise ValueError(
@@ -185,10 +170,10 @@ class ALS(
         confidence_minus_1 = (
             self.confidence_minus_1[user_id, liked_item_ids].toarray().squeeze()
         )
-        Y = liked_items_factors = self.item_factors[liked_item_ids]
+        Y = liked_items_factors = self.item_factors[liked_item_ids].numpy()
         Y_recommended = recommended_items_factors = self.item_factors[
             recommended_item_ids
-        ]
+        ].numpy()
         user_latent_weight = YtCY = np.linalg.inv(
             (Y.T * confidence_minus_1) @ Y + YtY_plus_lambdaI
         )

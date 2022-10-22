@@ -1,21 +1,14 @@
-project: Recommending
 name: "Implicit matrix factorization run"
-stage: test
 model:
-  name: ImplicitMatrixFactorizationRecommender
-  implicit_model: AlternatingLeastSquares
+  class_name: ImplicitMatrixFactorizationRecommender
+  implicit_model: BayesianPersonalizedRanking
   factors: 200
   learning_rate: 1.0e-2
   regularization: 1.0e-2
-datamodule:
-  directory: local/ml-100k
 lightning_module:
-  name: MovieLensNonGradientRecommender
+  class_name: MovieLensNonGradientRecommender
 trainer:
   num_sanity_val_steps: 0
-logger:
-  name: WandbLogger
-  save_dir: local
 callbacks:
   WandbWatcher:
     log_every_n_steps: 50

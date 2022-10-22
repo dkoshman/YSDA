@@ -3,16 +3,19 @@ import warnings
 import scipy.sparse
 import torch
 
-from my_tools.models import register_regularization_hook
-from my_tools.utils import StoppingMonitor, WandbLoggerMixin
+from my_tools.models import (
+    register_regularization_hook,
+    StoppingMonitor,
+    WandbLoggerMixin,
+)
+from my_tools.utils import torch_sparse_slice
 
 from ..data import SparseDataset
 from ..lit import LitRecommenderBase
-from ..interface import InMemoryRecommender
-from ..utils import torch_sparse_slice
+from ..interface import RecommenderModuleBase
 
 
-class SLIM(InMemoryRecommender, WandbLoggerMixin):
+class SLIM(RecommenderModuleBase, WandbLoggerMixin):
     """
     The fitted model has sparse matrix W of shape [n_items, n_items],
     which it uses to predict ratings for users with feedback matrix
@@ -23,16 +26,13 @@ class SLIM(InMemoryRecommender, WandbLoggerMixin):
 
     def __init__(
         self,
-        explicit_feedback=None,
+        explicit=None,
         l2_coefficient=1.0e-4,
         l1_coefficient=1.0e-4,
-        **kwargs,
     ):
-        super().__init__(**kwargs)
+        super().__init__(explicit=explicit)
         self.l2_coefficient = l2_coefficient
         self.l1_coefficient = l1_coefficient
-        if explicit_feedback is not None:
-            self.save_explicit_feedback(explicit_feedback)
 
         self.register_buffer(
             name="sparse_weight",
@@ -85,7 +85,7 @@ class SLIM(InMemoryRecommender, WandbLoggerMixin):
     def training_forward(self, item_ids):
         assert len(item_ids) == self.dense_weight_slice.shape[1]
         dense_weight_slice = self.dense_weight_slice.clone()
-        ratings = self.explicit_feedback.to(torch.float32) @ dense_weight_slice
+        ratings = self.explicit.to(torch.float32) @ dense_weight_slice
         register_regularization_hook(
             dense_weight_slice, self.l2_coefficient, self.l1_coefficient
         )
@@ -98,21 +98,18 @@ class SLIM(InMemoryRecommender, WandbLoggerMixin):
         return ratings
 
     def forward(self, user_ids, item_ids):
-        explicit_feedback = torch_sparse_slice(self.explicit_feedback, row_ids=user_ids)
-        items_sparse_weight = torch_sparse_slice(self.sparse_weight, col_ids=item_ids)
-        ratings = explicit_feedback.to(torch.float32) @ items_sparse_weight
-        return ratings
-
-    def _new_users(self, n_new_users):
-        pass
-
-    def _new_items(self, n_new_items):
-        self.sparse_weight = self.sparse_weight.coalesce()
-        self.sparse_weight = torch.sparse_coo_tensor(
-            indices=self.sparse_weight.indices(),
-            values=self.sparse_weight.values(),
-            size=list(torch.tensor(self.sparse_weight.size()) + n_new_items),
+        explicit = torch_sparse_slice(
+            self.explicit, row_ids=user_ids, device=self.device
         )
+        items_sparse_weight = torch_sparse_slice(
+            self.sparse_weight, col_ids=item_ids, device=self.device
+        )
+        ratings = explicit.to(torch.float32) @ items_sparse_weight
+        return ratings.to_dense()
+
+    def online_ratings(self, explicit):
+        ratings = explicit.to(torch.float32) @ self.sparse_weight
+        return ratings.to_dense()
 
 
 class SLIMHook:
@@ -149,19 +146,19 @@ class SLIMHook:
 class SLIMDataset(SparseDataset):
     def __init__(
         self,
-        explicit_feedback: scipy.sparse.csr_matrix,
-        explicit_feedback_val: scipy.sparse.csr_matrix,
+        explicit: scipy.sparse.csr_matrix,
+        explicit_val: scipy.sparse.csr_matrix,
     ):
-        super().__init__(explicit_feedback)
-        self.explicit_feedback_val = explicit_feedback_val
+        super().__init__(explicit)
+        self.explicit_val = explicit_val
 
     def __len__(self):
-        return self.explicit_feedback.shape[1]
+        return self.explicit.shape[1]
 
     def __getitem__(self, indices):
         item = super().__getitem__(indices)
         explicit_val = torch_sparse_slice(
-            self.explicit_feedback_val, item["user_ids"], item["item_ids"]
+            self.explicit_val, item["user_ids"], item["item_ids"]
         )
         item.update(explicit_val=self.pack_sparse_tensor(explicit_val))
         return item
@@ -176,7 +173,7 @@ class SLIMRecommender(LitRecommenderBase):
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.save_hyperparameters(ignore=kwargs.keys())
+        self.save_hyperparameters(ignore=list(kwargs.keys()))
         self.stopping_monitor = None
         self.current_batch = None
         self.batch_is_fitted = False
@@ -201,7 +198,7 @@ class SLIMRecommender(LitRecommenderBase):
             )
             self.current_batch = None
             self.batch_is_fitted = False
-            slim_dataset = SLIMDataset(self.train_explicit, self.val_explicit)
+            slim_dataset = SLIMDataset(self.train_explicit(), self.val_explicit())
             item_dataloader = self.build_dataloader(
                 dataset=slim_dataset, sampler_type="item"
             )
@@ -212,7 +209,7 @@ class SLIMRecommender(LitRecommenderBase):
             self.current_batch = next(self.item_dataloader_iter)
         except StopIteration:
             self.trainer.should_stop = True
-            yield {}
+            yield self.current_batch
 
         while not self.batch_is_fitted:
             yield self.current_batch

@@ -106,8 +106,8 @@ def test_recommending_metrics():
             a=5, size=(1000, 100), p=[0.90, 0.01, 0.02, 0.03, 0.04]
         )
         explicit = scipy.sparse.coo_matrix(explicit).tocsr()
-        recommending_metrics_atk = metrics.RecommendingMetrics(explicit, k=k)
-        recommending_metrics = metrics.RecommendingMetrics(explicit, k=None)
+        recommending_metrics_atk = metrics.RecommendingMetrics(explicit)
+        recommending_metrics = metrics.RecommendingMetrics(explicit)
 
         for _ in range(10):
             n_users = 100
@@ -115,13 +115,15 @@ def test_recommending_metrics():
                 np.random.choice(explicit.shape[0], size=n_users, replace=False)
             )
             ratings = torch.tensor(np.random.randn(n_users, explicit.shape[1]))
-            metrics_dict_atk = recommending_metrics_atk.batch_metrics_from_ratings(
-                user_ids, ratings
+            values, recommendations = torch.topk(ratings, k=k)
+            metrics_dict_atk = recommending_metrics_atk.batch_metrics(
+                user_ids, recommendations
             )
             metrics_dict_atk = {k.split("@")[0]: v for k, v in metrics_dict_atk.items()}
-            metrics_dict = recommending_metrics.batch_metrics_from_ratings(
-                user_ids, ratings
+            metrics_dict = recommending_metrics.batch_metrics(
+                user_ids, recommendations=torch.argsort(ratings, descending=True)
             )
+            metrics_dict = {k.split("@")[0]: v for k, v in metrics_dict.items()}
 
             target = torch.tensor((explicit[user_ids] > 0).toarray())
             assert np.isclose(

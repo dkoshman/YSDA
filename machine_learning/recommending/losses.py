@@ -1,36 +1,44 @@
+import abc
+
 import einops
 import torch
 import wandb
 
-from .interface import RecommendingLossInterface
+from machine_learning.recommending.maths import kl_divergence, pairwise_difference
+from machine_learning.recommending.utils import SparseTensor
+
+
+class RecommendingLossInterface:
+    @abc.abstractmethod
+    def __call__(
+        self, explicit: SparseTensor, model_ratings: torch.FloatTensor or SparseTensor
+    ) -> torch.FloatTensor:
+        ...
 
 
 class MSEConfidenceLoss(RecommendingLossInterface):
-    """
-    Loss from ALS paper:
-    Loss = \\sum_{ij}(1 + confidence * Explicit_{ij}) (Explicit_{ij} - ModelRating_{ij})^2 / |Explicit|
-    with confidence = 0, it's just MSE.
-    """
-
-    def __init__(self, confidence=0):
+    def __init__(self, confidence=1):
+        """
+        :param confidence: confidence that items with missing ratings
+        are irrelevant to users, with values in range [0, 1], if
+        confidence is equal to 1, it's just mse loss
+        """
+        if not 0 <= confidence <= 1:
+            raise ValueError(
+                f"Confidence must be in range [0, 1], "
+                f"but received confidence {confidence}"
+            )
         self.confidence = confidence
 
     def __call__(self, explicit, model_ratings):
         explicit = explicit.to_dense()
         model_ratings = model_ratings.to_dense()
+        explicit_mask = explicit > 0
         loss = (
-            (1 + self.confidence * explicit) * (explicit - model_ratings) ** 2
+            (explicit_mask + ~explicit_mask * self.confidence)
+            * (explicit - model_ratings) ** 2
         ).mean()
         return loss
-
-
-def pairwise_difference(left, right):
-    """
-    Given two matrices left, right of shape (n, m),
-    returns matrix D of shape (n, m, m) such that
-    D[u, i, j] = left[u, i] - right[u, j]
-    """
-    return left[:, :, None] - right[:, None, :]
 
 
 def probability_of_user_preferences(
@@ -49,14 +57,6 @@ def probability_of_user_preferences(
         )
     )
     return probability
-
-
-def safe_log(tensor: torch.Tensor):
-    return torch.log(tensor + torch.finfo().eps)
-
-
-def kl_divergence(p: torch.Tensor, q: torch.Tensor):
-    return (p * (safe_log(p) - safe_log(q))).sum()
 
 
 class PersonalizedRankingLoss(RecommendingLossInterface):

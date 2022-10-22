@@ -1,38 +1,30 @@
-project: Recommending
-name: "PMF run"
-#stage: test
+name: "MF run"
 model:
-  name: ProbabilityMatrixFactorization
-  latent_dimension: 200
+  class_name: MatrixFactorization
+  latent_dimension: 150
   weight_decay: 1.0e-4
 loss:
-  name: MSELoss
+  class_name: MSEConfidenceLoss
+  confidence: 0
 datamodule:
-  directory: local/ml-100k
-  batch_size: 100
   num_workers: 4
 lightning_module:
-  name: MovieLensPMFRecommender
+  class_name: MovieLensMFRecommender
 optimizer:
-  name: Adam
+  class_name: Adam
 trainer:
   max_epochs: 50
   accelerator: gpu
-  devices: [5]
+  devices: [3]
   default_root_dir: local
   check_val_every_n_epoch: 5
   amp_backend: native
   log_every_n_steps: 1
-logger:
-  name: WandbLogger
-  save_dir: local
 callbacks:
-  WandbWatcher:
-    log_every_n_steps: 50
   EarlyStopping:
     monitor: val_loss
     mode: min
     min_delta: 0
     patience: 5
   WandbCheckpointCallback:
-    artifact_name: pmf
+    artifact_name: mf

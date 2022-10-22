@@ -7,7 +7,7 @@ import pandas as pd
 
 from scipy.sparse import coo_matrix
 
-from ..utils import scipy_coo_to_torch_sparse
+from my_tools.utils import scipy_to_torch_sparse
 
 
 class MovieLens:
@@ -78,7 +78,7 @@ class MovieLens:
                 sep="\t",
                 dtype="int32",
             )
-        raise ValueError(f"File {filename} not found.")
+        raise FileNotFoundError(f"File {filename} not found.")
 
     def read(self, filename, sep="|", header=None, **kwargs):
         path = os.path.join(self.path_to_movielens_folder, filename)
@@ -155,4 +155,15 @@ class ImdbRatings:
         return explicit_feedback
 
     def explicit_feedback_torch(self):
-        return scipy_coo_to_torch_sparse(self.explicit_feedback_scipy())
+        return scipy_to_torch_sparse(self.explicit_feedback_scipy())
+
+    def items_description(self, item_ids):
+        item_ids += 1
+        items_description = self.movielens["u.item"].loc[item_ids]
+        imdb_urls = "https://www.imdb.com/find?q=" + items_description[
+            "movie title"
+        ].str.split("(").str[0].str.replace(r"\s+", "+", regex=True)
+        items_description = pd.concat(
+            [items_description["movie title"], imdb_urls], axis="columns"
+        )
+        return items_description

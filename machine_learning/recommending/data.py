@@ -7,8 +7,7 @@ import torch
 
 from torch.utils.data import DataLoader, Dataset
 
-from .utils import torch_sparse_slice
-
+from my_tools.utils import torch_sparse_slice
 
 if TYPE_CHECKING:
     import pytorch_lightning as pl
@@ -16,25 +15,25 @@ if TYPE_CHECKING:
 
 
 class SparseDataset(Dataset):
-    def __init__(self, explicit_feedback: "csr_matrix"):
-        self.explicit_feedback = explicit_feedback
+    def __init__(self, explicit: "csr_matrix"):
+        self.explicit = explicit
 
     def __len__(self):
-        return self.explicit_feedback.shape[0]
+        return self.explicit.shape[0]
 
     @property
     def shape(self):
-        return self.explicit_feedback.shape
+        return self.explicit.shape
 
     def __getitem__(self, indices):
         """
         Here's where implicit feedback is implicitly generated from explicit feedback.
         For datasets where only implicit feedback is available, override this logic.
         """
-        user_ids = indices.get("user_ids")
-        item_ids = indices.get("item_ids")
+        user_ids = indices.get("user_ids", torch.arange(self.shape[0]))
+        item_ids = indices.get("item_ids", torch.arange(self.shape[1]))
 
-        explicit = torch_sparse_slice(self.explicit_feedback, user_ids, item_ids)
+        explicit = torch_sparse_slice(self.explicit, user_ids, item_ids)
         implicit = explicit.bool().int()
         return dict(
             explicit=self.pack_sparse_tensor(explicit),
@@ -54,7 +53,7 @@ class SparseDataset(Dataset):
         return sparse_kwargs
 
     @staticmethod
-    def unpack_sparse_kwargs_to_torch_sparse_coo(batch):
+    def unpack_sparse_kwargs_to_torch_sparse_csr(batch):
         for key, value in batch.items():
             match value:
                 case {"indices": _, "values": _, "size": _} as kwargs:
@@ -68,7 +67,7 @@ class SparseTensorUnpacker:
         Need to manually pack and then unpack sparse torch matrices because
         they are unsupported in Dataloaders as of the moment of writing.
         """
-        return SparseDataset.unpack_sparse_kwargs_to_torch_sparse_coo(batch)
+        return SparseDataset.unpack_sparse_kwargs_to_torch_sparse_csr(batch)
 
 
 class Sampler:
@@ -186,15 +185,12 @@ def build_recommending_dataloader(
 
 
 class SparseDataModuleInterface:
-    @property
     def train_explicit(self) -> "csr_matrix" or None:
         return
 
-    @property
     def val_explicit(self) -> "csr_matrix" or None:
         return
 
-    @property
     def test_explicit(self) -> "csr_matrix" or None:
         return
 
@@ -204,7 +200,7 @@ class SparseDataModuleBase(SparseDataModuleInterface, SparseTensorUnpacker):
         return build_recommending_dataloader(**kwargs)
 
     def train_dataloader(self):
-        if (explicit := self.train_explicit) is not None:
+        if (explicit := self.train_explicit()) is not None:
             return self.build_dataloader(
                 dataset=SparseDataset(explicit),
                 sampler_type="user",
@@ -212,14 +208,14 @@ class SparseDataModuleBase(SparseDataModuleInterface, SparseTensorUnpacker):
             )
 
     def val_dataloader(self):
-        if (explicit := self.val_explicit) is not None:
+        if (explicit := self.val_explicit()) is not None:
             return self.build_dataloader(
                 dataset=SparseDataset(explicit),
                 sampler_type="user",
             )
 
     def test_dataloader(self):
-        if (explicit := self.test_explicit) is not None:
+        if (explicit := self.test_explicit()) is not None:
             return self.build_dataloader(
                 dataset=SparseDataset(explicit),
                 sampler_type="user",

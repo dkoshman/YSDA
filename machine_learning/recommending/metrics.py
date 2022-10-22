@@ -216,38 +216,23 @@ def normalized_discounted_cumulative_gain(relevance, n_relevant_items_per_user):
 
 
 class RecommendingMetrics:
-    def __init__(self, explicit_feedback: csr_matrix, k=10):
+    def __init__(self, explicit_feedback: csr_matrix):
         self.explicit_feedback = explicit_feedback
-        self.k = k
         self.items_information = normalized_items_self_information(explicit_feedback)
         self.all_items = self.items_information.index.to_numpy()
         self.unique_recommended_items = np.empty(0, dtype=np.int32)
         self.n_relevant_items_per_user = (explicit_feedback > 0).sum(axis=1).A1
+        self.k = None
 
-    def atk_suffix(self, dictionary):
-        if self.k is None:
-            return dictionary
-        else:
-            return {key + "@" + str(self.k): v for key, v in dictionary.items()}
+    @staticmethod
+    def atk_suffix(dictionary, k):
+        return {key + "@" + str(k): v for key, v in dictionary.items()}
 
-    def batch_metrics_from_ratings(self, user_ids, ratings):
-        if isinstance(ratings, np.ndarray):
-            ratings = torch.from_numpy(ratings)
-        ratings = ratings.to_dense()
-        if isinstance(user_ids, np.ndarray):
-            user_ids = torch.from_numpy(user_ids)
-
-        if self.k is None:
-            recommendations = torch.argsort(ratings, descending=True)
-        else:
-            values, recommendations = torch.topk(input=ratings, k=self.k)
-
-        metrics = self.batch_metrics(
-            *[i.to("cpu", torch.int32).numpy() for i in [user_ids, recommendations]]
-        )
-        return self.atk_suffix(metrics)
-
-    def batch_metrics(self, user_ids, recommendations):
+    def batch_metrics(
+        self, user_ids: torch.IntTensor, recommendations: torch.IntTensor
+    ):
+        user_ids = user_ids.to("cpu", torch.int32).numpy()
+        recommendations = recommendations.to("cpu", torch.int32).numpy()
         relevance = binary_relevance(self.explicit_feedback, user_ids, recommendations)
         n_relevant_items_per_user = self.n_relevant_items_per_user[user_ids]
         self.update_coverage(recommendations)
@@ -278,7 +263,8 @@ class RecommendingMetrics:
                 items_information=self.items_information,
             ),
         )
-        return metrics
+        self.k = recommendations.shape[1]
+        return self.atk_suffix(metrics, k=self.k)
 
     def update_coverage(self, recommendations):
         self.unique_recommended_items = np.union1d(
@@ -289,5 +275,7 @@ class RecommendingMetrics:
         coverage = len(
             np.intersect1d(self.unique_recommended_items, self.all_items)
         ) / len(self.all_items)
+        coverage_atk = self.atk_suffix(dict(coverage=coverage), k=self.k)
         self.unique_recommended_items = np.empty(0, dtype=np.int32)
-        return self.atk_suffix(dict(coverage=coverage))
+        self.k = None
+        return coverage_atk

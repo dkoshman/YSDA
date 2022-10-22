@@ -1,19 +1,19 @@
 import torch
 
 from my_tools.models import register_regularization_hook
-from my_tools.utils import scipy_to_torch_sparse
+from my_tools.utils import scipy_to_torch_sparse, torch_sparse_slice
 
 from ..lit import LitRecommenderBase
 from ..data import SparseDataset
-from ..interface import RecommenderModuleInterface, InMemoryRecommender
-from ..utils import build_bias, build_weight, torch_sparse_slice
+from ..interface import RecommenderModuleBase
+from ..utils import build_bias, build_weight
 
 
-class MatrixFactorizationBase(RecommenderModuleInterface):
+class MatrixFactorization(RecommenderModuleBase):
     """Predicted_rating = user_factors @ item_factors, with bias and L2 regularization"""
 
-    def __init__(self, latent_dimension=10, weight_decay=1.0e-3, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, explicit=None, latent_dimension=10, weight_decay=1.0e-3):
+        super().__init__(explicit=explicit)
         self.weight_decay = weight_decay
         self.user_weight = build_weight(self.n_users, latent_dimension)
         self.user_bias = build_bias(self.n_users, 1)
@@ -37,33 +37,15 @@ class MatrixFactorizationBase(RecommenderModuleInterface):
 
         return rating
 
-    def _new_users(self, n_new_users):
-        new_users_weight = self.user_weight.mean(dim=0).repeat(n_new_users, 1)
-        user_weight = torch.cat([self.user_weight, new_users_weight])
-        self.user_weight = torch.nn.Parameter(user_weight)
 
-        user_bias = torch.cat([self.user_bias, torch.zeros(n_new_users, 1)])
-        self.user_bias = torch.nn.Parameter(user_bias)
-
-    def _new_items(self, n_new_items):
-        new_items_weight = self.item_weight.mean(dim=0).repeat(n_new_items, 1)
-        item_weight = torch.cat([self.item_weight, new_items_weight])
-        self.item_weight = torch.nn.Parameter(item_weight)
-
-        item_bias = torch.cat([self.item_bias, torch.zeros(n_new_items, 1)])
-        self.item_bias = torch.nn.Parameter(item_bias)
-
-
-class ConstrainedProbabilityMatrixFactorization(
-    MatrixFactorizationBase, InMemoryRecommender
-):
+class ConstrainedProbabilityMatrixFactorization(MatrixFactorization):
     def __init__(self, *args, latent_dimension=10, **kwargs):
         super().__init__(*args, latent_dimension=latent_dimension, **kwargs)
         self.item_rating_effect_weight = build_weight(self.n_items, latent_dimension)
         self.implicit_feedback_normalized = None
 
     def init_implicit_feedback_normalized(self):
-        implicit_feedback = self.explicit_feedback_scipy_coo > 0
+        implicit_feedback = self.explicit_scipy_coo() > 0
         implicit_feedback_normalized = implicit_feedback.multiply(
             1 / (implicit_feedback.sum(axis=1) + 1e-8)
         ).astype("float32")
@@ -98,31 +80,18 @@ class ConstrainedProbabilityMatrixFactorization(
         )
         return ratings
 
-    def _new_users(self, n_new_users) -> None:
-        self.init_implicit_feedback_normalized()
-        super()._new_users(n_new_users)
-
-    def _new_items(self, n_new_items) -> None:
-        self.init_implicit_feedback_normalized()
-        new_effect = self.item_rating_effect_weight.mean(dim=0).repeat(n_new_items, 1)
-        item_rating_effect_weight = torch.cat(
-            [self.item_rating_effect_weight, new_effect]
-        )
-        self.item_rating_effect_weight = torch.nn.Parameter(item_rating_effect_weight)
-        super()._new_items(n_new_items)
-
 
 class MFRecommender(LitRecommenderBase):
     @property
     def class_candidates(self):
         return super().class_candidates + [
-            MatrixFactorizationBase,
+            MatrixFactorization,
             ConstrainedProbabilityMatrixFactorization,
         ]
 
     def train_dataloader(self):
         return self.build_dataloader(
-            dataset=SparseDataset(self.train_explicit),
+            dataset=SparseDataset(self.train_explicit()),
             sampler_type="grid",
             shuffle=True,
         )

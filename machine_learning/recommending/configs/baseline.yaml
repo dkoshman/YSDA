@@ -1,11 +1,10 @@
-name: "SVD run"
+name: "Baseline run"
 model:
-  class_name: SVDRecommender
-  n_components: 10
+  class_name: PopularRecommender
 lightning_module:
   class_name: MovieLensNonGradientRecommender
 trainer:
   num_sanity_val_steps: 0
 callbacks:
   WandbCheckpointCallback:
-    artifact_name: svd
+    artifact_name: baseline

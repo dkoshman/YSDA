@@ -1,19 +1,12 @@
-project: Recommending
 name: "Nearest neighbors run"
-stage: test
 model:
-  name: ImplicitNearestNeighborsRecommender
+  class_name: ImplicitNearestNeighborsRecommender
   implicit_model: BM25Recommender
-  num_neighbors: 5
-datamodule:
-  directory: local/ml-100k
+  num_neighbors: 20
 lightning_module:
-  name: MovieLensNonGradientRecommender
+  class_name: MovieLensNonGradientRecommender
 trainer:
   num_sanity_val_steps: 0
-logger:
-  name: WandbLogger
-  save_dir: local
 callbacks:
   WandbWatcher:
     log_every_n_steps: 50

@@ -1,24 +1,18 @@
-project: Recommending
 name: "SLIM run"
-#stage: test
 model:
-  name: SLIM
+  class_name: SLIM
   l2_coefficient: 1.0e-5
   l1_coefficient: 1.0e-6
 loss:
-  name: MSELoss
+  class_name: MSEConfidenceLoss
 datamodule:
-  directory: local/ml-100k
   num_workers: 4
 lightning_module:
-  name: MovieLensSLIMRecommender
+  class_name: MovieLensSLIMRecommender
   patience: 5
   min_delta: 1.0e-4
 optimizer:
-  name: Adam
-logger:
-  name: WandbLogger
-  save_dir: local
+  class_name: Adam
 trainer:
   accelerator: gpu
   devices: [4]

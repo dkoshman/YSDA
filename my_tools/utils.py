@@ -1,9 +1,11 @@
 import sys
 import traceback
+from types import ModuleType
+from typing import Any
 
 import numpy as np
 import torch
-import wandb
+from scipy.sparse import coo_matrix
 
 
 def free_cuda():
@@ -11,17 +13,6 @@ def free_cuda():
 
     garbage_collector.collect()
     torch.cuda.empty_cache()
-
-
-# def sparse_dense_multiply(sparse: torch.Tensor, dense: torch.Tensor):
-#     if not (sparse.is_sparse or sparse.is_sparse_csr) or dense.is_sparse:
-#         raise ValueError("Incorrect tensor layouts")
-#     if sparse.is_sparse_csr:
-#         sparse = sparse.to_sparse_coo()
-#
-#     indices = sparse._indices()
-#     values = sparse._values() * dense[indices[0, :], indices[1, :]]
-#     return torch.sparse_coo_tensor(indices, values, sparse.size(), device=sparse.device)
 
 
 def scipy_to_torch_sparse(scipy_sparse_matrix, device="cpu"):
@@ -34,49 +25,82 @@ def scipy_to_torch_sparse(scipy_sparse_matrix, device="cpu"):
     )
     return torch_sparse_tensor
 
+def to_sparse_coo(tensor):
+    try:
+        return tensor.to_sparse_coo()
+    except NotImplementedError:
+        # Torch errors if coo tensor is cast to coo again.
+        return tensor
 
-def reuse_shelved_object_or_construct(
-    hashable_attribute, object_constructor, object_name, dir_path="local"
-):
-    import hashlib
-    import shelve
+def torch_sparse_to_scipy(sparse_tensor):
+    sparse_tensor = to_sparse_coo(sparse_tensor).coalesce().cpu()
+    sparse_tensor = coo_matrix(
+        (sparse_tensor.values().numpy(), sparse_tensor.indices().numpy()),
+        shape=sparse_tensor.shape,
+    )
+    return sparse_tensor
 
-    from pathlib import Path
+def torch_sparse_slice(sparse_matrix, row_ids=None, col_ids=None, device=None):
+    if torch.is_tensor(sparse_matrix):
+        sparse_matrix = torch_sparse_to_scipy(sparse_matrix)
 
-    dir_path = Path(dir_path)
-    dir_path.mkdir(exist_ok=True)
-    file_path = dir_path / Path(object_name)
-    digest = hashlib.new(name="blake2s", data=hashable_attribute).hexdigest()
+    if row_ids is None:
+        row_ids = slice(None)
+    elif torch.is_tensor(row_ids):
+        row_ids = row_ids.cpu().numpy()
 
-    with shelve.open(file_path.as_posix()) as file_dict:
-        if file_dict.get("digest") == digest:
-            print(f"Reusing {file_path}")
-            return file_dict["object"]
+    if col_ids is None:
+        col_ids = slice(None)
+    elif torch.is_tensor(col_ids):
+        col_ids = col_ids.cpu().numpy()
 
-        print(f"Constructing {file_path}")
-        obj = object_constructor()
-        file_dict["digest"] = digest
-        file_dict["object"] = obj
-        return obj
+    sparse_matrix = sparse_matrix.tocsr()[row_ids][:, col_ids].tocoo()
+    torch_sparse_coo_tensor = scipy_to_torch_sparse(sparse_matrix, device)
+    return torch_sparse_coo_tensor
 
+#
+# def reuse_shelved_object_or_construct(
+#     hashable_attribute, object_constructor, object_name, dir_path="local"
+# ):
+#     import hashlib
+#     import shelve
+#
+#     from pathlib import Path
+#
+#     dir_path = Path(dir_path)
+#     dir_path.mkdir(exist_ok=True)
+#     file_path = dir_path / Path(object_name)
+#     digest = hashlib.new(name="blake2s", data=hashable_attribute).hexdigest()
+#
+#     with shelve.open(file_path.as_posix()) as file_dict:
+#         if file_dict.get("digest") == digest:
+#             print(f"Reusing {file_path}")
+#             return file_dict["object"]
+#
+#         print(f"Constructing {file_path}")
+#         obj = object_constructor()
+#         file_dict["digest"] = digest
+#         file_dict["object"] = obj
+#         return obj
 
-def timeit(func):
-    import datetime
-
-    from functools import wraps as functools_wraps
-
-    @functools_wraps(func)
-    def _time_it(*args, **kwargs):
-        start = datetime.datetime.now()
-        try:
-            return func(*args, **kwargs)
-        finally:
-            end = datetime.datetime.now()
-            print(
-                f'"{func.__name__}" execution time: {(end - start).total_seconds():.3f} sec'
-            )
-
-    return _time_it
+#
+# def timeit(func):
+#     import datetime
+#
+#     from functools import wraps as functools_wraps
+#
+#     @functools_wraps(func)
+#     def _time_it(*args, **kwargs):
+#         start = datetime.datetime.now()
+#         try:
+#             return func(*args, **kwargs)
+#         finally:
+#             end = datetime.datetime.now()
+#             print(
+#                 f'"{func.__name__}" execution time: {(end - start).total_seconds():.3f} sec'
+#             )
+#
+#     return _time_it
 
 
 def get_class(class_name, class_candidates=(), module_candidates=()):
@@ -92,9 +116,9 @@ def get_class(class_name, class_candidates=(), module_candidates=()):
     )
 
 
-def build_class(*, class_candidates=(), module_candidates=(), name, **kwargs):
+def build_class(*, class_candidates=(), module_candidates=(), class_name, **kwargs):
     cls = get_class(
-        class_name=name,
+        class_name=class_name,
         class_candidates=class_candidates,
         module_candidates=module_candidates,
     )
@@ -103,39 +127,20 @@ def build_class(*, class_candidates=(), module_candidates=(), name, **kwargs):
 
 class BuilderMixin:
     @property
-    def module_candidates(self):
+    def module_candidates(self) -> list[ModuleType]:
         return []
 
     @property
-    def class_candidates(self):
+    def class_candidates(self) -> list[type]:
         return []
 
-    def build_class(self, **kwargs):
+    def build_class(self, *, class_name, **kwargs) -> Any:
         return build_class(
+            class_name=class_name,
             class_candidates=self.class_candidates,
             module_candidates=self.module_candidates,
             **kwargs,
         )
-
-
-class StoppingMonitor:
-    def __init__(self, patience, min_delta):
-        self.patience = patience
-        self.impatience = 0
-        self.min_delta = min_delta
-        self.lowest_loss = torch.inf
-
-    def is_time_to_stop(self, loss):
-        if loss < self.lowest_loss - self.min_delta:
-            self.lowest_loss = loss
-            self.impatience = 0
-            return False
-        self.impatience += 1
-        if self.impatience > self.patience:
-            self.impatience = 0
-            self.lowest_loss = torch.inf
-            return True
-        return False
 
 
 def full_traceback(function):
@@ -149,9 +154,3 @@ def full_traceback(function):
             raise exception
 
     return wrapper
-
-
-class WandbLoggerMixin:
-    def log(self, dict_to_log: dict) -> None:
-        if wandb.run is not None:
-            wandb.log(dict_to_log)

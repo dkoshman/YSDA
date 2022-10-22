@@ -1,129 +1,134 @@
-from collections import Counter
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 import catboost
+import numpy as np
 import pandas as pd
 import torch
 
-# from ..data import MovieLens
-from ..interface import RecommenderModuleInterface
+from ..interface import FitExplicitInterfaceMixin, RecommenderModuleBase
 
-from ..utils import torch_sparse_to_scipy_coo
-
-
-class CatboostBase(RecommenderModuleInterface):
-    def explicit_dataframe(self, explicit_feedback):
-        explicit_feedback = explicit_feedback.tocoo()
-        return pd.DataFrame(
-            dict(
-                user_id=explicit_feedback.row,
-                item_id=explicit_feedback.col,
-                explicit=explicit_feedback.data,
-            )
-        )
-
-    @property
-    def cat_features(self):
-        return []
-
-    @property
-    def text_features(self):
-        return []
-
-    def save(self):
-        self.model.save_model("tmp")
-        with open("tmp", "rb") as f:
-            bytes = f.read()
-        return bytes
-
-    def load(self, bytes):
-        with open("tmp", "wb") as f:
-            f.write(bytes)
-        self.model.load_model("tmp")
+if TYPE_CHECKING:
+    from scipy.sparse import spmatrix
 
 
-class CatboostModule(CatboostMixin):
-    def __init__(self, n_users, n_items, **cb_params):
-        super().__init__(n_users=n_users, n_items=n_items)
+class CatboostInterface(RecommenderModuleBase, FitExplicitInterfaceMixin, ABC):
+    model: catboost.CatBoost
+
+    def __init__(self, explicit=None, **cb_params):
+        super().__init__(explicit=explicit)
         self.model = catboost.CatBoostRanker(**cb_params)
 
-    def fit(self, explicit_feedback):
-        super().fit(explicit_feedback)
-        explicit_feedback = explicit_feedback.tocoo()
-        pool = catboost.Pool(
-            pd.DataFrame(
-                dict(user_id=explicit_feedback.row, item_id=explicit_feedback.col)
-            ),
-            label=explicit_feedback.data,
-            group_id=explicit_feedback.row,
-            cat_features=["user_id", "item_id"],
-        )
-        self.model.fit(pool, verbose=100)
-
-    def forward(self, user_ids=None, item_ids=None):
-        if not torch.is_tensor(user_ids):
-            user_ids = torch.from_numpy(user_ids)
-        explicit_feedback = torch_sparse_to_scipy_coo(self.explicit_feedback)
-        batch = self.topk_data(user_ids.to(torch.int64))
-        pool = self.pool(**batch)
-        grouped_ratings = self.model.predict(pool)
-        grouped_ratings = (
-            torch.from_numpy(grouped_ratings)
-            .reshape(len(user_ids), -1)
-            .to(torch.float32)
-        )
-        grouped_item_ids = torch.from_numpy(
-            batch["dataframe"]["item_id"]
-            .values.reshape(len(user_ids), -1)
-            .astype("int64")
-        )
-        ratings = torch.full(
-            (len(user_ids), self.n_items),
-            torch.finfo(torch.float32).min,
-            dtype=torch.float32,
-        )
-        ratings = ratings.scatter(1, grouped_item_ids, grouped_ratings)
-        return ratings
-
-    def feature_importance(self, user_ids, users_explicit_feedback):
-        pool = self.pool(
-            **self.topk_data(
-                user_ids=user_ids,
-                users_explicit_feedback=users_explicit_feedback,
+    def explicit_dataframe(self, explicit: "spmatrix"):
+        if explicit.shape != self.explicit_scipy_coo().shape:
+            raise ValueError(
+                "Provided explicit feedback shape doesn't match "
+                "train shape, user and item ids may be incorrect."
             )
-        )
-        feature_importance = self.model.get_feature_importance(pool)
-        dataframe = (
-            pd.Series(feature_importance, self.model.feature_names_)
-            .sort_values(ascending=False)
-            .to_frame()
-            .T
+        explicit = explicit.tocoo()
+        dataframe = pd.DataFrame(
+            dict(
+                user_ids=explicit.row,
+                item_ids=explicit.col,
+                explicit=explicit.data,
+            )
         )
         return dataframe
 
+    @staticmethod
+    def dense_dataframe(user_ids, item_ids):
+        dataframe = pd.DataFrame(
+            dict(
+                user_ids=np.repeat(user_ids.numpy(), len(item_ids)),
+                item_ids=np.tile(item_ids.numpy(), len(user_ids)),
+            )
+        )
+        return dataframe
 
-class CatboostMovieLensRecommenderModule(CatboostRecommenderModule):
-    def __init__(self, *args, movielens_directory, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.movielens = MovieLens(movielens_directory)
+    @abstractmethod
+    def train_dataframe(self, explicit):
+        ...
+
+    @abstractmethod
+    def predict_dataframe(self, user_ids, item_ids):
+        ...
 
     @property
-    def user_info(self):
-        user_info = self.movielens["u.user"]
-        user_info.index -= 1
-        return dict(
-            dataframe=user_info,
-            cat_features=["gender", "occupation", "zip code"],
-            text_features=[],
-        )
+    def cat_features(self) -> list[str]:
+        """The categorical columns in dataframe being passed to pool."""
+        return []
 
     @property
-    def item_info(self):
-        item_info = self.movielens["u.item"]
-        item_info.index -= 1
-        item_info = item_info.drop(["video release date", "IMDb URL"], axis="columns")
-        item_info["release date"] = pd.to_datetime(item_info["release date"])
-        return dict(
-            dataframe=item_info,
-            cat_features=list(item_info.columns.drop(["release date", "movie title"])),
-            text_features=["movie title"],
+    def text_features(self) -> list[str]:
+        """The text columns in dataframe being passed to pool."""
+        return []
+
+    def pool(self, dataframe):
+        if "user_ids" not in dataframe:
+            raise ValueError("Passed dataframe must at least have a user_ids column.")
+        dataframe = dataframe.astype(
+            {c: "string" for c in self.cat_features + self.text_features}
         )
+        for column in dataframe.columns.drop(self.cat_features + self.text_features):
+            dataframe[column] = pd.to_numeric(dataframe[column])
+        if "explicit" not in dataframe:
+            label = None
+        else:
+            label = dataframe["explicit"].to_numpy()
+            dataframe = dataframe.drop(["explicit"], axis="columns")
+
+        pool = catboost.Pool(
+            data=dataframe,
+            cat_features=self.cat_features,
+            text_features=self.text_features,
+            label=label,
+            group_id=dataframe["user_ids"].to_numpy(),
+        )
+        return pool
+
+    def fit(self):
+        dataframe = self.train_dataframe(self.explicit_scipy_coo())
+        pool = self.pool(dataframe)
+        self.model.fit(pool, verbose=100)
+
+    def forward(self, user_ids, item_ids):
+        dataframe = self.predict_dataframe(user_ids, item_ids)
+        pool = self.pool(dataframe)
+        ratings = self.model.predict(pool)
+        ratings = torch.from_numpy(ratings.reshape(len(user_ids), -1))
+        return ratings.to(torch.float32)
+
+    def feature_importance(self, explicit: "spmatrix" or None = None) -> pd.Series:
+        """
+        Returns series with feature names in index and
+        their importance in values, sorted by decreasing importance.
+        """
+        if explicit is None:
+            explicit = self.explicit_scipy_coo()
+        dataframe = self.train_dataframe(explicit)
+        pool = self.pool(dataframe)
+        feature_importance = self.model.get_feature_importance(pool, prettified=True)
+        return feature_importance
+
+    def get_extra_state(self):
+        self.model.save_model("tmp")
+        with open("tmp", "rb") as f:
+            binary_bytes = f.read()
+        return binary_bytes
+
+    def set_extra_state(self, binary_bytes):
+        with open("tmp", "wb") as f:
+            f.write(binary_bytes)
+        self.model.load_model("tmp")
+
+
+class CatboostExplicitRecommender(CatboostInterface):
+    @property
+    def cat_features(self) -> list[str]:
+        return ["user_ids", "item_ids"]
+
+    def train_dataframe(self, explicit):
+        return self.explicit_dataframe(explicit)
+
+    def predict_dataframe(self, user_ids, item_ids):
+        return self.dense_dataframe(user_ids, item_ids)

@@ -10,14 +10,12 @@ import torch
 
 from tqdm.auto import tqdm
 
-from my_tools.utils import WandbLoggerMixin
+from my_tools.models import WandbLoggerMixin
 
-from ..interface import RecommenderModuleInterface, FitExplicitInterfaceMixin
+from ..interface import RecommenderModuleBase, FitExplicitInterfaceMixin
 
 
-class BayesianPMF(
-    RecommenderModuleInterface, FitExplicitInterfaceMixin, WandbLoggerMixin
-):
+class BayesianPMF(RecommenderModuleBase, FitExplicitInterfaceMixin, WandbLoggerMixin):
     def __init__(
         self,
         n_feature_dimensions=10,
@@ -110,12 +108,10 @@ class BayesianPMF(
         """Override this method if you want to finetune a fitted MF model."""
         return self.init_features(self.n_items)
 
-    def fit(self, explicit_feedback):
-        self.explicit = explicit_feedback
-        self.implicit = explicit_feedback > 0
-        self.alpha_x_implicit_x_explicit = self.alpha * self.implicit.multiply(
-            explicit_feedback
-        )
+    def fit(self, explicit):
+        self.explicit = explicit
+        self.implicit = explicit > 0
+        self.alpha_x_implicit_x_explicit = self.alpha * self.implicit.multiply(explicit)
 
         for _ in tqdm(range(self.burn_in_steps), "Sampling burn in steps"):
             self.step()
@@ -263,7 +259,7 @@ class BayesianPMF(
         )
 
     def aggregate_prediction_mode_approximation(self, user_ids):
-        # Caution: very memory hungry
+        # Caution: very memory hungry.
         means = self.step_explicit_normal_distribution_means[:, user_ids, :]
 
         normal = torch.distributions.Normal(loc=means, scale=self.alpha**-0.5)
@@ -283,9 +279,3 @@ class BayesianPMF(
             case _:
                 raise ValueError(f"Unknown aggregation method {aggregation_method}")
         return ratings
-
-    def _new_users(self, n_new_users) -> None:
-        raise NotImplementedError
-
-    def _new_items(self, n_new_items: int) -> None:
-        raise NotImplementedError
