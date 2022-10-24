@@ -6,13 +6,15 @@ import yaml
 from ..entrypoint import RecommendingBuilder
 from ..movielens.data import ImdbRatings
 from ..movielens.lit import MovieLensNonGradientRecommender
-from ..utils import fetch_artifact, load_checkpoint_artifact
+from ..utils import fetch_artifact, load_path_from_artifact
 
 
 def test_fitted_model():
     artifact_name = "PopularRecommenderTesting"
-    artifact = fetch_artifact(project="Testing", artifact_name=artifact_name)
-    checkpoint_path = load_checkpoint_artifact(artifact)
+    artifact = fetch_artifact(
+        entity="dkoshman", project="Testing", artifact_name=artifact_name
+    )
+    checkpoint_path = load_path_from_artifact(artifact)
     module = MovieLensNonGradientRecommender.load_from_checkpoint(checkpoint_path)
     model = module.model
     imdb = ImdbRatings()

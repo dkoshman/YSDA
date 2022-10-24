@@ -1,8 +1,10 @@
-from typing import Literal, TYPE_CHECKING
+import io
+from typing import Literal, TYPE_CHECKING, TextIO
 
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
+import shap
 import torch
 import wandb
 
@@ -13,12 +15,13 @@ import matplotlib.patheffects as pe
 
 from .data import SparseDataModuleInterface
 from .metrics import RecommendingMetrics
-from .utils import save_checkpoint_artifact
+from .utils import wandb_plt_figure
 
 if TYPE_CHECKING:
     from scipy.sparse import spmatrix
     from .interface import RecommenderModuleBase
     from .lit import LitRecommenderBase
+    from .models.cat import CatboostInterface
 
 
 class WandbWatcher(pl.callbacks.Callback):
@@ -55,31 +58,11 @@ class RecommendingDataOverviewCallback(pl.callbacks.Callback):
 
     def __init__(self, explicit: "spmatrix" = None):
         self.explicit = explicit
-        self.fig = None
 
     def setup(self, trainer, pl_module, stage=None):
         if self.explicit is None:
             self.explicit = pl_module.train_explicit
             self.log_data_overview()
-
-    def __enter__(self):
-        return self
-
-    def __call__(self, title, xlabel, ylabel):
-        self.fig = plt.figure()
-        plt.title(title)
-        plt.xlabel(xlabel)
-        plt.ylabel(ylabel)
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        # For interactive plots, remove wandb.Image, although some features are not supported
-        wandb.log({self.fig.axes[0].get_title(): wandb.Image(self.fig)})
-        self.fig = None
-
-    @staticmethod
-    def plot_hist(data, histtype="stepfilled", bins=50, **kwargs):
-        plt.hist(data, histtype=histtype, bins=bins, **kwargs)
 
     @staticmethod
     def add_quantiles(
@@ -124,30 +107,26 @@ class RecommendingDataOverviewCallback(pl.callbacks.Callback):
         for what, data in zip(
             ["user", "item"], [user_reviews_counts, item_reviews_counts]
         ):
-            with self(
-                title=f"Distribution of {what} reviews",
-                xlabel=f"Number of reviews per {what}",
-                ylabel="Quantity",
-            ):
-                self.plot_hist(data)
+            with wandb_plt_figure(title=f"Distribution of {what} reviews"):
+                plt.xlabel(f"Number of reviews per {what}")
+                plt.ylabel("Quantity")
+                plt.hist(data, histtype="stepfilled", bins=50)
                 self.add_quantiles(data)
 
     def log_data_overview(self):
         self.log_data_description()
         self.log_ratings_distributions()
 
-        with self(
-            title=f"Distribution of ratings",
-            xlabel=f"Number of reviews per rating value",
-            ylabel="Quantity",
-        ):
-            self.plot_hist(self.explicit.data)
+        with wandb_plt_figure(title="Distribution of ratings"):
+            plt.xlabel("Number of reviews per rating value")
+            plt.ylabel("Quantity")
+            plt.hist(self.explicit.data, histtype="stepfilled", bins=50)
 
-        with self(
-            title="Explained variance depending on number of components",
-            xlabel="n components",
-            ylabel="explained cumulative variance ratio",
+        with wandb_plt_figure(
+            title="Explained variance depending on number of components"
         ):
+            plt.xlabel("Number of components")
+            plt.ylabel("Explained cumulative variance ratio")
             self.plot_explained_variance()
 
 
@@ -159,33 +138,85 @@ class WandbCheckpointCallback(pl.callbacks.ModelCheckpoint):
     def on_test_end(self, trainer, pl_module):
         if not self.best_model_path:
             self.save_checkpoint(trainer)
-        save_checkpoint_artifact(
-            artifact_name=self.artifact_name,
-            checkpoint_path=self.best_model_path,
-            pl_module_class=pl_module.__class__.__name__,
+        artifact = wandb.Artifact(
+            name=self.artifact_name,
+            type="checkpoint",
+            metadata=dict(class_name=pl_module.__class__.__name__),
         )
+        artifact.add_file(local_path=self.best_model_path, name="checkpoint")
+        wandb.run.log_artifact(artifact)
         super().on_test_end(trainer, pl_module)
 
 
 class CatBoostMetrics(pl.callbacks.Callback):
     """Log some metrics specific to catboost."""
 
-    def on_test_epoch_end(self, trainer=None, pl_module: "LitRecommenderBase" = None):
-        self.log_feature_importance(pl_module)
+    def __init__(self, *args, plot_dependence=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.plot_dependence = plot_dependence
 
-    @staticmethod
-    def log_feature_importance(pl_module: "LitRecommenderBase"):
+    def on_test_epoch_end(self, trainer=None, pl_module: "LitRecommenderBase" = None):
+        model: "CatboostInterface" = pl_module.model
         for explicit, stage in zip(
             [pl_module.train_explicit(), pl_module.test_explicit()], ["train", "test"]
         ):
-            dataframe = pl_module.model.feature_importance(explicit=explicit)
-            wandb.log(
-                {
-                    f"Catboost {stage} feature importance": wandb.Table(
-                        dataframe=dataframe
-                    )
-                }
+            self.log_feature_importance(model, explicit, stage)
+            self.log_shap_plots(
+                model, explicit, stage, plot_dependence=self.plot_dependence
             )
+
+    @staticmethod
+    def log_feature_importance(
+        model: "CatboostInterface", explicit: "spmatrix", stage: str
+    ):
+        dataframe = model.feature_importance(explicit=explicit)
+        wandb_table = wandb.Table(dataframe=dataframe)
+        wandb.log({f"Catboost {stage} feature importance": wandb_table})
+
+    @staticmethod
+    def force_plot(
+        shap_values, expected_value, features, subsample_size=1000, **shap_kwargs
+    ) -> TextIO:
+        subsample = np.random.choice(
+            np.arange(shap_values.shape[0]),
+            replace=False,
+            size=min(subsample_size, shap_values.shape[0]),
+        )
+        shap_plot = shap.force_plot(
+            base_value=expected_value,
+            shap_values=shap_values[subsample],
+            features=features.iloc[subsample],
+            **shap_kwargs,
+        )
+        textio = io.TextIOWrapper(io.BytesIO())
+        shap.save_html(textio, shap_plot)
+        textio.seek(0)
+        return textio
+
+    def log_shap_plots(
+        self,
+        model: "CatboostInterface",
+        explicit: "spmatrix",
+        stage: str,
+        plot_dependence=False,
+    ):
+        shap_values, expected_value, features = model.shap(explicit)
+        prefix = f"{stage} shap "
+
+        textio = self.force_plot(shap_values, expected_value, features)
+        wandb.log({prefix + "force plot": wandb.Html(textio)})
+
+        with wandb_plt_figure(title=prefix + "summary plot"):
+            shap.summary_plot(shap_values, features)
+
+        if plot_dependence:
+            for feature_name in features:
+                with wandb_plt_figure(
+                    title=prefix + "dependence plot for " + feature_name
+                ) as figure:
+                    shap.dependence_plot(
+                        feature_name, shap_values, features, ax=figure.gca()
+                    )
 
 
 class RecommendingMetricsCallback(pl.callbacks.Callback):

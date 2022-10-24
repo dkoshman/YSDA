@@ -16,14 +16,14 @@ class RecommendingIMDBCallback(pl.callbacks.Callback):
 
     def on_test_epoch_end(self, trainer=None, pl_module=None):
         recommendations = pl_module.model.online_recommend(
-            explicit=self.imdb.explicit_feedback_torch(),
+            users_explicit=self.imdb.explicit_feedback_torch(),
             n_recommendations=self.n_recommendations,
         )
         self.log_recommendation(recommendations.cpu().numpy())
 
     def on_validation_epoch_end(self, trainer=None, pl_module=None):
         recommendations = pl_module.model.online_recommend(
-            explicit=self.imdb.explicit_feedback_torch(),
+            users_explicit=self.imdb.explicit_feedback_torch(),
             n_recommendations=self.n_recommendations,
         )
         self.log_recommendation(recommendations.cpu().numpy())

@@ -168,10 +168,6 @@ class MockLinearLightningModule(MockLightningModuleInterface):
     def __init__(
         self,
         n_features=10,
-        train_samples=1000,
-        val_samples=100,
-        test_samples=100,
-        predict_samples=100,
         batch_size=100,
     ):
         super().__init__()
@@ -180,9 +176,8 @@ class MockLinearLightningModule(MockLightningModuleInterface):
         self.parameter = torch.nn.Parameter(torch.randn(n_features))
 
     def dataloader(self, stage):
-        n_samples = self.hparams[f"{stage}_samples"]
         dataset = MockLinearDataset(
-            n_samples=n_samples,
+            n_samples=np.random.randint(1, 100),
             n_features=self.hparams["n_features"],
             true_parameter=self.true_parameter,
         )
@@ -238,7 +233,7 @@ def _test_lightning_module(config):
     model = lightning_module.model
 
     recommendations = model.recommend(user_ids=torch.arange(100))
-    explicit = random_explicit_feedback(size=[100, model.n_items], max_rating=5)
+    explicit = random_explicit_feedback(n_items=model.n_items)
     explicit = scipy_to_torch_sparse(explicit)
     online = model.online_recommend(explicit)
     state_dict = model.state_dict()

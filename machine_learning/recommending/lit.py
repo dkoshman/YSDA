@@ -7,6 +7,7 @@ from . import losses
 from .data import build_recommending_dataloader, SparseDataModuleBase
 from .interface import RecommenderModuleBase
 from .losses import RecommendingLossInterface
+from .utils import SparseTensor
 
 
 class LitRecommenderBase(
@@ -27,9 +28,14 @@ class LitRecommenderBase(
         self.model: RecommenderModuleBase = self.build_class(
             explicit=self.train_explicit(), **model_config
         )
-        self.loss: RecommendingLossInterface or None = None
-        if loss_config is not None:
-            self.loss = self.build_class(**loss_config)
+
+    def loss(
+        self, explicit: SparseTensor, model_ratings: torch.FloatTensor or SparseTensor
+    ) -> torch.FloatTensor:
+        explicit = explicit.to_dense()
+        model_ratings = model_ratings.to_dense()
+        loss = ((explicit - model_ratings) ** 2).mean()
+        return loss
 
     @property
     def module_candidates(self):

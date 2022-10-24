@@ -2,6 +2,7 @@ import abc
 from typing import TYPE_CHECKING
 
 import torch
+import wandb
 
 from machine_learning.recommending.maths import (
     Distance,
@@ -20,7 +21,7 @@ if TYPE_CHECKING:
     from machine_learning.recommending.utils import SparseTensor, Pickleable
 
 
-# TODO: Catboost features only, catboost aggregator, shap, sweep mse confidence, my own mf model, why catboost ndcg so bad,
+# TODO: my own mf model, shap for slim
 
 
 class RecommenderModuleInterface(torch.nn.Module, abc.ABC):
@@ -155,23 +156,23 @@ class RecommenderModuleBase(
             ratings[i] = user_ratings
         return ratings
 
-    def online_ratings(self, explicit: "SparseTensor"):
+    def online_ratings(self, users_explicit: "SparseTensor"):
         """
         The fallback method is based on nearest neighbours,
         as it can be applied to any model, but may give suboptimal
         recommendations. Feel free to overwrite this
         method if model natively supports online ratings.
         """
-        return self.online_nn_ratings(explicit)
+        return self.online_nn_ratings(users_explicit)
 
     def online_recommend(
         self,
-        explicit: "SparseTensor",
+        users_explicit: "SparseTensor",
         n_recommendations: int or None = None,
     ) -> torch.IntTensor:
-        explicit = explicit.to(self.device)
-        ratings = self.online_ratings(explicit)
-        ratings = self.filter_already_liked_items(explicit, ratings)
+        users_explicit = users_explicit.to(self.device)
+        ratings = self.online_ratings(users_explicit)
+        ratings = self.filter_already_liked_items(users_explicit, ratings)
         recommendations = self.ratings_to_recommendations(ratings, n_recommendations)
         return recommendations
 
@@ -187,6 +188,20 @@ class RecommenderModuleBase(
         Init module from whatever was returned by getter to be ready for inference.
         This is torch.nn.Module method, this stub is just for clarity.
         """
+
+    def save_state_to_artifact(self, artifact_name):
+        if wandb.run is None:
+            raise ValueError("Wandb run not initialized, can't save artifact.")
+
+        state_dict_path = "tmp.pt"
+        torch.save(self.state_dict(), state_dict_path)
+        artifact = wandb.Artifact(
+            name=artifact_name,
+            type="state_dict",
+            metadata=dict(class_name=self.__class__.__name__),
+        )
+        artifact.add_file(local_path=state_dict_path, name="state_dict")
+        wandb.run.log_artifact(artifact)
 
 
 class FitExplicitInterfaceMixin:

@@ -3,8 +3,6 @@ model:
   class_name: SLIM
   l2_coefficient: 1.0e-5
   l1_coefficient: 1.0e-6
-loss:
-  class_name: MSEConfidenceLoss
 datamodule:
   num_workers: 4
 lightning_module:

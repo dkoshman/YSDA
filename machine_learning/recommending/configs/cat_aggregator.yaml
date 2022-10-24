@@ -1,9 +1,11 @@
-name: "Catboost movielens run"
+name: "Catboost aggregator"
 model:
-  class_name: CatboostMovieLensFeatureRecommender
-  movielens_directory: local/ml-100k
+  class_name: CatboostMovieLensAggregatorFromArtifacts
+  entity: dkoshman
+  project: Recommending
+  recommender_artifact_names: [als, svd, mf, slim, implicit_nn]
   task_type: GPU
-  devices: [1]
+  devices: [0]
 #   If errors with OOM errors on other gpus, try running script with CUDA_VISIBLE_DEVICES=0,1
   train_dir: local
 lightning_module:
@@ -13,4 +15,4 @@ trainer:
 callbacks:
   CatBoostMetrics: {}
   WandbCheckpointCallback:
-    artifact_name: catboost_movielens
+    artifact_name: catboost_aggregator

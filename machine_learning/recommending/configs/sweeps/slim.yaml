@@ -7,33 +7,20 @@ metric:
 parameters:
   model:
     class_name: SLIM
-    l2_coefficient:
-      values:
-        - 1.0e-6
-        - 1.0e-5
-        - 1.0e-4
-    l1_coefficient:
-      values:
-        - 1.0e-5
-        - 1.0e-4
-        - 1.0e-3
-        - 1.0e-2
-        - 1.0e-1
+    l2_coefficient: 1.0e-5
+    l1_coefficient: 1.0e-6
   loss:
     class_name: MSEConfidenceLoss
     confidence:
-      min: 0
-      max: 1
+      distribution: uniform
+      min: 0.9
+      max: 1.0
   datamodule:
     num_workers: 4
   lightning_module:
     class_name: MovieLensSLIMRecommender
     patience: 3
-    min_delta:
-      values:
-        - 1.0e-6
-        - 1.0e-5
-        - 1.0e-4
+    min_delta: 1.0e-4
   optimizer:
     class_name: Adam
   trainer:

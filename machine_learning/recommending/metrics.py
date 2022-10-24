@@ -279,3 +279,10 @@ class RecommendingMetrics:
         self.unique_recommended_items = np.empty(0, dtype=np.int32)
         self.k = None
         return coverage_atk
+
+    def metrics(self, user_ids: torch.IntTensor, recommendations: torch.IntTensor):
+        metrics = self.batch_metrics(user_ids, recommendations)
+        self.update_coverage(recommendations)
+        coverage = self.finalize_coverage()
+        metrics.update(coverage)
+        return metrics

@@ -1,6 +1,5 @@
 from ..models import als, baseline, cat, mf, slim
 
-
 from ..lit import LitRecommenderBase, NonGradientRecommenderMixin
 from .data import MovieLens
 from . import callbacks as movielens_callbacks
@@ -44,4 +43,8 @@ class MovieLensMFRecommender(mf.MFRecommender, MovieLensRecommender):
 
 
 class MovieLensSLIMRecommender(slim.SLIMRecommender, MovieLensRecommender):
+    pass
+
+
+class MovieLensMyMFRecommender(mf.MyMFRecommender, MovieLensRecommender):
     pass

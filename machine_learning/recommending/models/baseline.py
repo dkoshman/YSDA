@@ -133,12 +133,12 @@ class ImplicitNearestNeighborsRecommender(ImplicitRecommenderBase):
 
     def online_recommend(
         self,
-        explicit,
+        users_explicit,
         n_recommendations=None,
     ) -> torch.IntTensor:
         item_ids, item_ratings = self.model.recommend(
-            userid=np.arange(explicit.shape[0]),
-            user_items=torch_sparse_to_scipy(explicit.to(torch.float32)).tocsr(),
+            userid=np.arange(users_explicit.shape[0]),
+            user_items=torch_sparse_to_scipy(users_explicit.to(torch.float32)).tocsr(),
             N=n_recommendations or self.n_items,
         )
         return torch.from_numpy(item_ids).to(torch.int64)

@@ -1,10 +1,8 @@
-import os
-
 import wandb
 import yaml
 
 from .conftest import seed_everything
-from ..main import fit
+from ..entrypoint import fit
 from ..utils import update_from_base_config
 
 seed_everything()
@@ -12,7 +10,7 @@ seed_everything()
 
 def _test_config(config_path):
     config = yaml.safe_load(open(config_path))
-    config = update_from_base_config(config)
+    config = update_from_base_config(config, "configs/base_config.yaml")
     config["project"] = "Testing"
     with wandb.init(project=config["project"]):
         fit(config)
@@ -52,3 +50,11 @@ def test_slim_config():
 
 def test_mf_config():
     _test_config("configs/mf.yaml")
+
+
+def test_my_mf_config():
+    _test_config("configs/my_mf.yaml")
+
+
+def test_cat_aggregator_config():
+    _test_config("configs/cat_aggregator.yaml")

@@ -14,13 +14,14 @@ from ..lit import NonGradientRecommenderMixin
 
 from ..models import als, baseline, cat, mf, slim
 from ..models.slim import SLIMRecommender
-from ..movielens import cat as movielens_cat
+from ..movielens import cat as movielens_cat, MovieLens
 from .conftest import (
     random_explicit_feedback,
     MockLitRecommender,
     MockLightningModuleInterface,
     seed_everything,
 )
+from ..movielens.cat import CatboostMovieLensAggregatorFromArtifacts
 
 seed_everything()
 
@@ -56,10 +57,10 @@ def _test_recommender_module(module, test_reload=True):
     assert recommendations.dtype == torch.int64
     explicit = random_explicit_feedback(n_items=module.n_items)
     explicit = scipy_to_torch_sparse(explicit)
-    online_ratings = module.online_ratings(explicit=explicit)
+    online_ratings = module.online_ratings(users_explicit=explicit)
     assert torch.is_tensor(online_ratings)
     online_recommendations = module.online_recommend(
-        explicit=explicit, n_recommendations=n_recommendations
+        users_explicit=explicit, n_recommendations=n_recommendations
     )
     assert torch.is_tensor(online_recommendations)
     assert online_recommendations.dtype == torch.int64
@@ -80,10 +81,10 @@ def _test_recommender_module(module, test_reload=True):
         assert (recommendations != loaded_recommendations).to(
             torch.float32
         ).mean() < recommendations.shape[0] + 0.01 * recommendations.numel()
-        loaded_online_ratings = loaded_module.online_ratings(explicit=explicit)
+        loaded_online_ratings = loaded_module.online_ratings(users_explicit=explicit)
         assert torch.isclose(online_ratings, loaded_online_ratings, atol=1e-5).all()
         loaded_online_recommendations = loaded_module.online_recommend(
-            explicit=explicit, n_recommendations=n_recommendations
+            users_explicit=explicit, n_recommendations=n_recommendations
         )
         assert (online_recommendations != loaded_online_recommendations).to(
             torch.float32
@@ -109,6 +110,20 @@ class MockNonGradientRecommender(
 
     def step(self, batch, stage):
         pass
+
+
+def test_catboost_aggregator():
+    movielens = MovieLens()
+    explicit = movielens.explicit_feedback_scipy_csr("u1.base")
+    recommender_artifact_names = ["als"]
+    module = CatboostMovieLensAggregatorFromArtifacts(
+        entity="dkoshman",
+        project="Recommending",
+        recommender_artifact_names=recommender_artifact_names,
+        explicit=explicit,
+    )
+    module.fit()
+    _test_recommender_module(module)
 
 
 def test_als():

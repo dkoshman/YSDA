@@ -10,7 +10,5 @@ lightning_module:
 trainer:
   num_sanity_val_steps: 0
 callbacks:
-  WandbWatcher:
-    log_every_n_steps: 50
   WandbCheckpointCallback:
     artifact_name: implicit_als

@@ -1,12 +1,12 @@
-name: "MF run"
+name: "My MF"
 model:
-  class_name: MatrixFactorization
+  class_name: MyMatrixFactorization
   latent_dimension: 100
   weight_decay: 1.0e-4
 datamodule:
   num_workers: 4
 lightning_module:
-  class_name: MovieLensMFRecommender
+  class_name: MovieLensMyMFRecommender
 optimizer:
   class_name: Adam
 trainer:
@@ -19,4 +19,4 @@ trainer:
   log_every_n_steps: 1
 callbacks:
   WandbCheckpointCallback:
-    artifact_name: mf
+    artifact_name: my_mf

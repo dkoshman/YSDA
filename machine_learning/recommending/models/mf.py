@@ -81,6 +81,32 @@ class ConstrainedProbabilityMatrixFactorization(MatrixFactorization):
         return ratings
 
 
+class MyMatrixFactorization(RecommenderModuleBase):
+    def __init__(self, explicit=None, latent_dimension=10, weight_decay=1.0e-3):
+        super().__init__(explicit=explicit)
+        self.ratings_mf = MatrixFactorization(
+            latent_dimension=latent_dimension,
+            weight_decay=weight_decay,
+            explicit=explicit,
+        )
+        self.confidence_mf = MatrixFactorization(
+            latent_dimension=latent_dimension,
+            weight_decay=weight_decay,
+            explicit=explicit,
+        )
+
+    def probability(self, user_ids, item_ids):
+        confidence = self.confidence_mf(user_ids=user_ids, item_ids=item_ids)
+        probability = torch.sigmoid(confidence)
+        probability = probability / probability.sum()
+        return probability
+
+    def forward(self, user_ids, item_ids):
+        ratings = self.ratings_mf(user_ids=user_ids, item_ids=item_ids)
+        probability = self.probability(user_ids=user_ids, item_ids=item_ids)
+        return ratings * probability
+
+
 class MFRecommender(LitRecommenderBase):
     @property
     def class_candidates(self):
@@ -109,4 +135,22 @@ class MFRecommender(LitRecommenderBase):
     def validation_step(self, batch, batch_idx):
         loss = self.common_step(batch)
         self.log("val_loss", loss)
+        return loss
+
+
+class MyMFRecommender(MFRecommender):
+    @property
+    def class_candidates(self):
+        return super().class_candidates + [MyMatrixFactorization]
+
+    def common_step(self, batch):
+        explicit = batch["explicit"].to_dense()
+        user_ids = batch["user_ids"]
+        item_ids = batch["item_ids"]
+        ratings = self.model.ratings_mf(user_ids=user_ids, item_ids=item_ids)
+        probability = self.model.probability(user_ids=user_ids, item_ids=item_ids)
+        implicit = explicit > 0
+        loss = (
+            implicit * ((ratings - explicit) ** 2 - torch.log(probability))
+        ).sum() / implicit.sum()
         return loss

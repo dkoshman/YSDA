@@ -107,8 +107,8 @@ class SLIM(RecommenderModuleBase, WandbLoggerMixin):
         ratings = explicit.to(torch.float32) @ items_sparse_weight
         return ratings.to_dense()
 
-    def online_ratings(self, explicit):
-        ratings = explicit.to(torch.float32) @ self.sparse_weight
+    def online_ratings(self, users_explicit):
+        ratings = users_explicit.to(torch.float32).to(self.device) @ self.sparse_weight
         return ratings.to_dense()
 
 

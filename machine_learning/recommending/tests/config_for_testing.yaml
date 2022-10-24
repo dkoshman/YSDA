@@ -7,9 +7,6 @@ datamodule:
   train_explicit_file: u1.base
   val_explicit_file: u1.test
   test_explicit_file: u1.test
-loss:
-  class_name: MSEConfidenceLoss
-  confidence: 0.9
 lightning_module:
   class_name: MovieLensNonGradientRecommender
 optimizer:

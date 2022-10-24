@@ -10,13 +10,9 @@ parameters:
       values: [ALSjit, ALSjitBiased]
     epochs:
       min: 1
-      max: 10
-    latent_dimension_size:
-      min: 50
-      max: 150
-    lambda_decay:
-      min: 0.2
-      max: 0.6
+      max: 5
+    latent_dimension_size: 100
+    lambda_decay: 0.5
     confidence_alpha: 10
     regularization_lambda: 100
   lightning_module:

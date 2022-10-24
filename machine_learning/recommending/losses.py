@@ -26,10 +26,22 @@ class MSEConfidenceLoss(RecommendingLossInterface):
         if not 0 <= confidence <= 1:
             raise ValueError(
                 f"Confidence must be in range [0, 1], "
-                f"but received confidence {confidence}"
+                f"but received confidence is {confidence}"
             )
         self.confidence = confidence
 
+    def __call__(self, explicit, model_ratings):
+        explicit = explicit.to_dense()
+        model_ratings = model_ratings.to_dense()
+        explicit_mask = explicit > 0
+        loss = (
+            (explicit_mask + ~explicit_mask * self.confidence)
+            * (explicit - model_ratings) ** 2
+        ).mean()
+        return loss
+
+
+class ImplicitAwareLoss(RecommendingLossInterface):
     def __call__(self, explicit, model_ratings):
         explicit = explicit.to_dense()
         model_ratings = model_ratings.to_dense()

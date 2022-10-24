@@ -8,7 +8,7 @@ from ..callbacks import (
     WandbWatcher,
 )
 
-from ..utils import fetch_artifact, load_checkpoint_artifact
+from ..utils import fetch_artifact, load_path_from_artifact
 from .conftest import (
     _test_lightning_module,
     random_explicit_feedback,
@@ -34,7 +34,7 @@ def test_wandb_artifact_checkpointing():
     artifact = fetch_artifact(
         entity="dkoshman", project="Testing", artifact_name=artifact_name
     )
-    checkpoint_path = load_checkpoint_artifact(artifact)
+    checkpoint_path = load_path_from_artifact(artifact)
     loaded_lit = MockLinearLightningModule.load_from_checkpoint(checkpoint_path)
     trainer = pl.Trainer()
     trainer.test(loaded_lit)
@@ -75,7 +75,7 @@ def test_catboost_callback():
 def test_wandb_watcher_callback():
     logger = pl.loggers.WandbLogger()
     grid_kwargs = dict(
-        log_what=["gradients", "parameters"], log_every_n_steps=[200], log_graph=[False]
+        log_what=["parameters"], log_every_n_steps=[200], log_graph=[False]
     )
     for kwargs in cartesian_products_of_dict_values(grid_kwargs):
         callback = WandbWatcher(**kwargs)
