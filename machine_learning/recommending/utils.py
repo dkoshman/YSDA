@@ -1,6 +1,5 @@
 import contextlib
 import os
-from typing import TypeVar
 
 import torch
 import wandb
@@ -8,9 +7,6 @@ import yaml
 from matplotlib import pyplot as plt
 
 from torch.utils.data import random_split
-
-SparseTensor = TypeVar("SparseTensor", bound=torch.Tensor)
-Pickleable = TypeVar("Pickleable")
 
 
 def build_weight(*dimensions):

@@ -13,6 +13,7 @@ lightning_module:
 trainer:
   num_sanity_val_steps: 0
 callbacks:
-  CatBoostMetrics: {}
+  CatBoostMetrics:
+    plot_dependence: true
   WandbCheckpointCallback:
     artifact_name: catboost_aggregator

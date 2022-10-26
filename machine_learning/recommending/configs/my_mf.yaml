@@ -2,21 +2,22 @@ name: "My MF"
 model:
   class_name: MyMatrixFactorization
   latent_dimension: 100
-  weight_decay: 1.0e-4
+  weight_decay: 1.0e-7
 datamodule:
   num_workers: 4
+  batch_size: 1000
 lightning_module:
   class_name: MovieLensMyMFRecommender
 optimizer:
   class_name: Adam
 trainer:
-  max_epochs: 30
+#  max_epochs: 30
+  max_epochs: 500
   accelerator: gpu
   devices: [3]
   default_root_dir: local
-  check_val_every_n_epoch: 1
   amp_backend: native
-  log_every_n_steps: 1
+  check_val_every_n_epoch: 50
 callbacks:
   WandbCheckpointCallback:
     artifact_name: my_mf

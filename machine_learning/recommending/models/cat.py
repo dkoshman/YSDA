@@ -10,8 +10,14 @@ import pandas as pd
 import shap
 import torch
 
-from my_tools.utils import BuilderMixin, torch_sparse_slice
-from ..interface import FitExplicitInterfaceMixin, RecommenderModuleBase
+from tqdm.auto import tqdm
+
+from my_tools.utils import BuilderMixin, torch_sparse_slice, SparseTensor
+from ..interface import (
+    FitExplicitInterfaceMixin,
+    RecommenderModuleBase,
+    ExplanationMixin,
+)
 from ..utils import fetch_artifact, load_path_from_artifact
 
 if TYPE_CHECKING:
@@ -25,12 +31,8 @@ class CatboostInterface(RecommenderModuleBase, FitExplicitInterfaceMixin, ABC):
         super().__init__(explicit=explicit)
         self.model = catboost.CatBoostRanker(**cb_params)
 
-    def explicit_dataframe(self, explicit: "spmatrix"):
-        if explicit.shape != self.explicit_scipy_coo().shape:
-            raise ValueError(
-                "Provided explicit feedback shape doesn't match "
-                "train shape, user and item ids may be incorrect."
-            )
+    @staticmethod
+    def explicit_dataframe(explicit: "spmatrix"):
         explicit = explicit.tocoo()
         dataframe = pd.DataFrame(
             dict(
@@ -52,7 +54,7 @@ class CatboostInterface(RecommenderModuleBase, FitExplicitInterfaceMixin, ABC):
         return dataframe
 
     @abstractmethod
-    def train_dataframe(self, explicit) -> pd.DataFrame:
+    def train_dataframe(self, explicit: "spmatrix") -> pd.DataFrame:
         ...
 
     @abstractmethod
@@ -106,7 +108,7 @@ class CatboostInterface(RecommenderModuleBase, FitExplicitInterfaceMixin, ABC):
         return pool
 
     def fit(self):
-        explicit = self.explicit_scipy_coo()
+        explicit = self.to_scipy_coo(self.explicit)
         dataframe = self.train_dataframe(explicit)
         pool = self.pool(dataframe=dataframe)
         self.model.fit(pool, verbose=100)
@@ -118,20 +120,23 @@ class CatboostInterface(RecommenderModuleBase, FitExplicitInterfaceMixin, ABC):
         ratings = torch.from_numpy(ratings.reshape(len(user_ids), -1))
         return ratings.to(torch.float32)
 
-    def feature_importance(self, explicit: "spmatrix" or None = None) -> pd.Series:
+    def feature_importance(self, explicit: "spmatrix" or SparseTensor) -> pd.Series:
         """
         Returns series with feature names in index and
         their importance in values, sorted by decreasing importance.
         """
-        explicit = explicit if explicit is not None else self.explicit_scipy_coo()
+        explicit = self.to_scipy_coo(explicit)
         dataframe = self.train_dataframe(explicit)
         pool = self.pool(dataframe)
         feature_importance = self.model.get_feature_importance(pool, prettified=True)
         return feature_importance
 
-    def shap(self, explicit=None) -> tuple[np.ndarray, float, pd.DataFrame]:
+    def shap(
+        self, explicit: "spmatrix" or SparseTensor = None, dataframe=None
+    ) -> tuple[np.ndarray, float, pd.DataFrame]:
         """
         :param explicit: the explicit feedback for which to calculate shap values
+        :param dataframe: or a ready train dataframe
         :return shap_values, expected_value, features
         shap_values: matrix of shape [explicit.numel(), n_features] with
         shap values for each feature of each sample
@@ -139,8 +144,10 @@ class CatboostInterface(RecommenderModuleBase, FitExplicitInterfaceMixin, ABC):
         features: dataframe with same shape as shap_values
         with feature values and names
         """
+        if dataframe is None:
+            explicit = self.to_scipy_coo(explicit)
+            dataframe = self.train_dataframe(explicit)
         explainer = shap.TreeExplainer(self.model)
-        dataframe = self.train_dataframe(explicit)
         pool = self.pool(dataframe)
         shap_values = explainer.shap_values(pool)
         features = dataframe.drop("explicit", axis="columns")
@@ -211,7 +218,7 @@ class CatboostAggregatorRecommender(CatboostInterface):
         return False
 
     def skeleton_dataframe(self):
-        dataframe = self.explicit_dataframe(self.explicit_scipy_coo())
+        dataframe = self.explicit_dataframe(self.to_scipy_coo(self.explicit))
         if self.recommender_names is None:
             self.recommender_names = self.generate_model_names(self.fit_recommenders)
         return pd.DataFrame(columns=list(dataframe.columns) + self.recommender_names)
@@ -296,7 +303,9 @@ class CatboostAggregatorRecommender(CatboostInterface):
         n_recommendations=None,
     ):
         dataframe = self.skeleton_dataframe()
-        for batch_indices in torch.arange(len(user_ids)).split(self.batch_size):
+        for batch_indices in tqdm(
+            torch.arange(len(user_ids)).split(self.batch_size), "Building dataframe"
+        ):
             batch_user_ids = user_ids[batch_indices]
             batch_users_explicit = None
             if users_explicit is not None:
@@ -346,12 +355,12 @@ class CatboostAggregatorRecommender(CatboostInterface):
     def recommend(
         self,
         user_ids: torch.IntTensor,
-        n_recommendations: int or None = None,
+        n_recommendations=10,
         filter_already_liked_items=True,
     ) -> torch.IntTensor:
         dataframe = self.dataframe_from_batches(
             user_ids=user_ids,
-            n_recommendations=n_recommendations or self.n_items,
+            n_recommendations=n_recommendations,
             filter_already_liked_items=filter_already_liked_items,
         )
         recommendations = self.common_recommend_logic(
@@ -372,14 +381,15 @@ class CatboostAggregatorRecommender(CatboostInterface):
         )
         return item_ids.to(torch.int64)
 
-    def online_recommend(self, users_explicit, n_recommendations: int or None = None):
+    def online_recommend(self, users_explicit, n_recommendations=10):
+        users_explicit = self.to_torch_coo(users_explicit)
         fictive_user_ids = torch.arange(
             self.n_users, self.n_users + users_explicit.shape[0]
         )
         dataframe = self.dataframe_from_batches(
             user_ids=fictive_user_ids,
             users_explicit=users_explicit,
-            n_recommendations=n_recommendations or self.n_items,
+            n_recommendations=n_recommendations,
             filter_already_liked_items=True,
         )
         recommendations = self.common_recommend_logic(
@@ -387,6 +397,32 @@ class CatboostAggregatorRecommender(CatboostInterface):
             n_users=len(fictive_user_ids),
         )
         return recommendations
+
+    # def explain_recommendations(
+    #     self,
+    #     user_id=None,
+    #     user_explicit=None,
+    #     n_recommendations=10,
+    #     log=False,
+    #     logging_prefix="",
+    # ):
+    #     if user_id is not None:
+    #         user_id = self.n_users
+    #         recommendations = self.recommend(
+    #             user_ids=torch.tensor([user_id]), n_recommendations=n_recommendations
+    #         )
+    #     dataframe = self.dataframe_from_batches(
+    #         user_ids=torch.tensor([user_id]),
+    #         users_explicit=user_explicit,
+    #         n_recommendations=n_recommendations,
+    #         filter_already_liked_items=True,
+    #     )
+    #     train_dataframe = self.train_dataframe(self.explicit)
+    #     shap_values, expected_value, features = self.shap(dataframe=dataframe)
+    #     figures = []
+    #     # figure_context_manager = wandb_plt_figure if log else plt_figure
+    #     for item_id in recommendations.squeeze(0).cpu().numpy():
+    #         shap_index = dataframe["use"]
 
 
 class CatboostAggregatorFromArtifacts(BuilderMixin, CatboostAggregatorRecommender):

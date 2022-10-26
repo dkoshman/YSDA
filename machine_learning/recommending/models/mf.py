@@ -1,7 +1,7 @@
 import torch
 
 from my_tools.models import register_regularization_hook
-from my_tools.utils import scipy_to_torch_sparse, torch_sparse_slice
+from my_tools.utils import to_torch_coo, torch_sparse_slice
 
 from ..lit import LitRecommenderBase
 from ..data import SparseDataset
@@ -45,13 +45,11 @@ class ConstrainedProbabilityMatrixFactorization(MatrixFactorization):
         self.implicit_feedback_normalized = None
 
     def init_implicit_feedback_normalized(self):
-        implicit_feedback = self.explicit_scipy_coo() > 0
+        implicit_feedback = self.to_scipy_coo(self.explicit) > 0
         implicit_feedback_normalized = implicit_feedback.multiply(
             1 / (implicit_feedback.sum(axis=1) + 1e-8)
         ).astype("float32")
-        self.implicit_feedback_normalized = scipy_to_torch_sparse(
-            implicit_feedback_normalized
-        )
+        self.implicit_feedback_normalized = to_torch_coo(implicit_feedback_normalized)
 
     def forward(self, user_ids, item_ids):
         if self.implicit_feedback_normalized is None:
@@ -63,8 +61,8 @@ class ConstrainedProbabilityMatrixFactorization(MatrixFactorization):
         item_weight = self.item_weight[item_ids]
 
         users_implicit_feedback = torch_sparse_slice(
-            self.implicit_feedback_normalized, row_ids=user_ids, device=self.bias.device
-        )
+            self.implicit_feedback_normalized, row_ids=user_ids
+        ).to(self.bias.device)
         user_weights_offset_caused_by_their_ratings = (
             users_implicit_feedback @ item_rating_effect_weight
         )

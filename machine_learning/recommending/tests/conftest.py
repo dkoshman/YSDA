@@ -13,8 +13,7 @@ from machine_learning.recommending.data import (
     SparseTensorUnpacker,
     SparseDataset,
 )
-from machine_learning.recommending.entrypoint import RecommendingBuilder
-from my_tools.utils import scipy_to_torch_sparse
+
 
 TEST_CONFIG_PATH = "tests/config_for_testing.yaml"
 
@@ -224,23 +223,9 @@ class MockLitRecommender(SparseTensorUnpacker, MockLightningModuleInterface):
         return loss
 
 
-def _test_lightning_module(config):
-    constructor = RecommendingBuilder(config)
-    lightning_module = constructor.build_lightning_module()
-    trainer = constructor.build_trainer()
-    trainer.fit(lightning_module)
-    trainer.test(lightning_module)
-    model = lightning_module.model
-
-    recommendations = model.recommend(user_ids=torch.arange(100))
-    explicit = random_explicit_feedback(n_items=model.n_items)
-    explicit = scipy_to_torch_sparse(explicit)
-    online = model.online_recommend(explicit)
-    state_dict = model.state_dict()
-
-    loaded_model = type(model)()
-    loaded_model.load_state_dict(state_dict)
-    loaded_recommendations = loaded_model.recommend(user_ids=torch.arange(100))
-    loaded_online = loaded_model.online_recommend(explicit)
-    assert (recommendations == loaded_recommendations).all()
-    assert (online == loaded_online).all()
+def get_available_devices():
+    devices = ["cpu"]
+    if torch.cuda.is_available():
+        torch.cuda.init()
+        devices.append("cuda")
+    return devices

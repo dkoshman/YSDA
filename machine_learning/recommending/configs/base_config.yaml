@@ -8,9 +8,9 @@ logger:
   class_name: WandbLogger
   save_dir: local
 callbacks:
-  RecommendingIMDBCallback:
+  RecommendingExplanationIMDBCallback:
     path_to_imdb_ratings_csv: local/my_imdb_ratings.csv
     path_to_movielens_folder: local/ml-100k
-    n_recommendations: 10
+    n_recommendations: 5
   RecommendingMetricsCallback:
     k: 10

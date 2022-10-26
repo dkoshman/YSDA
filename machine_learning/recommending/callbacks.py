@@ -14,6 +14,7 @@ from sklearn.decomposition import TruncatedSVD
 import matplotlib.patheffects as pe
 
 from .data import SparseDataModuleInterface
+from .interface import ExplanationMixin
 from .metrics import RecommendingMetrics
 from .utils import wandb_plt_figure
 
@@ -340,3 +341,47 @@ class RecommendingMetricsCallback(pl.callbacks.Callback):
         if metrics is not None and len(metrics.unique_recommended_items):
             metrics = metrics.finalize_coverage()
             self.log_metrics(metrics, kind)
+
+
+class RecommendingExplanationCallback(pl.callbacks.Callback):
+    def __init__(
+        self,
+        user_ids=None,
+        users_explicit=None,
+        n_recommendations=10,
+    ):
+        self.user_ids = user_ids
+        self.users_explicit = users_explicit
+        self.n_recommendations = n_recommendations
+
+    def on_test_epoch_end(self, trainer=None, pl_module=None):
+        self.my_on_epoch_end(model=pl_module.model, stage="test")
+
+    def on_validation_epoch_end(self, trainer=None, pl_module=None):
+        self.my_on_epoch_end(model=pl_module.model, stage="val")
+
+    def my_on_epoch_end(
+        self, model: "RecommenderModuleBase", stage: Literal["train", "val", "test", "predict"]
+    ):
+        if not isinstance(model, ExplanationMixin):
+            return
+        if self.user_ids is not None:
+            for user_id in self.user_ids:
+                model.explain_recommendations(
+                    user_id=user_id,
+                    n_recommendations=self.n_recommendations,
+                    log=True,
+                    logging_prefix=stage,
+                )
+
+        if self.users_explicit is not None:
+            try:
+                for user_explicit in self.users_explicit.detach().clone():
+                    model.explain_recommendations(
+                        user_explicit=user_explicit[None],
+                        n_recommendations=self.n_recommendations,
+                        log=True,
+                        logging_prefix=stage,
+                    )
+            except NotImplementedError:
+                pass

@@ -1,13 +1,11 @@
 import pytorch_lightning as pl
 import torch
 
-from my_tools.utils import BuilderMixin
+from my_tools.utils import BuilderMixin, SparseTensor
 
 from . import losses
 from .data import build_recommending_dataloader, SparseDataModuleBase
 from .interface import RecommenderModuleBase
-from .losses import RecommendingLossInterface
-from .utils import SparseTensor
 
 
 class LitRecommenderBase(

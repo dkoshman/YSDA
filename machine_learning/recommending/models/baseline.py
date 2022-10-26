@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from sklearn.decomposition import TruncatedSVD
 
-from my_tools.utils import build_class, torch_sparse_to_scipy
+from my_tools.utils import build_class
 
 from ..interface import RecommenderModuleBase, FitExplicitInterfaceMixin
 
@@ -27,7 +27,7 @@ class PopularRecommender(RecommenderModuleBase, FitExplicitInterfaceMixin):
         self.register_buffer(name="items_count", tensor=torch.zeros(self.n_items))
 
     def fit(self):
-        implicit_feedback = self.explicit_scipy_coo() > 0
+        implicit_feedback = self.to_scipy_coo(self.explicit) > 0
         self.items_count = torch.from_numpy(implicit_feedback.sum(axis=0).A.squeeze())
 
     def forward(self, user_ids, item_ids):
@@ -41,10 +41,10 @@ class SVDRecommender(RecommenderModuleBase, FitExplicitInterfaceMixin):
         self.model = TruncatedSVD(n_components=n_components)
 
     def fit(self):
-        self.model.fit(self.explicit_scipy_coo())
+        self.model.fit(self.to_scipy_coo(self.explicit))
 
     def forward(self, user_ids, item_ids):
-        explicit_feedback = self.explicit_scipy_coo().tocsr()
+        explicit_feedback = self.to_scipy_coo(self.explicit).tocsr()
         embedding = self.model.transform(explicit_feedback[user_ids].A)
         ratings = self.model.inverse_transform(embedding)[:, item_ids]
         return torch.from_numpy(ratings).to(torch.float32)
@@ -73,10 +73,10 @@ class ImplicitRecommenderBase(RecommenderModuleBase, FitExplicitInterfaceMixin):
 
     def fit(self):
         self.explicit = self.explicit.to(torch.float32)
-        self.model.fit(self.explicit_scipy_coo())
+        self.model.fit(self.to_scipy_coo(self.explicit))
 
     def forward(self, user_ids, item_ids):
-        explicit_feedback = self.explicit_scipy_coo().tocsr()
+        explicit_feedback = self.to_scipy_coo(self.explicit).tocsr()
         recommended_item_ids, item_ratings = self.model.recommend(
             userid=user_ids.numpy(),
             user_items=explicit_feedback[user_ids],
@@ -99,7 +99,7 @@ class ImplicitRecommenderBase(RecommenderModuleBase, FitExplicitInterfaceMixin):
     ):
         item_ids, item_ratings = self.model.recommend(
             userid=user_ids.numpy(),
-            user_items=self.explicit_scipy_coo().tocsr()[user_ids],
+            user_items=self.to_scipy_coo(self.explicit).tocsr()[user_ids],
             N=n_recommendations,
             filter_already_liked_items=filter_already_liked_items,
         )
@@ -136,9 +136,10 @@ class ImplicitNearestNeighborsRecommender(ImplicitRecommenderBase):
         users_explicit,
         n_recommendations=None,
     ) -> torch.IntTensor:
+        users_explicit = self.to_torch_coo(users_explicit)
         item_ids, item_ratings = self.model.recommend(
             userid=np.arange(users_explicit.shape[0]),
-            user_items=torch_sparse_to_scipy(users_explicit.to(torch.float32)).tocsr(),
+            user_items=self.to_scipy_coo(users_explicit.to(torch.float32)).tocsr(),
             N=n_recommendations or self.n_items,
         )
         return torch.from_numpy(item_ids).to(torch.int64)

@@ -1,6 +1,8 @@
 import warnings
 
+import numpy as np
 import scipy.sparse
+import shap
 import torch
 
 from my_tools.models import (
@@ -12,10 +14,11 @@ from my_tools.utils import torch_sparse_slice
 
 from ..data import SparseDataset
 from ..lit import LitRecommenderBase
-from ..interface import RecommenderModuleBase
+from ..interface import RecommenderModuleBase, ExplanationMixin
+from ..utils import plt_figure, wandb_plt_figure
 
 
-class SLIM(RecommenderModuleBase, WandbLoggerMixin):
+class SLIM(RecommenderModuleBase, WandbLoggerMixin, ExplanationMixin):
     """
     The fitted model has sparse matrix W of shape [n_items, n_items],
     which it uses to predict ratings for users with feedback matrix
@@ -98,18 +101,70 @@ class SLIM(RecommenderModuleBase, WandbLoggerMixin):
         return ratings
 
     def forward(self, user_ids, item_ids):
-        explicit = torch_sparse_slice(
-            self.explicit, row_ids=user_ids, device=self.device
-        )
+        explicit = torch_sparse_slice(self.explicit, row_ids=user_ids).to(self.device)
         items_sparse_weight = torch_sparse_slice(
-            self.sparse_weight, col_ids=item_ids, device=self.device
-        )
+            self.sparse_weight, col_ids=item_ids
+        ).to(self.device)
         ratings = explicit.to(torch.float32) @ items_sparse_weight
         return ratings.to_dense()
 
     def online_ratings(self, users_explicit):
+        users_explicit = self.to_torch_coo(users_explicit)
         ratings = users_explicit.to(torch.float32).to(self.device) @ self.sparse_weight
         return ratings.to_dense()
+
+    def explain_recommendations(
+        self,
+        user_id=None,
+        user_explicit=None,
+        n_recommendations=10,
+        log=False,
+        logging_prefix="",
+        feature_names=None,
+        n_background_samples_for_shap=1000,
+    ):
+        if feature_names is not None and len(feature_names) != self.n_items:
+            raise ValueError(f"Feature names must be of length {self.n_items}")
+
+        if user_id is not None:
+            recommendations = self.recommend(
+                user_ids=torch.tensor([user_id]), n_recommendations=n_recommendations
+            )
+            user_explicit = self.to_scipy_coo(self.explicit).tocsr()[user_id].toarray()
+        else:
+            recommendations = self.online_recommend(
+                users_explicit=user_explicit, n_recommendations=n_recommendations
+            )
+            user_explicit = self.to_scipy_coo(user_explicit).toarray()
+
+        background_samples_for_shap = self.to_scipy_coo(self.explicit).tocsr()[
+            np.random.choice(
+                np.arange(self.n_users),
+                replace=False,
+                size=min(n_background_samples_for_shap, self.n_users),
+            )
+        ]
+
+        figures = []
+        figure_context_manager = wandb_plt_figure if log else plt_figure
+        for item_id in recommendations.squeeze(0).cpu().numpy():
+            item_weight = torch_sparse_slice(self.sparse_weight, col_ids=[item_id])
+            item_weight = item_weight.to_dense().numpy().squeeze(1)
+            explainer = shap.explainers.Linear(
+                model=(item_weight, coef := 0),
+                masker=background_samples_for_shap,
+                feature_names=feature_names,
+            )
+            shap_values = explainer(user_explicit)
+            title = (
+                logging_prefix
+                + f" Item {item_id if feature_names is None else feature_names[item_id]}"
+            )
+            with figure_context_manager(title=title) as figure:
+                shap.waterfall_plot(shap_values[0])
+            figures.append(figure)
+
+        return figures
 
 
 class SLIMHook:

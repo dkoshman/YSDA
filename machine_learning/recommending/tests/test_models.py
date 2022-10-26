@@ -5,17 +5,20 @@ import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
 import torch
+import wandb
 from recommending.data import SparseDataset
 from scipy.sparse import coo_matrix
 
-from my_tools.utils import scipy_to_torch_sparse
+from my_tools.utils import to_torch_coo
 from ..data import build_recommending_dataloader
+from ..interface import ExplanationMixin
 from ..lit import NonGradientRecommenderMixin
 
 from ..models import als, baseline, cat, mf, slim
 from ..models.slim import SLIMRecommender
 from ..movielens import cat as movielens_cat, MovieLens
 from .conftest import (
+    get_available_devices,
     random_explicit_feedback,
     MockLitRecommender,
     MockLightningModuleInterface,
@@ -27,70 +30,96 @@ seed_everything()
 
 
 def _test_recommender_module(module, test_reload=True):
-    n_users = module.n_users
-    n_items = module.n_items
-    assert np.isscalar(n_users)
-    assert np.isscalar(n_items)
-    user_ids = torch.from_numpy(
-        np.random.choice(
-            range(n_users), size=np.random.randint(1, n_users), replace=False
-        )
-    )
-    item_ids = torch.from_numpy(
-        np.random.choice(
-            range(n_items), size=np.random.randint(1, n_items), replace=False
-        )
-    )
-    n_recommendations = np.random.randint(1, n_items)
-    filter_already_liked_items = np.random.choice([True, False])
+    for device in get_available_devices():
+        module = module.to(device)
 
-    ratings = module(user_ids=user_ids, item_ids=item_ids)
-    assert torch.is_tensor(ratings)
-    assert not ratings.is_sparse and not ratings.is_sparse_csr
-    assert ratings.dtype == torch.float32
-    recommendations = module.recommend(
-        user_ids=user_ids,
-        n_recommendations=n_recommendations,
-        filter_already_liked_items=filter_already_liked_items,
-    )
-    assert torch.is_tensor(recommendations)
-    assert recommendations.dtype == torch.int64
-    explicit = random_explicit_feedback(n_items=module.n_items)
-    explicit = scipy_to_torch_sparse(explicit)
-    online_ratings = module.online_ratings(users_explicit=explicit)
-    assert torch.is_tensor(online_ratings)
-    online_recommendations = module.online_recommend(
-        users_explicit=explicit, n_recommendations=n_recommendations
-    )
-    assert torch.is_tensor(online_recommendations)
-    assert online_recommendations.dtype == torch.int64
-    assert isinstance(module.device, torch.device)
-    assert isinstance(module.explicit_scipy_coo(), coo_matrix)
+        n_users = module.n_users
+        n_items = module.n_items
+        assert np.isscalar(n_users)
+        assert np.isscalar(n_items)
+        user_ids = torch.from_numpy(
+            np.random.choice(
+                range(n_users), size=np.random.randint(1, n_users), replace=False
+            )
+        )
+        item_ids = torch.from_numpy(
+            np.random.choice(
+                range(n_items), size=np.random.randint(1, n_items), replace=False
+            )
+        )
+        n_recommendations = np.random.randint(1, n_items)
+        filter_already_liked_items = np.random.choice([True, False])
 
-    if test_reload:
-        state_dict = module.state_dict()
-        loaded_module = module.__class__()
-        loaded_module.load_state_dict(state_dict)
-        loaded_ratings = loaded_module(user_ids=user_ids, item_ids=item_ids)
-        assert torch.isclose(ratings, loaded_ratings, atol=1e-5).all()
-        loaded_recommendations = loaded_module.recommend(
+        ratings = module(user_ids=user_ids, item_ids=item_ids)
+        assert torch.is_tensor(ratings)
+        assert not ratings.is_sparse and not ratings.is_sparse_csr
+        assert ratings.dtype == torch.float32
+        recommendations = module.recommend(
             user_ids=user_ids,
             n_recommendations=n_recommendations,
             filter_already_liked_items=filter_already_liked_items,
         )
-        assert (recommendations != loaded_recommendations).to(
-            torch.float32
-        ).mean() < recommendations.shape[0] + 0.01 * recommendations.numel()
-        loaded_online_ratings = loaded_module.online_ratings(users_explicit=explicit)
-        assert torch.isclose(online_ratings, loaded_online_ratings, atol=1e-5).all()
-        loaded_online_recommendations = loaded_module.online_recommend(
+        assert torch.is_tensor(recommendations)
+        assert recommendations.dtype == torch.int64
+        explicit = random_explicit_feedback(n_items=module.n_items)
+        explicit = to_torch_coo(explicit)
+        online_ratings = module.online_ratings(users_explicit=explicit)
+        assert torch.is_tensor(online_ratings)
+        online_recommendations = module.online_recommend(
             users_explicit=explicit, n_recommendations=n_recommendations
         )
-        assert (online_recommendations != loaded_online_recommendations).to(
-            torch.float32
-        ).sum() < online_recommendations.shape[
-            0
-        ] + 0.01 * online_recommendations.numel()
+        assert torch.is_tensor(online_recommendations)
+        assert online_recommendations.dtype == torch.int64
+        assert isinstance(module.device, torch.device)
+        assert isinstance(module.to_scipy_coo(module.explicit), coo_matrix)
+
+        if test_reload:
+            state_dict = module.state_dict()
+            loaded_module = module.__class__()
+            loaded_module.load_state_dict(state_dict)
+            loaded_ratings = loaded_module(user_ids=user_ids, item_ids=item_ids)
+            assert torch.isclose(ratings, loaded_ratings, atol=1e-5).all()
+            loaded_recommendations = loaded_module.recommend(
+                user_ids=user_ids,
+                n_recommendations=n_recommendations,
+                filter_already_liked_items=filter_already_liked_items,
+            )
+            assert (recommendations != loaded_recommendations).to(
+                torch.float32
+            ).mean() < recommendations.shape[0] + 0.01 * recommendations.numel()
+            loaded_online_ratings = loaded_module.online_ratings(
+                users_explicit=explicit
+            )
+            assert torch.isclose(online_ratings, loaded_online_ratings, atol=1e-5).all()
+            loaded_online_recommendations = loaded_module.online_recommend(
+                users_explicit=explicit, n_recommendations=n_recommendations
+            )
+            assert (online_recommendations != loaded_online_recommendations).to(
+                torch.float32
+            ).sum() < online_recommendations.shape[
+                0
+            ] + 0.01 * online_recommendations.numel()
+
+        if isinstance(module, ExplanationMixin):
+            user_id = np.random.randint(module.n_users)
+            user_explicit = random_explicit_feedback(n_users=1, n_items=module.n_items)
+
+            with wandb.init(project="Testing"):
+                module.explain_recommendations(
+                    user_id=user_id,
+                    n_recommendations=np.random.randint(1, 3),
+                    log=True,
+                    logging_prefix="testing",
+                )
+                try:
+                    module.explain_recommendations(
+                        user_explicit=user_explicit,
+                        n_recommendations=np.random.randint(1, 3),
+                        log=True,
+                        logging_prefix="testing online",
+                    )
+                except NotImplementedError:
+                    pass
 
 
 class MockNonGradientRecommender(
@@ -148,7 +177,7 @@ def test_als():
                 n_recommendations=np.random.randint(1, 10),
             )[0]
             explanations = module.explain_recommendations(
-                user_id=user_id, recommended_item_ids=recommended_item_ids
+                user_id=user_id, recommendations=recommended_item_ids
             )
             assert isinstance(explanations["dataframe"], pd.DataFrame)
             assert isinstance(explanations["style"], pd.io.formats.style.Styler)
@@ -268,7 +297,7 @@ class MockSLIMRecommender(SLIMRecommender):
         return super().class_candidates + [slim.SLIM]
 
 
-def test_slim():
+def train_mock_slim():
     model_config = dict(
         class_name="SLIM",
         l1_coefficient=10 ** np.random.uniform(-5, -2),
@@ -278,14 +307,12 @@ def test_slim():
         n_users=np.random.randint(10, 20),
         n_items=np.random.randint(10, 20),
     )
-    loss_config = dict(class_name="MSEConfidenceLoss")
     lightning_module = MockSLIMRecommender(
         patience=np.random.randint(0, 3),
         min_delta=np.random.uniform(0.01, 1),
         check_val_every_n_epoch=np.random.randint(1, 5),
         datamodule_config=datamodule_config,
         model_config=model_config,
-        loss_config=loss_config,
     )
     trainer = pl.Trainer(
         num_sanity_val_steps=0,
@@ -296,4 +323,9 @@ def test_slim():
     if torch.cuda.is_available():
         torch.cuda.init()
     trainer.fit(lightning_module)
+    return lightning_module
+
+
+def test_slim():
+    lightning_module = train_mock_slim()
     _test_recommender_module(lightning_module.model)

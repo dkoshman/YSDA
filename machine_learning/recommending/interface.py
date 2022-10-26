@@ -1,8 +1,9 @@
 import abc
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import wandb
+from torch import IntTensor
 
 from machine_learning.recommending.maths import (
     Distance,
@@ -10,18 +11,14 @@ from machine_learning.recommending.maths import (
     weighted_average,
 )
 from my_tools.models import IgnoreShapeMismatchOnLoadStateDictMixin
-from my_tools.utils import (
-    scipy_to_torch_sparse,
-    torch_sparse_to_scipy,
-    torch_sparse_slice,
-)
+from my_tools.utils import to_torch_coo, to_scipy_coo, torch_sparse_slice
 
 if TYPE_CHECKING:
     from scipy.sparse import spmatrix
-    from machine_learning.recommending.utils import SparseTensor, Pickleable
+    from my_tools.utils import SparseTensor, Pickleable
 
 
-# TODO: my own mf model, shap for slim
+# TODO: app on huggingface, telegram bot
 
 
 class RecommenderModuleInterface(torch.nn.Module, abc.ABC):
@@ -59,14 +56,14 @@ class RecommenderModuleInterface(torch.nn.Module, abc.ABC):
         """Returns recommended item ids."""
 
     @abc.abstractmethod
-    def online_ratings(self, explicit: "SparseTensor") -> torch.Tensor:
+    def online_ratings(self, explicit: "SparseTensor" or "spmatrix") -> torch.Tensor:
         """Generate ratings for new users defined by their explicit feedback"""
 
     @abc.abstractmethod
     def online_recommend(
         self,
         explicit: "SparseTensor" or "spmatrix",
-        n_recommendations: int or None = None,
+        n_recommendations: int = 10,
     ) -> torch.IntTensor:
         """Generate recommendations for new users defined by their explicit feedback."""
 
@@ -76,16 +73,15 @@ class RecommenderModuleBase(
 ):
     def __init__(self, explicit: "SparseTensor" or "spmatrix" or None = None):
         super().__init__()
-        if explicit is not None and not torch.is_tensor(explicit):
-            explicit = scipy_to_torch_sparse(explicit)
+        if explicit is not None:
+            explicit = to_torch_coo(explicit)
         self.register_buffer(name="explicit", tensor=explicit)
+        self.to_torch_coo = to_torch_coo
+        self.to_scipy_coo = to_scipy_coo
 
     @property
     def device(self):
         return self.explicit.device
-
-    def explicit_scipy_coo(self):
-        return torch_sparse_to_scipy(self.explicit)
 
     @property
     def n_users(self):
@@ -105,22 +101,22 @@ class RecommenderModuleBase(
     def filter_already_liked_items(explicit, ratings):
         return torch.where(explicit.to_dense() > 0, torch.finfo().min, ratings)
 
-    def ratings_to_recommendations(self, ratings, n_recommendations=None):
-        n_recommendations = n_recommendations or self.n_items
+    @staticmethod
+    def ratings_to_recommendations(ratings, n_recommendations):
         item_ratings, item_ids = torch.topk(input=ratings, k=n_recommendations)
         return item_ids
 
     def recommend(
         self,
         user_ids: torch.IntTensor,
-        n_recommendations: int or None = None,
+        n_recommendations: int = 10,
         filter_already_liked_items=True,
     ) -> torch.IntTensor:
         with torch.inference_mode():
             ratings = self(user_ids=user_ids, item_ids=torch.arange(self.n_items))
         if filter_already_liked_items:
-            users_explicit = torch_sparse_slice(
-                self.explicit, row_ids=user_ids, device=self.device
+            users_explicit = torch_sparse_slice(self.explicit, row_ids=user_ids).to(
+                self.device
             )
             ratings = self.filter_already_liked_items(users_explicit, ratings)
         recommendations = self.ratings_to_recommendations(ratings, n_recommendations)
@@ -128,11 +124,11 @@ class RecommenderModuleBase(
 
     def online_nn_ratings(
         self,
-        explicit: "SparseTensor",
+        explicit: "SparseTensor" or spmatrix,
         distance: Distance or None = cosine_distance,
         n_neighbours: int or None = 10,
     ):
-        explicit = explicit.to(self.device).detach().clone()
+        explicit = self.to_torch_coo(explicit).to(self.device).detach().clone()
         distances = distance(explicit, self.explicit.detach().clone())
         neighbors_distances, nearest_user_ids = torch.topk(
             distances, k=n_neighbours, largest=False
@@ -156,7 +152,7 @@ class RecommenderModuleBase(
             ratings[i] = user_ratings
         return ratings
 
-    def online_ratings(self, users_explicit: "SparseTensor"):
+    def online_ratings(self, users_explicit: "SparseTensor" or spmatrix):
         """
         The fallback method is based on nearest neighbours,
         as it can be applied to any model, but may give suboptimal
@@ -167,10 +163,10 @@ class RecommenderModuleBase(
 
     def online_recommend(
         self,
-        users_explicit: "SparseTensor",
+        users_explicit: "SparseTensor" or spmatrix,
         n_recommendations: int or None = None,
     ) -> torch.IntTensor:
-        users_explicit = users_explicit.to(self.device)
+        users_explicit = self.to_torch_coo(users_explicit).to(self.device)
         ratings = self.online_ratings(users_explicit)
         ratings = self.filter_already_liked_items(users_explicit, ratings)
         recommendations = self.ratings_to_recommendations(ratings, n_recommendations)
@@ -208,3 +204,26 @@ class FitExplicitInterfaceMixin:
     @abc.abstractmethod
     def fit(self) -> None:
         """Fit to self.explicit feedback matrix."""
+
+
+class ExplanationMixin:
+    @abc.abstractmethod
+    def explain_recommendations(
+        self,
+        user_id: int or IntTensor = None,
+        user_explicit: "SparseTensor" = None,
+        n_recommendations=10,
+        log: bool = False,
+        logging_prefix: str = "",
+    ) -> Any:
+        """
+        Return any data that will aid in understanding why
+        the model recommends the way it does.
+        :param user_id: the id of user, for whom the
+        recommendations are generated, if he has one
+        :param user_explicit: the user's feedback of
+        shape [1, self.n_items], if he doesn't have an id
+        :param n_recommendations: number of recommendations
+        :param log: whether to log explanations to wandb
+        :param logging_prefix: the prefix for log entries
+        """

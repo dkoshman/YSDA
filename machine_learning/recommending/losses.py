@@ -4,8 +4,9 @@ import einops
 import torch
 import wandb
 
+from my_tools.utils import SparseTensor
+
 from machine_learning.recommending.maths import kl_divergence, pairwise_difference
-from machine_learning.recommending.utils import SparseTensor
 
 
 class RecommendingLossInterface:

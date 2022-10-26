@@ -1,16 +1,25 @@
 import abc
+import io
 
 import numba
 import numpy as np
 import pandas as pd
 import torch
+import wandb
+from scipy.sparse import spmatrix
 
+
+from pandas.io.formats.style import Styler
 from tqdm.auto import tqdm
 from typing_extensions import Literal
 
 from my_tools.models import WandbLoggerMixin
 
-from ..interface import RecommenderModuleBase, FitExplicitInterfaceMixin
+from ..interface import (
+    RecommenderModuleBase,
+    FitExplicitInterfaceMixin,
+    ExplanationMixin,
+)
 from ..utils import build_weight, build_bias
 
 
@@ -53,6 +62,7 @@ class ALS(
     RecommenderModuleBase,
     FitExplicitInterfaceMixin,
     WandbLoggerMixin,
+    ExplanationMixin,
 ):
     def __init__(
         self,
@@ -78,7 +88,7 @@ class ALS(
         self.confidence_minus_1 = None
         self.preference = None
 
-    def init_preference_confidence(self, explicit_feedback):
+    def init_preference_confidence(self, explicit_feedback: spmatrix):
         implicit_feedback = (explicit_feedback > 0).astype(np.float32)
         self.preference = implicit_feedback
         self.confidence_minus_1 = implicit_feedback * self.confidence_alpha
@@ -88,7 +98,7 @@ class ALS(
         )
 
     def fit(self):
-        self.init_preference_confidence(self.explicit_scipy_coo())
+        self.init_preference_confidence(self.to_scipy_coo(self.explicit))
         for _ in tqdm(range(self.epochs), "Alternating"):
             self.on_train_epoch_start()
             self.least_squares_optimization_with_fixed_factors(fixed="items")
@@ -152,11 +162,24 @@ class ALS(
         ratings = self.user_factors[user_ids] @ self.item_factors[item_ids].T
         return ratings
 
-    def explain_recommendations(self, user_id, recommended_item_ids):
-        recommended_item_ids = recommended_item_ids.numpy()
-        user_ratings = self(
-            user_ids=torch.tensor([user_id]), item_ids=recommended_item_ids
-        )[0].numpy()
+    def explain_recommendations(
+        self,
+        user_id=None,
+        user_explicit=None,
+        n_recommendations=10,
+        log=False,
+        logging_prefix="",
+    ) -> Styler:
+        if user_id is None:
+            raise NotImplementedError(
+                "Online explanations are not implemented for als."
+            )
+        recommendations = self.recommend(
+            user_ids=torch.tensor([user_id]), n_recommendations=n_recommendations
+        ).numpy()
+        user_ratings = self(user_ids=torch.tensor([user_id]), item_ids=recommendations)[
+            0
+        ].numpy()
         YtY_plus_lambdaI = item_factors_regularization_term = (
             self.item_factors.T @ self.item_factors
             + self.regularization_lambda * np.eye(self.item_factors.shape[1])
@@ -172,7 +195,7 @@ class ALS(
         )
         Y = liked_items_factors = self.item_factors[liked_item_ids].numpy()
         Y_recommended = recommended_items_factors = self.item_factors[
-            recommended_item_ids
+            recommendations
         ].numpy()
         user_latent_weight = YtCY = np.linalg.inv(
             (Y.T * confidence_minus_1) @ Y + YtY_plus_lambdaI
@@ -184,11 +207,11 @@ class ALS(
         explanations = {
             "ratings": pd.Series(
                 user_ratings,
-                recommended_item_ids,
+                recommendations,
                 name=f"predicted relevance",
             ).rename_axis(index="recommended items for user"),
             "similarity": pd.DataFrame(
-                similarity, index=recommended_item_ids, columns=liked_item_ids
+                similarity, index=recommendations, columns=liked_item_ids
             ).rename_axis(
                 index=f"recommended items for user",
                 columns=f"liked items by user",
@@ -240,8 +263,17 @@ class ALS(
             **common_gradient_kwargs,
             cmap="YlOrRd",
         )
-
-        return dict(dataframe=dataframe, style=style)
+        if log:
+            textio = io.TextIOWrapper(io.BytesIO())
+            style.to_html(textio)
+            textio.seek(0)
+            wandb.log(
+                {
+                    logging_prefix
+                    + " Recommendation explaining dataframe": wandb.Html(textio)
+                }
+            )
+        return style
 
 
 class ALSjit(ALS):
@@ -413,5 +445,5 @@ class ALSjitBiased(ALSjit):
 
         X[:, X_constant_latent_index] = 1
 
-    def explain_recommendations(self, user_ids, k=10):
+    def explain_recommendations(self, *args, **kwargs):
         raise NotImplementedError("Need to add bias to existing implementation")

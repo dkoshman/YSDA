@@ -7,7 +7,7 @@ import pandas as pd
 
 from scipy.sparse import coo_matrix
 
-from my_tools.utils import scipy_to_torch_sparse
+from my_tools.utils import to_torch_coo
 
 
 class MovieLens:
@@ -155,7 +155,7 @@ class ImdbRatings:
         return explicit_feedback
 
     def explicit_feedback_torch(self):
-        return scipy_to_torch_sparse(self.explicit_feedback_scipy())
+        return to_torch_coo(self.explicit_feedback_scipy())
 
     def items_description(self, item_ids):
         item_ids += 1

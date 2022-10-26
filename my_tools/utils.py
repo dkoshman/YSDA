@@ -1,11 +1,14 @@
 import sys
 import traceback
 from types import ModuleType
-from typing import Any
+from typing import Any, TypeVar
 
 import numpy as np
 import torch
-from scipy.sparse import coo_matrix
+from scipy.sparse import coo_matrix, spmatrix
+
+SparseTensor = TypeVar("SparseTensor", bound=torch.Tensor)
+Pickleable = TypeVar("Pickleable")
 
 
 def free_cuda():
@@ -15,34 +18,38 @@ def free_cuda():
     torch.cuda.empty_cache()
 
 
-def scipy_to_torch_sparse(scipy_sparse_matrix, device="cpu"):
-    sparse = scipy_sparse_matrix.tocoo()
+def to_sparse_coo(tensor):
+    if tensor.is_sparse:
+        return tensor
+    return tensor.to_sparse_coo()
+
+
+def to_torch_coo(sparse_matrix: torch.Tensor or spmatrix) -> SparseTensor:
+    if torch.is_tensor(sparse_matrix):
+        return to_sparse_coo(sparse_matrix)
+    sparse = sparse_matrix.tocoo()
     torch_sparse_tensor = torch.sparse_coo_tensor(
         indices=np.stack([sparse.row, sparse.col]),
         values=sparse.data,
         size=sparse.shape,
-        device=device,
     )
     return torch_sparse_tensor
 
-def to_sparse_coo(tensor):
-    try:
-        return tensor.to_sparse_coo()
-    except NotImplementedError:
-        # Torch errors if coo tensor is cast to coo again.
-        return tensor
 
-def torch_sparse_to_scipy(sparse_tensor):
-    sparse_tensor = to_sparse_coo(sparse_tensor).coalesce().cpu()
-    sparse_tensor = coo_matrix(
-        (sparse_tensor.values().numpy(), sparse_tensor.indices().numpy()),
-        shape=sparse_tensor.shape,
+def to_scipy_coo(sparse_matrix: torch.Tensor or spmatrix) -> coo_matrix:
+    if not torch.is_tensor(sparse_matrix):
+        return sparse_matrix.tocoo()
+    sparse_matrix = to_sparse_coo(sparse_matrix).coalesce().cpu()
+    sparse_matrix = coo_matrix(
+        (sparse_matrix.values().numpy(), sparse_matrix.indices().numpy()),
+        shape=sparse_matrix.shape,
     )
-    return sparse_tensor
+    return sparse_matrix
 
-def torch_sparse_slice(sparse_matrix, row_ids=None, col_ids=None, device=None):
+
+def torch_sparse_slice(sparse_matrix, row_ids=None, col_ids=None):
     if torch.is_tensor(sparse_matrix):
-        sparse_matrix = torch_sparse_to_scipy(sparse_matrix)
+        sparse_matrix = to_scipy_coo(sparse_matrix)
 
     if row_ids is None:
         row_ids = slice(None)
@@ -55,8 +62,9 @@ def torch_sparse_slice(sparse_matrix, row_ids=None, col_ids=None, device=None):
         col_ids = col_ids.cpu().numpy()
 
     sparse_matrix = sparse_matrix.tocsr()[row_ids][:, col_ids].tocoo()
-    torch_sparse_coo_tensor = scipy_to_torch_sparse(sparse_matrix, device)
+    torch_sparse_coo_tensor = to_torch_coo(sparse_matrix)
     return torch_sparse_coo_tensor
+
 
 #
 # def reuse_shelved_object_or_construct(
