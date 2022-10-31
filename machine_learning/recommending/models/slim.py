@@ -18,6 +18,7 @@ from ..interface import RecommenderModuleBase, ExplanationMixin
 from ..utils import plt_figure, wandb_plt_figure
 
 
+# TODO: rewrite slim using lightning loop api or just torch
 class SLIM(RecommenderModuleBase, WandbLoggerMixin, ExplanationMixin):
     """
     The fitted model has sparse matrix W of shape [n_items, n_items],
@@ -41,6 +42,7 @@ class SLIM(RecommenderModuleBase, WandbLoggerMixin, ExplanationMixin):
             name="sparse_weight",
             tensor=torch.sparse_coo_tensor(size=(self.n_items, self.n_items)),
         )
+        self.item_bias = torch.nn.Parameter(data=torch.zeros(self.n_items))
         self.dense_weight_slice = torch.nn.parameter.Parameter(torch.empty(0))
 
         self._sparse_values = torch.empty(0)
@@ -89,6 +91,7 @@ class SLIM(RecommenderModuleBase, WandbLoggerMixin, ExplanationMixin):
         assert len(item_ids) == self.dense_weight_slice.shape[1]
         dense_weight_slice = self.dense_weight_slice.clone()
         ratings = self.explicit.to(torch.float32) @ dense_weight_slice
+        ratings = ratings.to_dense() + self.item_bias[item_ids]
         register_regularization_hook(
             dense_weight_slice, self.l2_coefficient, self.l1_coefficient
         )
@@ -106,12 +109,14 @@ class SLIM(RecommenderModuleBase, WandbLoggerMixin, ExplanationMixin):
             self.sparse_weight, col_ids=item_ids
         ).to(self.device)
         ratings = explicit.to(torch.float32) @ items_sparse_weight
-        return ratings.to_dense()
+        ratings = ratings.to_dense() + self.item_bias[item_ids]
+        return ratings
 
     def online_ratings(self, users_explicit):
         users_explicit = self.to_torch_coo(users_explicit)
         ratings = users_explicit.to(torch.float32).to(self.device) @ self.sparse_weight
-        return ratings.to_dense()
+        ratings = ratings.to_dense() + self.item_bias
+        return ratings
 
     def explain_recommendations(
         self,
@@ -128,7 +133,7 @@ class SLIM(RecommenderModuleBase, WandbLoggerMixin, ExplanationMixin):
 
         if user_id is not None:
             recommendations = self.recommend(
-                user_ids=torch.tensor([user_id]), n_recommendations=n_recommendations
+                user_ids=torch.IntTensor([user_id]), n_recommendations=n_recommendations
             )
             user_explicit = self.to_scipy_coo(self.explicit).tocsr()[user_id].toarray()
         else:
@@ -150,8 +155,9 @@ class SLIM(RecommenderModuleBase, WandbLoggerMixin, ExplanationMixin):
         for item_id in recommendations.squeeze(0).cpu().numpy():
             item_weight = torch_sparse_slice(self.sparse_weight, col_ids=[item_id])
             item_weight = item_weight.to_dense().numpy().squeeze(1)
+            coefficient = self.item_bias[item_id].item()
             explainer = shap.explainers.Linear(
-                model=(item_weight, coef := 0),
+                model=(item_weight, coefficient),
                 masker=background_samples_for_shap,
                 feature_names=feature_names,
             )
@@ -224,7 +230,7 @@ class SLIMRecommender(LitRecommenderBase):
         self,
         patience=0,
         min_delta=0,
-        check_val_every_n_epoch=10,
+        check_val_every_n_epoch=1,
         **kwargs,
     ):
         super().__init__(**kwargs)

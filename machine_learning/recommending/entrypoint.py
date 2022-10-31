@@ -1,3 +1,5 @@
+import os
+
 import torch
 
 from my_tools.entrypoints import LightningConfigBuilder, ConfigDispenser
@@ -52,6 +54,7 @@ class RecommendingConfigDispenser(ConfigDispenser):
 def fit(config):
     with wandb_context_manager(config):
         if torch.cuda.is_available():
+            os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
             torch.cuda.init()
         constructor = RecommendingBuilder(config)
         lightning_module = constructor.build_lightning_module()

@@ -2,7 +2,7 @@ import pandas as pd
 
 from ..models import als, baseline, cat, mf, slim
 from ..models.cat import CatboostInterface, CatboostAggregatorFromArtifacts
-from .data import MovieLens
+from .data import MovieLens100k
 
 
 class CatboostMovieLensFeatureRecommender(CatboostInterface):
@@ -12,7 +12,7 @@ class CatboostMovieLensFeatureRecommender(CatboostInterface):
 
     @property
     def movielens(self):
-        return MovieLens(self.movielens_directory)
+        return MovieLens100k(self.movielens_directory)
 
     @property
     def pass_user_ids_to_pool(self):

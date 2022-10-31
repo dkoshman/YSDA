@@ -240,7 +240,7 @@ class LightningConfigBuilder(BuilderMixin):
     def build_logger(self) -> pl_loggers.logger.Logger:
         return self.build_class(**self.logger_config)
 
-    def build_callbacks_dict(self) -> dict[str, pl.Callback]:
+    def build_callbacks_dict(self) -> "dict[str, pl.Callback]":
         callbacks = {}
         if self.callbacks_config:
             for callback_name, callback_config in self.callbacks_config.items():

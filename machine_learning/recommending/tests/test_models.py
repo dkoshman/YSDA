@@ -16,7 +16,7 @@ from ..lit import NonGradientRecommenderMixin
 
 from ..models import als, baseline, cat, mf, slim
 from ..models.slim import SLIMRecommender
-from ..movielens import cat as movielens_cat, MovieLens
+from ..movielens import cat as movielens_cat, MovieLens100k
 from .conftest import (
     get_available_devices,
     random_explicit_feedback,
@@ -142,7 +142,7 @@ class MockNonGradientRecommender(
 
 
 def test_catboost_aggregator():
-    movielens = MovieLens()
+    movielens = MovieLens100k()
     explicit = movielens.explicit_feedback_scipy_csr("u1.base")
     recommender_artifact_names = ["als"]
     module = CatboostMovieLensAggregatorFromArtifacts(

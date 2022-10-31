@@ -7,7 +7,7 @@ from machine_learning.recommending.data import (
     SparseDataset,
     SparseDataModuleBase,
 )
-from machine_learning.recommending.movielens.data import MovieLens, ImdbRatings
+from machine_learning.recommending.movielens.data import MovieLens100k, ImdbRatings
 from machine_learning.recommending.tests.conftest import (
     random_explicit_feedback,
     cartesian_products_of_dict_values,
@@ -59,7 +59,7 @@ def test_sparse_datamodule_base():
 
 
 def test_movielens():
-    movielens = MovieLens(path_to_movielens_folder="local/ml-100k")
+    movielens = MovieLens100k(path_to_movielens_folder="local/ml-100k")
     n_users, n_items = movielens.shape
     assert np.isscalar(n_users)
     assert np.isscalar(n_items)

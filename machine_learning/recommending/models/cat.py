@@ -62,12 +62,12 @@ class CatboostInterface(RecommenderModuleBase, FitExplicitInterfaceMixin, ABC):
         ...
 
     @property
-    def cat_features(self) -> list[str]:
+    def cat_features(self) -> "list[str]":
         """The categorical columns in dataframe being passed to pool."""
         return []
 
     @property
-    def text_features(self) -> list[str]:
+    def text_features(self) -> "list[str]":
         """The text columns in dataframe being passed to pool."""
         return []
 
@@ -133,7 +133,7 @@ class CatboostInterface(RecommenderModuleBase, FitExplicitInterfaceMixin, ABC):
 
     def shap(
         self, explicit: "spmatrix" or SparseTensor = None, dataframe=None
-    ) -> tuple[np.ndarray, float, pd.DataFrame]:
+    ) -> "tuple[np.ndarray, float, pd.DataFrame]":
         """
         :param explicit: the explicit feedback for which to calculate shap values
         :param dataframe: or a ready train dataframe

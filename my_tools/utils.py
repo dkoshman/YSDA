@@ -135,11 +135,11 @@ def build_class(*, class_candidates=(), module_candidates=(), class_name, **kwar
 
 class BuilderMixin:
     @property
-    def module_candidates(self) -> list[ModuleType]:
+    def module_candidates(self) -> "list[ModuleType]":
         return []
 
     @property
-    def class_candidates(self) -> list[type]:
+    def class_candidates(self) -> "list[type]":
         return []
 
     def build_class(self, *, class_name, **kwargs) -> Any:

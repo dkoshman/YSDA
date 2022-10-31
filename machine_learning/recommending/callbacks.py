@@ -13,6 +13,7 @@ from pytorch_lightning import loggers as pl_loggers
 from sklearn.decomposition import TruncatedSVD
 import matplotlib.patheffects as pe
 
+from my_tools.lightning import ConvenientCheckpointLogCallback
 from .data import SparseDataModuleInterface
 from .interface import ExplanationMixin
 from .metrics import RecommendingMetrics
@@ -131,14 +132,12 @@ class RecommendingDataOverviewCallback(pl.callbacks.Callback):
             self.plot_explained_variance()
 
 
-class WandbCheckpointCallback(pl.callbacks.ModelCheckpoint):
+class WandbCheckpointCallback(ConvenientCheckpointLogCallback):
     def __init__(self, *args, artifact_name, **kwargs):
         super().__init__(*args, **kwargs)
         self.artifact_name = artifact_name
 
     def on_test_end(self, trainer, pl_module):
-        if not self.best_model_path:
-            self.save_checkpoint(trainer)
         artifact = wandb.Artifact(
             name=self.artifact_name,
             type="checkpoint",
@@ -298,18 +297,17 @@ class RecommendingMetricsCallback(pl.callbacks.Callback):
     ):
         if user_ids is None:
             user_ids = torch.arange(model.n_users)
-        match stage:
-            case "train":
-                filter_already_liked_items = False
-                metrics = self.train_metrics
-            case "val":
-                filter_already_liked_items = True
-                metrics = self.val_metrics
-            case "test":
-                filter_already_liked_items = True
-                metrics = self.test_metrics
-            case _:
-                raise ValueError(f"Unknown stage {stage}")
+        if stage == "train":
+            filter_already_liked_items = False
+            metrics = self.train_metrics
+        elif stage == "val":
+            filter_already_liked_items = True
+            metrics = self.val_metrics
+        elif stage == "test":
+            filter_already_liked_items = True
+            metrics = self.test_metrics
+        else:
+            raise ValueError(f"Unknown stage {stage}")
 
         recommendations = model.recommend(
             user_ids=user_ids,
@@ -361,7 +359,9 @@ class RecommendingExplanationCallback(pl.callbacks.Callback):
         self.my_on_epoch_end(model=pl_module.model, stage="val")
 
     def my_on_epoch_end(
-        self, model: "RecommenderModuleBase", stage: Literal["train", "val", "test", "predict"]
+        self,
+        model: "RecommenderModuleBase",
+        stage: Literal["train", "val", "test", "predict"],
     ):
         if not isinstance(model, ExplanationMixin):
             return
