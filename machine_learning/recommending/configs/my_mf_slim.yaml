@@ -1,9 +1,9 @@
-name: "My MF"
+name: "My MF SLIM"
 model:
-  class_name: MyMFConfidenceRecommender
-  latent_dimension: 100
+  class_name: MyMfSlimConfidenceHybridRecommender
+  latent_dimension: 75
 loss:
-  ratings_deviation: 0.1
+  ratings_deviation: 10
 datamodule:
   num_workers: 4
   batch_size: 1000
@@ -23,5 +23,6 @@ callbacks:
   ConvenientCheckpointLogCallback: {}
   EarlyStopping:
     monitor: val_loss
+    patience: 50
   WandbCheckpointCallback:
-    artifact_name: my_mf
+    artifact_name: my_mf_slim

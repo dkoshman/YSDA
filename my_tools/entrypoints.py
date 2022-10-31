@@ -237,7 +237,7 @@ class LightningConfigBuilder(BuilderMixin):
     def build_model(self):
         return self.build_class(**self.model_config)
 
-    def build_logger(self) -> pl_loggers.logger.Logger:
+    def build_logger(self) -> "pl_loggers.logger.Logger":
         return self.build_class(**self.logger_config)
 
     def build_callbacks_dict(self) -> "dict[str, pl.Callback]":

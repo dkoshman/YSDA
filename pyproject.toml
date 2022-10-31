@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "ysda"
-version = "0.1.2"
+version = "0.1.3"
 description = ""
 authors = ["DimaKoshman <koshmandk@yandex.ru>"]
 readme = "README.md"
@@ -17,7 +17,7 @@ scipy = "^1.7"
 torch = "^1.11.0,<1.13"
 sklearn = "^0.0"
 wandb = "^0.13.3"
-pytorch-lightning = "^1.7.7"
+pytorch-lightning = "~1.6"
 einops = "^0.4.1"
 numba = "^0.56.2"
 protobuf = "3.19.4"

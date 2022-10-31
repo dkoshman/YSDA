@@ -1,5 +1,4 @@
 import itertools
-import sys
 
 from typing import Literal, TYPE_CHECKING
 
@@ -56,9 +55,6 @@ class SparseDataset(Dataset):
     @staticmethod
     def unpack_sparse_kwargs_to_torch_sparse_csr(batch):
         for key, value in batch.items():
-            # match value:
-            #     case {"indices": _, "values": _, "size": _} as kwargs:
-            #         batch[key] = torch.sparse_coo_tensor(**kwargs).to_sparse_csr()
             if isinstance(value, dict) and set(value) == {
                 "indices",
                 "values",
@@ -140,28 +136,6 @@ def build_recommending_sampler(
     sampler_type: Literal["grid", "user", "item"],
     shuffle,
 ):
-    # match sampler_type:
-    #     case "grid":
-    #         grid_batch_size = int(batch_size**2 * n_items / n_users)
-    #         sampler = GridSampler(
-    #             dataset_shape=(n_users, n_items),
-    #             approximate_batch_size=grid_batch_size,
-    #             shuffle=shuffle,
-    #         )
-    #     case "user":
-    #         sampler = UserSampler(
-    #             size=n_users,
-    #             batch_size=batch_size,
-    #             shuffle=shuffle,
-    #         )
-    #     case "item":
-    #         sampler = ItemSampler(
-    #             size=n_items,
-    #             batch_size=batch_size,
-    #             shuffle=shuffle,
-    #         )
-    #     case _:
-    #         raise ValueError(f"Unknown sampler type {sampler_type}.")
     if sampler_type == "grid":
         grid_batch_size = int(batch_size**2 * n_items / n_users)
         sampler = GridSampler(

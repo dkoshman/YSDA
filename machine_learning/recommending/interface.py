@@ -18,9 +18,6 @@ if TYPE_CHECKING:
     from my_tools.utils import SparseTensor, Pickleable
 
 
-# TODO: app on huggingface, telegram bot
-
-
 class RecommenderModuleInterface(torch.nn.Module, abc.ABC):
     @abc.abstractmethod
     def __init__(self, explicit: "SparseTensor" or "spmatrix" or None = None):
@@ -164,7 +161,7 @@ class RecommenderModuleBase(
     def online_recommend(
         self,
         users_explicit: "SparseTensor" or spmatrix,
-        n_recommendations: int or None = None,
+        n_recommendations: int = 10,
     ) -> torch.IntTensor:
         users_explicit = self.to_torch_coo(users_explicit).to(self.device)
         ratings = self.online_ratings(users_explicit)

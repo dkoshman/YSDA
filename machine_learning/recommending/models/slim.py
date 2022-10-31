@@ -18,7 +18,8 @@ from ..interface import RecommenderModuleBase, ExplanationMixin
 from ..utils import plt_figure, wandb_plt_figure
 
 
-# TODO: rewrite slim using lightning loop api or just torch
+# TODO: rewrite slim using lightning loop api or just torch,
+# control for O(n_items ** 2) complexity via density or
 class SLIM(RecommenderModuleBase, WandbLoggerMixin, ExplanationMixin):
     """
     The fitted model has sparse matrix W of shape [n_items, n_items],

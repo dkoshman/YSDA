@@ -1,5 +1,6 @@
 import contextlib
 import os
+import time
 
 import torch
 import wandb
@@ -79,3 +80,11 @@ def wandb_plt_figure(title, *args, **kwargs):
             yield figure
         finally:
             wandb.log({title: wandb.Image(figure)})
+
+
+@contextlib.contextmanager
+def wandb_timeit(name):
+    start = time.time()
+    yield
+    end = time.time()
+    wandb.log({f"time/{name}": end - start})

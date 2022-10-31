@@ -85,7 +85,7 @@ class PersonalizedRankingLoss(RecommendingLossInterface):
         predicted_probs = torch.sigmoid(
             pairwise_difference(model_ratings, model_ratings)
         )
-        # TODO: maybe other order:
+        # maybe in other order:
         # loss = kl_divergence(predicted_probs, estimated_probs)
         raise NotImplementedError
         # This is not a prob distribution!!!

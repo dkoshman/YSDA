@@ -26,6 +26,7 @@ class MovieLensBase:
         return "user_id", "item_id", "rating", "timestamp"
 
     @abc.abstractmethod
+    @functools.lru_cache()
     def __getitem__(self, filename):
         return self.read(filename=filename)
 
@@ -51,58 +52,6 @@ class MovieLens100k(MovieLensBase):
         super().__init__(path_to_movielens_folder)
 
     def __getitem__(self, filename):
-        # match filename:
-        #     case "u.info":
-        #         return self.read(
-        #             filename=filename,
-        #             names=["quantity", "index"],
-        #             index_col="index",
-        #             sep=" ",
-        #         )
-        #     case "u.genre":
-        #         return self.read(
-        #             filename=filename, names=["name", "id"], index_col="id"
-        #         )
-        #     case "u.occupation":
-        #         return self.read(filename=filename, names=["occupation"])
-        #     case "u.user":
-        #         return self.read(
-        #             filename=filename,
-        #             names=["user id", "age", "gender", "occupation", "zip code"],
-        #             index_col="user id",
-        #         )
-        #     case "u.item":
-        #         return self.read(
-        #             filename=filename,
-        #             names=[
-        #                 "movie id",
-        #                 "movie title",
-        #                 "release date",
-        #                 "video release date",
-        #                 "IMDb URL",
-        #                 "unknown",
-        #                 "Action",
-        #                 "Adventure",
-        #                 "Animation",
-        #                 "Children's",
-        #                 "Comedy",
-        #                 "Crime",
-        #                 "Documentary",
-        #                 "Drama",
-        #                 "Fantasy",
-        #                 "Film-Noir",
-        #                 "Horror",
-        #                 "Musical",
-        #                 "Mystery",
-        #                 "Romance",
-        #                 "Sci-Fi",
-        #                 "Thriller",
-        #                 "War",
-        #                 "Western",
-        #             ],
-        #             index_col="movie id",
-        #             encoding_errors="backslashreplace",
-        #         )
         if filename == "u.info":
             return self.read(
                 filename=filename,
@@ -199,15 +148,21 @@ class MovieLens25m(MovieLensBase):
     @functools.lru_cache()
     def shape(self):
         ratings = self["ratings"]
-        n_users = ratings["user_id"].max()
-        n_items = ratings["item_id"].max()
+        n_users = ratings["user_id"].nunique()
+        n_items = ratings["item_id"].nunique()
         return n_users, n_items
 
-    def train_test_split(
-        self,
-        test_proportion=0.1,
-        random_state=42,
-    ):
+    @property
+    @functools.lru_cache()
+    def unique_movie_ids(self):
+        return self["ratings"]["item_id"].unique()
+
+    @property
+    @functools.lru_cache()
+    def links(self):
+        return self["links"]
+
+    def train_test_split(self, test_proportion=0.1, random_state=42):
         ratings = self["ratings"]
         test_size = int(len(ratings) * test_proportion)
         test_index = (
@@ -229,6 +184,37 @@ class MovieLens25m(MovieLensBase):
                 os.path.join(self.path_to_movielens_folder, f"{stage}_ratings.csv"),
                 index=False,
             )
+
+    def tmdb_movie_ids_to_model_item_ids(self, tmdb_movie_ids: np.array):
+        series = pd.Series(
+            index=self.unique_movie_ids, data=np.arange(len(self.unique_movie_ids))
+        )
+        model_item_ids = series.loc[tmdb_movie_ids].values
+        return model_item_ids
+
+    def model_item_ids_to_tmdb_movie_ids(self, item_ids: np.array):
+        tmdb_movie_ids = self.unique_movie_ids[item_ids]
+        return tmdb_movie_ids
+
+    @staticmethod
+    def tmdb_user_ids_to_model_user_ids(tmdb_user_ids: np.array):
+        return tmdb_user_ids - 1
+
+    def to_scipy_csr(self, dataframe):
+        data = dataframe["rating"].to_numpy()
+
+        user_ids = dataframe["user_id"].to_numpy()
+        row_ids = self.tmdb_user_ids_to_model_user_ids(user_ids)
+
+        item_ids = dataframe["item_id"].to_numpy()
+        col_ids = self.tmdb_movie_ids_to_model_item_ids(item_ids)
+
+        explicit_feedback = coo_matrix((data, (row_ids, col_ids)), shape=self.shape)
+        return explicit_feedback.tocsr()
+
+    def tmdb_movie_ids_to_imdb_movie_ids(self, tmdb_movie_ids: np.array):
+        imdb_movie_ids = self.links["imdbId"].loc[tmdb_movie_ids].values
+        return imdb_movie_ids
 
 
 class ImdbRatings:

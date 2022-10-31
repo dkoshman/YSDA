@@ -1,7 +1,7 @@
 name: "SVD run"
 model:
   class_name: SVDRecommender
-  n_components: 200
+  n_components: 1000
 datamodule:
   directory: local/ml-25m
   test_proportion: 0.01
