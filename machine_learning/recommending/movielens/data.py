@@ -160,7 +160,7 @@ class MovieLens25m(MovieLensBase):
     @property
     @functools.lru_cache()
     def links(self):
-        return self["links"]
+        return self["links"].set_index("movieId")
 
     def train_test_split(self, test_proportion=0.1, random_state=42):
         ratings = self["ratings"]

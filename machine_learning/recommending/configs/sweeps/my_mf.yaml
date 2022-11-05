@@ -20,7 +20,7 @@ parameters:
     num_workers: 4
     batch_size: 100
   lightning_module:
-    class_name: MovieLensMyMFRecommender
+    class_name: MovieLensMFRecommender
   optimizer:
     class_name: Adam
   trainer:

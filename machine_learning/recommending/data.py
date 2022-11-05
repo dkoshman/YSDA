@@ -5,7 +5,7 @@ from typing import Literal, TYPE_CHECKING
 import numpy as np
 import torch
 
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, IterableDataset
 
 from my_tools.utils import torch_sparse_slice
 
@@ -26,18 +26,12 @@ class SparseDataset(Dataset):
         return self.explicit.shape
 
     def __getitem__(self, indices):
-        """
-        Here's where implicit feedback is implicitly generated from explicit feedback.
-        For datasets where only implicit feedback is available, override this logic.
-        """
         user_ids = indices.get("user_ids", torch.arange(self.shape[0]))
         item_ids = indices.get("item_ids", torch.arange(self.shape[1]))
 
         explicit = torch_sparse_slice(self.explicit, user_ids, item_ids)
-        implicit = explicit.bool().int()
         return dict(
             explicit=self.pack_sparse_tensor(explicit),
-            implicit=self.pack_sparse_tensor(implicit),
             user_ids=user_ids,
             item_ids=item_ids,
         )
@@ -127,6 +121,10 @@ class GridSampler:
             batch_indices_product = np.array(list(batch_indices_product), dtype=object)
             batch_indices_product = np.random.permutation(batch_indices_product)
         yield from ({"user_ids": i[0], "item_ids": i[1]} for i in batch_indices_product)
+
+
+class GridIterableDataset(GridSampler, IterableDataset):
+    pass
 
 
 def build_recommending_sampler(

@@ -1,30 +1,37 @@
-name: "My MF SLIM"
+name: "My MF SLIM 25m"
 model:
   class_name: MFSlimRecommender
-  latent_dimension: 100
+  latent_dimension: 500
   l2_regularization: 0.0
   l1_regularization: 1.0e-6
 loss:
   class_name: MSELoss
 datamodule:
+  directory: local/ml-25m
   num_workers: 4
-  batch_size: 1000
+  batch_size: 4000
+  val_batch_size: 1000
+  test_batch_size: 1000
 lightning_module:
-  class_name: MovieLensMFRecommender
+  class_name: MovieLens25mMFRecommender
 trainer:
-  max_epochs: 1000
+  max_epochs: -1
   accelerator: gpu
-  devices: [1]
-  check_val_every_n_epoch: 10
+  devices: [2]
   log_every_n_steps: 1
+  val_check_interval: 500
+  accumulate_grad_batches: 10
+  limit_val_batches: 20
 callbacks:
   EarlyStopping:
     monitor: val_ndcg@10
-    mode: max
     check_on_train_epoch_end: False
+    mode: max
+    patience: 1
   WandbCheckpointCallback:
     monitor: val_ndcg@10
     mode: max
     save_on_train_epoch_end: False
-    artifact_name: my_mf_slim
-
+    artifact_name: my_mf_slim_movielens_25m
+  RecommendingMetricsCallback:
+    k: 10

@@ -22,13 +22,8 @@ class RecommendingBuilder(LightningConfigBuilder):
         ]
 
     def build_lightning_module(self):
-        lightning_module = self.build_class(
-            datamodule_config=self.datamodule_config,
-            model_config=self.model_config,
-            loss_config=self.loss_config,
-            optimizer_config=self.optimizer_config,
-            **self.lightning_config,
-        )
+        class_name = self.config["lightning_module"]["class_name"]
+        lightning_module = self.build_class(class_name=class_name, **self.config)
         return lightning_module
 
 

@@ -83,8 +83,20 @@ def wandb_plt_figure(title, *args, **kwargs):
 
 
 @contextlib.contextmanager
-def wandb_timeit(name):
+def wandb_timeit(name, **kwargs):
     start = time.time()
     yield
     end = time.time()
-    wandb.log({f"time/{name}": end - start})
+    wandb.log({f"time/{name}": end - start, **kwargs})
+
+
+def tensor_size_in_bytes(tensor):
+    return tensor.numel() * tensor.element_size()
+
+
+def batch_size_in_bytes(batch):
+    if torch.is_tensor(batch):
+        return tensor_size_in_bytes(batch)
+    elif isinstance(batch, dict):
+        return sum(batch_size_in_bytes(i) for i in batch.values())
+    return 0

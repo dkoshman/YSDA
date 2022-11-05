@@ -110,7 +110,8 @@ def recall(relevance, n_relevant_items_per_user):
     Very sensitive to size of recommendations.
     """
     return np.mean(
-        einops.reduce(relevance, "user item -> user", "sum") / n_relevant_items_per_user
+        einops.reduce(relevance, "user item -> user", "sum")
+        / np.where(n_relevant_items_per_user == 0, 1, n_relevant_items_per_user)
     )
 
 

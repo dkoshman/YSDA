@@ -1,19 +1,19 @@
 name: "SVD run"
 model:
   class_name: SVDRecommender
-  n_components: 1000
+  n_components: 100
 datamodule:
   directory: local/ml-25m
-  test_proportion: 0.01
-  batch_size: 10000
+  batch_size: 1000
 lightning_module:
   class_name: MovieLens25mNonGradientRecommender
 trainer:
   num_sanity_val_steps: 0
   limit_train_batches: 2
   limit_val_batches: 2
-  limit_test_batches: 2
 callbacks:
-  ConvenientCheckpointLogCallback: {}
   WandbCheckpointCallback:
-    artifact_name: svd
+    monitor: val_ndcg@10
+    mode: max
+    save_on_train_epoch_end: False
+    artifact_name: svd_movielens_25m

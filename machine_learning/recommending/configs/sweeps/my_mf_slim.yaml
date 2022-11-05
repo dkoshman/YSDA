@@ -6,33 +6,40 @@ metric:
   name: test_ndcg@10.mean
 parameters:
   model:
-    class_name: MyMfSlimConfidenceHybridRecommender
+    class_name: MyMfSlimConfidenceRecommender
     latent_dimension:
-      min: 25
-      max: 125
+      min: 10
+      max: 200
+    l2_regularization: 0.0
+    l1_regularization: 0.0
   loss:
-    ratings_deviation:
-      values:
-        - 1.0e-1
-        - 1.0e-0
-        - 1.0e+1
-        - 1.0e+2
+    kind: confidence
+    ratings_deviation: 1
   datamodule:
     num_workers: 4
     batch_size: 1000
   lightning_module:
-    class_name: MovieLensMyMFRecommender
+    class_name: MovieLensMFRecommender
   optimizer:
     class_name: Adam
+#    lr:
+#      values:
+#
+#  lr_scheduler:
+#    class_name: LRLambda
+#    warmup_epochs:
+#      min: 10
+#      max: 100
   trainer:
     max_epochs: 500
     check_val_every_n_epoch: 10
     log_every_n_steps: 1
     accelerator: gpu
-    devices: [2]
+    devices: [5]
     default_root_dir: local
     amp_backend: native
   callbacks:
     EarlyStopping:
-      monitor: val_loss
-      patience: 20
+      monitor: val_ndcg@10
+      check_on_train_epoch_end: False
+      mode: max

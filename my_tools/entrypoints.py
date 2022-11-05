@@ -1,15 +1,18 @@
 import sys
 
 from argparse import ArgumentParser
-from typing import Callable, Any
+from typing import Callable, Any, TYPE_CHECKING
 
 import pytorch_lightning as pl
 import wandb
 import yaml
 
-from pytorch_lightning import loggers as pl_loggers
+from pytorch_lightning import loggers, profiler
 
 from my_tools.utils import full_traceback, BuilderMixin
+
+if TYPE_CHECKING:
+    import torch
 
 
 class WandbSweepProcessor:
@@ -204,55 +207,60 @@ class LightningConfigBuilder(BuilderMixin):
         }
         """
         self.config = config.copy()
-        self.datamodule_config = config.get("datamodule")
-        self.model_config = config.get("model")
-        self.loss_config = config.get("loss")
-        self.lightning_config = config.get("lightning_module")
-        self.optimizer_config = config.get("optimizer")
-        self.logger_config = config.get("logger")
-        if self.logger_config:
-            if "class_name" not in self.logger_config:
-                self.logger_config.update(class_name="WandbLogger")
-            if "project" not in self.logger_config:
-                self.logger_config.update(project=config.get("project"))
-        self.callbacks_config = config.get("callbacks")
-        self.trainer_config = config.get("trainer", {})
-        if "class_name" not in self.trainer_config:
-            self.trainer_config.update(class_name="Trainer")
 
     @property
     def module_candidates(self):
-        return super().module_candidates + [pl.callbacks, pl_loggers]
+        return super().module_candidates + [pl.callbacks, loggers, profiler]
 
     @property
     def class_candidates(self):
-        return super().class_candidates + [pl.Trainer, pl_loggers.WandbLogger]
+        return super().class_candidates + [pl.Trainer, loggers.WandbLogger]
 
     def build_lightning_module(self) -> pl.LightningModule:
-        return self.build_class(**self.lightning_config)
+        lightning_config = self.config["lightning_module"]
+        return self.build_class(**lightning_config)
 
     def build_datamodule(self) -> pl.LightningDataModule:
-        return self.build_class(**self.datamodule_config)
+        datamodule_config = self.config["datamodule"]
+        return self.build_class(**datamodule_config)
 
-    def build_model(self):
-        return self.build_class(**self.model_config)
+    def build_model(self) -> "torch.nn.Module":
+        model_config = self.config["model"]
+        return self.build_class(**model_config)
 
     def build_logger(self) -> "pl_loggers.logger.Logger":
-        return self.build_class(**self.logger_config)
+        logger_config = self.config["logger"]
+        if logger_config:
+            if "class_name" not in logger_config:
+                logger_config.update(class_name="WandbLogger")
+            if "project" not in logger_config:
+                logger_config.update(project=self.config.get("project"))
+        return self.build_class(**logger_config)
 
     def build_callbacks_dict(self) -> "dict[str, pl.Callback]":
+        callbacks_config = self.config.get("callbacks")
         callbacks = {}
-        if self.callbacks_config:
-            for callback_name, callback_config in self.callbacks_config.items():
+        if callbacks_config:
+            for callback_name, callback_config in callbacks_config.items():
                 callbacks[callback_name] = self.build_class(
                     class_name=callback_name, **callback_config
                 )
         return callbacks
 
+    def build_profiler(self) -> "profiler.Profiler" or None:
+        if profiler_config := self.config.get("profiler"):
+            profiler = self.build_class(**profiler_config)
+            return profiler
+
     def build_trainer(self) -> pl.Trainer:
+        trainer_config = self.config.get("trainer", {})
+        if "class_name" not in trainer_config:
+            trainer_config["class_name"] = "Trainer"
+
+        callbacks = list(self.build_callbacks_dict().values())
+        logger = self.build_logger()
+        profiler = self.build_profiler()
         trainer = self.build_class(
-            callbacks=list(self.build_callbacks_dict().values()),
-            logger=self.build_logger(),
-            **self.trainer_config,
+            callbacks=callbacks, logger=logger, profiler=profiler, **trainer_config
         )
         return trainer

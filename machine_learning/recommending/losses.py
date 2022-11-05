@@ -1,56 +1,46 @@
-import abc
+from typing import TYPE_CHECKING
 
 import einops
 import torch
 import wandb
 
-from my_tools.utils import SparseTensor
-
+from machine_learning.recommending.interface import RecommendingLossInterface
 from machine_learning.recommending.maths import kl_divergence, pairwise_difference
 
-
-class RecommendingLossInterface:
-    @abc.abstractmethod
-    def __call__(
-        self, explicit: SparseTensor, model_ratings: torch.FloatTensor or SparseTensor
-    ) -> torch.FloatTensor:
-        ...
+if TYPE_CHECKING:
+    from machine_learning.recommending.interface import ConfidenceRecommenderBase
 
 
-class MSEConfidenceLoss(RecommendingLossInterface):
-    def __init__(self, confidence=1):
-        """
-        :param confidence: confidence that items with missing ratings
-        are irrelevant to users, with values in range [0, 1], if
-        confidence is equal to 1, it's just mse loss
-        """
-        if not 0 <= confidence <= 1:
-            raise ValueError(
-                f"Confidence must be in range [0, 1], "
-                f"but received confidence is {confidence}"
-            )
-        self.confidence = confidence
-
-    def __call__(self, explicit, model_ratings):
+class MSELoss(RecommendingLossInterface):
+    def __call__(self, model, explicit, user_ids, item_ids):
+        ratings = model(user_ids=user_ids, item_ids=item_ids)
         explicit = explicit.to_dense()
-        model_ratings = model_ratings.to_dense()
-        explicit_mask = explicit > 0
-        loss = (
-            (explicit_mask + ~explicit_mask * self.confidence)
-            * (explicit - model_ratings) ** 2
-        ).mean()
+        loss = ((ratings - explicit) ** 2).mean()
         return loss
 
 
-class ImplicitAwareLoss(RecommendingLossInterface):
-    def __call__(self, explicit, model_ratings):
+# TODO: actually add confience here
+class MSEConfidenceLoss(RecommendingLossInterface):
+    """Loss to pair up with ConfidenceRecommenderBase."""
+
+    def __init__(self, confidence=0.9, ratings_deviation=1):
+        """
+        :param confidence: the level of confidence that unrated items are irrelevant
+        :param ratings_deviation: the parameter of ratings normal distribution
+        """
+        self.confidence = confidence
+        self.ratings_variance = ratings_deviation**2
+
+    def __call__(
+        self, model: "ConfidenceRecommenderBase", explicit, user_ids, item_ids
+    ):
+        ratings = model.ratings(user_ids=user_ids, item_ids=item_ids)
+        probability = model.probability(user_ids=user_ids, item_ids=item_ids)
         explicit = explicit.to_dense()
-        model_ratings = model_ratings.to_dense()
-        explicit_mask = explicit > 0
-        loss = (
-            (explicit_mask + ~explicit_mask * self.confidence)
-            * (explicit - model_ratings) ** 2
-        ).mean()
+        log_normal = (ratings - explicit) ** 2 / (2 * self.ratings_variance)
+        losses = log_normal - torch.log(probability)
+        sample_mask = explicit > 0
+        loss = (sample_mask * losses).sum() / sample_mask.sum()
         return loss
 
 

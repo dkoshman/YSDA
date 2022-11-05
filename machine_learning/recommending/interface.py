@@ -2,7 +2,6 @@ import abc
 from typing import TYPE_CHECKING, Any
 
 import torch
-import wandb
 from torch import IntTensor
 
 from machine_learning.recommending.maths import (
@@ -10,7 +9,6 @@ from machine_learning.recommending.maths import (
     cosine_distance,
     weighted_average,
 )
-from my_tools.models import IgnoreShapeMismatchOnLoadStateDictMixin
 from my_tools.utils import to_torch_coo, to_scipy_coo, torch_sparse_slice
 
 if TYPE_CHECKING:
@@ -19,23 +17,10 @@ if TYPE_CHECKING:
 
 
 class RecommenderModuleInterface(torch.nn.Module, abc.ABC):
-    @abc.abstractmethod
-    def __init__(self, explicit: "SparseTensor" or "spmatrix" or None = None):
-        """
-        :param explicit: the explicit feedback matrix,
-        it is allowed to be None only when loading from state dict
-        """
-        super().__init__()
-
     @property
     @abc.abstractmethod
-    def n_users(self) -> int:
-        ...
-
-    @property
-    @abc.abstractmethod
-    def n_items(self) -> int:
-        ...
+    def device(self):
+        """Returns the device on which the module resides at the moment."""
 
     @abc.abstractmethod
     def forward(
@@ -65,28 +50,31 @@ class RecommenderModuleInterface(torch.nn.Module, abc.ABC):
         """Generate recommendations for new users defined by their explicit feedback."""
 
 
-class RecommenderModuleBase(
-    IgnoreShapeMismatchOnLoadStateDictMixin, RecommenderModuleInterface
-):
-    def __init__(self, explicit: "SparseTensor" or "spmatrix" or None = None):
+class RecommenderModuleBase(RecommenderModuleInterface):
+    def __init__(
+        self,
+        n_users,
+        n_items,
+        explicit: "SparseTensor" or "spmatrix" or None = None,
+        persistent_explicit=True,
+    ):
         super().__init__()
+        self.n_users = n_users
+        self.n_items = n_items
         if explicit is not None:
             explicit = to_torch_coo(explicit)
-        self.register_buffer(name="explicit", tensor=explicit)
+        self.register_buffer(
+            name="explicit", tensor=explicit, persistent=persistent_explicit
+        )
         self.to_torch_coo = to_torch_coo
         self.to_scipy_coo = to_scipy_coo
 
     @property
     def device(self):
-        return self.explicit.device
-
-    @property
-    def n_users(self):
-        return 0 if self.explicit is None else self.explicit.shape[0]
-
-    @property
-    def n_items(self):
-        return 0 if self.explicit is None else self.explicit.shape[1]
+        if self.explicit is not None:
+            return self.explicit.device
+        for parameter in self.parameters():
+            return parameter.device
 
     @abc.abstractmethod
     def forward(
@@ -182,19 +170,36 @@ class RecommenderModuleBase(
         This is torch.nn.Module method, this stub is just for clarity.
         """
 
-    def save_state_to_artifact(self, artifact_name):
-        if wandb.run is None:
-            raise ValueError("Wandb run not initialized, can't save artifact.")
 
-        state_dict_path = "tmp.pt"
-        torch.save(self.state_dict(), state_dict_path)
-        artifact = wandb.Artifact(
-            name=artifact_name,
-            type="state_dict",
-            metadata=dict(class_name=self.__class__.__name__),
-        )
-        artifact.add_file(local_path=state_dict_path, name="state_dict")
-        wandb.run.log_artifact(artifact)
+class ConfidenceRecommenderBase(RecommenderModuleBase, abc.ABC):
+    """
+    Recommender based on the following data generation model:
+    1. Given set of users U and set of items I,
+    a user-item pair [u, i] is chosen with probability p_ui.
+    2. Rating r_ui is generated from normal distribution N(mean_ui, var)
+
+    Then by maximum likelihood principle, we are seeking the parameters defined by:
+        argmax(P_sample) =
+        argmax( product_ui( p_ui * N_{mean_ui, var}(r_ui)))) =
+        argmax( sum_ui ( log p_ui - (mean_ui - r_ui) ** 2 / (2 * var))) =
+        argmin( sum_ui ( (mean_ui - r_ui) ** 2 / ( 2 * var) - log p_ui)))
+
+    And the predicted relevance of item i for user u is:
+        relevance_ui = p_ui * mean_ui
+    """
+
+    @abc.abstractmethod
+    def ratings(self, user_ids, item_ids):
+        ...
+
+    @abc.abstractmethod
+    def probability(self, user_ids, item_ids):
+        ...
+
+    def forward(self, user_ids, item_ids):
+        ratings = self.ratings(user_ids=user_ids, item_ids=item_ids)
+        probability = self.probability(user_ids=user_ids, item_ids=item_ids)
+        return ratings * probability
 
 
 class FitExplicitInterfaceMixin:
@@ -224,3 +229,15 @@ class ExplanationMixin:
         :param log: whether to log explanations to wandb
         :param logging_prefix: the prefix for log entries
         """
+
+
+class RecommendingLossInterface:
+    @abc.abstractmethod
+    def __call__(
+        self,
+        model: "RecommenderModuleBase",
+        explicit: "SparseTensor",
+        user_ids: torch.IntTensor,
+        item_ids: torch.IntTensor,
+    ) -> torch.FloatTensor:
+        ...

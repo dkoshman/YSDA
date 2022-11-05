@@ -84,7 +84,7 @@ def test_recommending_explanation_callback():
     )
     with wandb.init(project="Testing", dir="local", mode="offline"):
         for cls in [SLIM, ALSjit]:
-            callback.on_epoch_end(model=cls(explicit=explicit),stage="test")
+            callback.on_epoch_end(model=cls(explicit=explicit), stage="test")
 
 
 def test_recommending_data_overview_callback():

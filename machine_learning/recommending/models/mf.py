@@ -1,28 +1,28 @@
-import abc
 import copy
 
 import torch
+from torch.utils.data import DataLoader
 
 from my_tools.models import register_regularization_hook
 from my_tools.utils import to_torch_coo, torch_sparse_slice
 
 from ..lit import LitRecommenderBase
-from ..data import SparseDataset
-from ..interface import RecommenderModuleBase
-from ..utils import build_bias, build_weight
+from ..data import SparseDataset, build_recommending_dataloader, GridIterableDataset
+from ..interface import RecommenderModuleBase, ConfidenceRecommenderBase
+from ..utils import build_bias, build_weight, batch_size_in_bytes, wandb_timeit
 
 
 class MatrixFactorization(RecommenderModuleBase):
     """Predicted_rating = user_factors @ item_factors, with bias and L2 regularization"""
 
-    def __init__(self, explicit=None, latent_dimension=10, weight_decay=1.0e-3):
-        super().__init__(explicit=explicit)
+    def __init__(self, latent_dimension=10, weight_decay=1.0e-3, **kwargs):
+        super().__init__(**kwargs)
         self.weight_decay = weight_decay
         self.user_weight = build_weight(self.n_users, latent_dimension)
         self.user_bias = build_bias(self.n_users, 1)
         self.item_weight = build_weight(self.n_items, latent_dimension)
         self.item_bias = build_bias(self.n_items, 1)
-        self.bias = torch.nn.Parameter(torch.zeros(1))
+        self.bias = build_bias(1)
 
     def forward(self, user_ids, item_ids):
         user_weight = self.user_weight[user_ids]
@@ -82,55 +82,15 @@ class ConstrainedProbabilityMatrixFactorization(MatrixFactorization):
         return ratings
 
 
-class MyMfSlimHybridRecommender(RecommenderModuleBase):
-    def __init__(self, explicit=None, latent_dimension=10):
-        super().__init__(explicit=explicit)
-        self.mf_linear = MFLinear(
-            in_dim=self.n_items,
-            latent_dim=latent_dimension,
-            out_dim=self.n_items,
-            bias=True,
-        )
-
-    def forward(self, user_ids, item_ids):
-        users_explicit = torch_sparse_slice(self.explicit, row_ids=user_ids)
-        ratings = self.online_ratings(users_explicit=users_explicit)
-        return ratings[:, item_ids]
-
-    def online_ratings(self, users_explicit):
-        users_explicit = users_explicit.to(self.device, torch.float32)
-        ratings = self.mf_linear(users_explicit)
-        return ratings
-
-
-class MFConfidenceRecommenderBase(RecommenderModuleBase, abc.ABC):
-    @abc.abstractmethod
-    def ratings(self, user_ids, item_ids):
-        ...
-
-    @abc.abstractmethod
-    def probability(self, user_ids, item_ids):
-        ...
-
-    def forward(self, user_ids, item_ids):
-        ratings = self.ratings(user_ids=user_ids, item_ids=item_ids)
-        probability = self.probability(user_ids=user_ids, item_ids=item_ids)
-        return ratings * probability
-
-
-class MyMFConfidenceRecommender(MFConfidenceRecommenderBase):
-    def __init__(self, explicit=None, latent_dimension=10):
-        super().__init__(explicit=explicit)
+class MfConfidenceRecommender(ConfidenceRecommenderBase):
+    def __init__(self, latent_dimension=10, weight_decay=0.0, **kwargs):
+        super().__init__(**kwargs)
         self.ratings_mf = MatrixFactorization(
             latent_dimension=latent_dimension,
-            weight_decay=0,
-            explicit=explicit,
+            weight_decay=weight_decay,
+            explicit=self.explicit,
         )
-        self.confidence_mf = MatrixFactorization(
-            latent_dimension=latent_dimension,
-            weight_decay=0,
-            explicit=explicit,
-        )
+        self.confidence_mf = copy.deepcopy(self.ratings_mf)
 
     def ratings(self, user_ids, item_ids):
         return self.ratings_mf(user_ids=user_ids, item_ids=item_ids)
@@ -142,65 +102,95 @@ class MyMFConfidenceRecommender(MFConfidenceRecommenderBase):
         return in_sample_probability
 
 
-class MFLinear(torch.nn.Module):
-    """Factorized linear layer: y = x @ encoder @ decoder + bias"""
+class MFSlimRecommender(RecommenderModuleBase):
+    """
+    y = x @ w + bias, w = (1 - I) * (encoder @ decoder)
 
-    def __init__(self, in_dim, latent_dim, out_dim, bias=True):
-        super().__init__()
-        self.encoder = build_weight(in_dim, latent_dim)
-        self.decoder = build_weight(latent_dim, out_dim)
-        self.bias = build_bias(out_dim) if bias else 0
+    Zeroing out the diagonal to prevent model from fitting to
+    the identity matrix and enforcing the model to predict
+    item's relevance based on other items. Slim-like models
+    are nice because they work online, are interpretable,
+    simple and scalable.
+    """
 
-    def forward(self, x):
-        out = x @ self.encoder @ self.decoder + self.bias
-        return out
+    def __init__(
+        self,
+        latent_dimension=10,
+        l2_regularization=0.0,
+        l1_regularization=0.0,
+        **kwargs,
+    ):
+        super().__init__(persistent_explicit=False, **kwargs)
+        self.encoder = build_weight(self.n_items, latent_dimension)
+        self.decoder = build_weight(latent_dimension, self.n_items)
+        self.item_bias = build_bias(self.n_items)
+        self.bias = build_bias(1)
+        self.l2_regularization = l2_regularization
+        self.l1_regularization = l1_regularization
 
+    def forward(self, user_ids, item_ids):
+        users_explicit = torch_sparse_slice(self.explicit, row_ids=user_ids)
+        ratings = self.online_ratings(users_explicit=users_explicit)
+        return ratings[:, item_ids]
 
-class MyMfSlimConfidenceHybridRecommender(MFConfidenceRecommenderBase):
-    def __init__(self, explicit=None, latent_dimension=10):
-        super().__init__(explicit=explicit)
-        self.ratings_mf = MFLinear(
-            in_dim=self.n_items,
-            latent_dim=latent_dimension,
-            out_dim=self.n_items,
-            bias=True,
+    def online_ratings(self, users_explicit):
+        users_explicit = users_explicit.to(self.device, torch.float32)
+        encoder = self.encoder.clone()
+        decoder = self.decoder.clone()
+        diag = torch.einsum("id, di -> i", encoder, decoder)
+        ratings = (
+            users_explicit @ encoder @ decoder
+            - users_explicit.to_dense() * diag
+            + self.item_bias
+            + self.bias
         )
-        self.ratings_user_bias = build_bias(self.n_users, 1)
-        self.ratings_bias = torch.nn.Parameter(torch.zeros(1))
-        self.confidence_mf = copy.deepcopy(self.ratings_mf)
-        self.confidence_user_bias = build_bias(self.n_users, 1)
-        self.confidence_bias = torch.nn.Parameter(torch.zeros(1))
+        if self.l2_regularization > 0 or self.l1_regularization > 0:
+            for parameter in [encoder, decoder]:
+                register_regularization_hook(
+                    tensor=parameter,
+                    l2_coefficient=self.l2_regularization,
+                    l1_coefficient=self.l1_regularization,
+                )
+        return ratings
+
+
+class MfSlimConfidenceRecommender(ConfidenceRecommenderBase):
+    def __init__(
+        self,
+        latent_dimension=10,
+        l2_regularization=0.0,
+        l1_regularization=0.0,
+        **kwargs,
+    ):
+        super().__init__(persistent_explicit=False, **kwargs)
+        self.ratings_mfs = MFSlimRecommender(
+            explicit=self.explicit,
+            latent_dimension=latent_dimension,
+            l2_regularization=l2_regularization,
+            l1_regularization=l1_regularization,
+        )
+        self.confidence_mfs = copy.deepcopy(self.ratings_mfs)
 
     def probability(self, user_ids, item_ids):
-        probability = self.online_probability(
-            users_explicit=torch_sparse_slice(self.explicit, row_ids=user_ids),
-            user_bias=self.confidence_user_bias[user_ids],
-        )
+        users_explicit = torch_sparse_slice(self.explicit, row_ids=user_ids)
+        probability = self.online_probability(users_explicit=users_explicit)
         return probability[:, item_ids]
 
-    def online_probability(self, users_explicit, user_bias=None):
+    def online_probability(self, users_explicit):
         users_explicit = users_explicit.to(self.device, torch.float32)
-        if user_bias is None:
-            user_bias = self.confidence_user_bias.mean(0)
-        confidence = (
-            self.confidence_mf(users_explicit) + user_bias + self.confidence_bias
-        )
+        confidence = self.confidence_mfs(users_explicit)
         confidence = torch.sigmoid(confidence)
         in_sample_probability = confidence / confidence.sum()
         return in_sample_probability
 
     def ratings(self, user_ids, item_ids):
-        ratings = self.online_ratings(
-            users_explicit=torch_sparse_slice(self.explicit, row_ids=user_ids),
-            user_bias=self.ratings_user_bias[user_ids],
-        )
+        users_explicit = torch_sparse_slice(self.explicit, row_ids=user_ids)
+        ratings = self.online_ratings(users_explicit=users_explicit)
         return ratings[:, item_ids]
 
-    def online_ratings(self, users_explicit, user_bias=None):
+    def online_ratings(self, users_explicit):
         users_explicit = users_explicit.to(self.device, torch.float32)
-        if user_bias is None:
-            user_bias = self.ratings_user_bias.mean(0)
-        ratings = self.ratings_mf(users_explicit) + user_bias + self.ratings_bias
+        ratings = self.ratings_mfs(users_explicit)
         return ratings
 
 
@@ -210,70 +200,73 @@ class MFRecommender(LitRecommenderBase):
         return super().class_candidates + [
             MatrixFactorization,
             ConstrainedProbabilityMatrixFactorization,
-            MyMfSlimHybridRecommender,
+            MFSlimRecommender,
+            MfConfidenceRecommender,
+            MfSlimConfidenceRecommender,
         ]
 
     def train_dataloader(self):
-        return self.build_dataloader(
-            dataset=SparseDataset(self.train_explicit()),
-            sampler_type="grid",
+        config = self.hparams["datamodule"]
+        n_items = self.hparams["n_items"]
+        n_users = self.hparams["n_users"]
+        batch_size = config.get("batch_size", 100)
+        grid_batch_size = int(batch_size**2 * n_items / n_users)
+        dataset = GridIterableDataset(
+            dataset_shape=(n_users, n_items),
+            approximate_batch_size=grid_batch_size,
             shuffle=True,
         )
+        num_workers = config.get("num_workers", 0)
+        dataloader = DataLoader(
+            dataset=dataset,
+            batch_size=None,
+            num_workers=num_workers,
+            persistent_workers=config.get("persistent_workers", False),
+            pin_memory=isinstance(num_workers, int) and num_workers > 1,
+        )
+        return dataloader
 
-    def common_step(self, batch):
-        ratings = self(**batch)
-        loss = self.loss(explicit=batch["explicit"], model_ratings=ratings)
-        return loss
+    def val_dataloader(self):
+        config = self.hparams["datamodule"]
+        batch_size = config.get(
+            "val_batch_size", self.hparams["datamodule"].get("batch_size", 100)
+        )
+        return build_recommending_dataloader(
+            dataset=SparseDataset(self.val_explicit()),
+            sampler_type="user",
+            batch_size=batch_size,
+            num_workers=config.get("num_workers", 0),
+            persistent_workers=config.get("persistent_workers", False),
+        )
 
+    def test_dataloader(self):
+        config = self.hparams["datamodule"]
+        batch_size = config.get(
+            "test_batch_size", self.hparams["datamodule"].get("batch_size", 100)
+        )
+        return build_recommending_dataloader(
+            dataset=SparseDataset(self.test_explicit()),
+            sampler_type="user",
+            batch_size=batch_size,
+            num_workers=config.get("num_workers", 0),
+            persistent_workers=config.get("persistent_workers", False),
+        )
+
+    @wandb_timeit("training_step")
     def training_step(self, batch, batch_idx):
-        loss = self.common_step(batch)
+        self.log("train_batch_size_in_bytes", float(batch_size_in_bytes(batch)))
+        explicit = torch_sparse_slice(
+            sparse_matrix=self.model.explicit,
+            row_ids=batch["user_ids"],
+            col_ids=batch["item_ids"],
+        ).to(self.device)
+        loss = self.loss(model=self.model, explicit=explicit, **batch)
         self.log("train_loss", loss)
         return loss
 
+    @wandb_timeit("validation_step")
     def validation_step(self, batch, batch_idx):
-        loss = self.common_step(batch)
+        self.log("val_batch_size_in_bytes", float(batch_size_in_bytes(batch)))
+        loss = self.loss(model=self.model, **batch)
         self.log("val_loss", loss)
-        return loss
-
-
-# TODO: add regularization to mfslim, why is regular mf exhibiting double minimum?
-#  remove bias from mf? add more logs to find out whats going on, add SWA
-class MyMFRecommender(MFRecommender):
-    """
-    Recommender based on the following data generation model:
-    1. Given set of users U and set of items I,
-    a user-item pair [u, i] is chosen with probability p_ui.
-    2. Rating r_ui is generated from normal distribution N(mean_ui, var)
-
-    Then by maximum likelihood principle, we are seeking the parameters defined by:
-        argmax(P_sample) =
-        argmax( product_ui( p_ui * N_{mean_ui, var}(r_ui)))) =
-        argmax( sum_ui ( log p_ui - (mean_ui - r_ui) ** 2 / (2 * var))) =
-        argmin( sum_ui ( (mean_ui - r_ui) ** 2 / ( 2 * var) - log p_ui)))
-
-    And the predicted relevance of item i for user u is:
-        relevance_ui = p_ui * mean_ui
-    """
-
-    @property
-    def class_candidates(self):
-        return super().class_candidates + [
-            MyMFConfidenceRecommender,
-            MyMfSlimConfidenceHybridRecommender,
-        ]
-
-    def common_step(self, batch):
-        explicit = batch["explicit"].to_dense()
-        user_ids = batch["user_ids"]
-        item_ids = batch["item_ids"]
-
-        ratings = self.model.ratings(user_ids=user_ids, item_ids=item_ids)
-        probability = self.model.probability(user_ids=user_ids, item_ids=item_ids)
-
-        sample_mask = explicit > 0
-        var = self.hparams["loss_config"]["ratings_deviation"] ** 2
-        loss = (
-            sample_mask
-            * ((ratings - explicit) ** 2 / (2 * var) - torch.log(probability))
-        ).sum() / sample_mask.sum()
         return loss

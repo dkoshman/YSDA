@@ -10,6 +10,9 @@ from .cat import CatboostExplicitRecommender, CatboostAggregatorFromArtifacts
 from .mf import (
     MatrixFactorization,
     ConstrainedProbabilityMatrixFactorization,
+    MfConfidenceRecommender,
+    MfSlimConfidenceRecommender,
+    MFSlimRecommender,
     MFRecommender,
 )
 from .slim import SLIM, SLIMDataset, SLIMRecommender

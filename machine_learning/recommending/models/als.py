@@ -66,14 +66,14 @@ class ALS(
 ):
     def __init__(
         self,
-        explicit=None,
         epochs=10,
         latent_dimension_size=10,
         regularization_lambda=100,
         confidence_alpha=10,
         lambda_decay=0.75,
+        **kwargs,
     ):
-        super().__init__(explicit=explicit)
+        super().__init__(**kwargs)
         self.epochs = epochs
         self.regularization_lambda = regularization_lambda
         self.confidence_alpha = confidence_alpha
@@ -175,7 +175,7 @@ class ALS(
                 "Online explanations are not implemented for als."
             )
         recommendations = self.recommend(
-            user_ids=torch.tensor([user_id]), n_recommendations=n_recommendations
+            user_ids=torch.IntTensor([user_id]), n_recommendations=n_recommendations
         ).numpy()
         user_ratings = self(user_ids=torch.tensor([user_id]), item_ids=recommendations)[
             0

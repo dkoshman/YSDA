@@ -22,8 +22,8 @@ class RandomRecommender(RecommenderModuleBase, FitExplicitInterfaceMixin):
 
 
 class PopularRecommender(RecommenderModuleBase, FitExplicitInterfaceMixin):
-    def __init__(self, explicit=None):
-        super().__init__(explicit=explicit)
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs, persistent_explicit=False)
         self.register_buffer(name="items_count", tensor=torch.zeros(self.n_items))
 
     def fit(self):
@@ -36,8 +36,8 @@ class PopularRecommender(RecommenderModuleBase, FitExplicitInterfaceMixin):
 
 
 class SVDRecommender(RecommenderModuleBase, FitExplicitInterfaceMixin):
-    def __init__(self, explicit=None, n_components=10):
-        super().__init__(explicit=explicit)
+    def __init__(self, n_components=10, **kwargs):
+        super().__init__(**kwargs)
         self.model = TruncatedSVD(n_components=n_components)
 
     def fit(self):
@@ -58,8 +58,8 @@ class SVDRecommender(RecommenderModuleBase, FitExplicitInterfaceMixin):
 
 
 class ImplicitRecommenderBase(RecommenderModuleBase, FitExplicitInterfaceMixin):
-    def __init__(self, *, explicit=None, implicit_model, implicit_kwargs=None):
-        super().__init__(explicit=explicit)
+    def __init__(self, *, implicit_model, implicit_kwargs=None, **kwargs):
+        super().__init__(**kwargs)
         self.model = build_class(
             module_candidates=[
                 implicit.nearest_neighbours,
@@ -118,17 +118,17 @@ class ImplicitRecommenderBase(RecommenderModuleBase, FitExplicitInterfaceMixin):
 class ImplicitNearestNeighborsRecommender(ImplicitRecommenderBase):
     def __init__(
         self,
-        explicit=None,
         implicit_model: Literal[
             "BM25Recommender", "CosineRecommender", "TFIDFRecommender"
         ] = "BM25Recommender",
         num_neighbors=20,
         num_threads=0,
+        **kwargs,
     ):
         super().__init__(
-            explicit=explicit,
             implicit_model=implicit_model,
             implicit_kwargs=dict(K=num_neighbors, num_threads=num_threads),
+            **kwargs,
         )
 
     def online_recommend(
@@ -148,7 +148,6 @@ class ImplicitNearestNeighborsRecommender(ImplicitRecommenderBase):
 class ImplicitMatrixFactorizationRecommender(ImplicitRecommenderBase):
     def __init__(
         self,
-        explicit=None,
         implicit_model: Literal[
             "AlternatingLeastSquares",
             "LogisticMatrixFactorization",
@@ -159,8 +158,10 @@ class ImplicitMatrixFactorizationRecommender(ImplicitRecommenderBase):
         regularization=1e-2,
         num_threads=0,
         use_gpu=True,
-        **implicit_kwargs,
+        implicit_kwargs=None,
+        **kwargs,
     ):
+        implicit_kwargs = implicit_kwargs or {}
         implicit_kwargs.update(
             factors=factors,
             learning_rate=learning_rate,
@@ -173,7 +174,5 @@ class ImplicitMatrixFactorizationRecommender(ImplicitRecommenderBase):
         else:
             implicit_kwargs["use_gpu"] = False
         super().__init__(
-            explicit=explicit,
-            implicit_model=implicit_model,
-            implicit_kwargs=implicit_kwargs,
+            implicit_model=implicit_model, implicit_kwargs=implicit_kwargs, **kwargs
         )

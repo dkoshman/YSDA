@@ -27,9 +27,9 @@ if TYPE_CHECKING:
 class CatboostInterface(RecommenderModuleBase, FitExplicitInterfaceMixin, ABC):
     model: catboost.CatBoost
 
-    def __init__(self, explicit=None, **cb_params):
-        super().__init__(explicit=explicit)
-        self.model = catboost.CatBoostRanker(**cb_params)
+    def __init__(self, cb_params=None, **kwargs):
+        super().__init__(**kwargs)
+        self.model = catboost.CatBoostRanker(**(cb_params or {}))
 
     @staticmethod
     def explicit_dataframe(explicit: "spmatrix"):
@@ -187,17 +187,16 @@ class CatboostAggregatorRecommender(CatboostInterface):
     def __init__(
         self,
         fit_recommenders=None,
-        explicit=None,
         recommender_names=None,
         train_n_recommendations=10,
         batch_size=100,
-        **cb_params,
+        **kwargs,
     ):
         if recommender_names is not None and len(fit_recommenders) != len(
             recommender_names
         ):
             raise ValueError("Models and their names must be of equal length.")
-        super().__init__(explicit=explicit, **cb_params)
+        super().__init__(**kwargs)
         self.fit_recommenders = fit_recommenders
         self.recommender_names = recommender_names
         self.train_n_recommendations = train_n_recommendations

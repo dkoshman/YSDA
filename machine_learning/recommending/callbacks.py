@@ -1,4 +1,7 @@
 import io
+import os.path
+import re
+import time
 from typing import Literal, TYPE_CHECKING, TextIO
 
 import numpy as np
@@ -9,11 +12,10 @@ import torch
 import wandb
 
 from matplotlib import pyplot as plt
-from pytorch_lightning import loggers as pl_loggers
+from pytorch_lightning import loggers, profiler
 from sklearn.decomposition import TruncatedSVD
 import matplotlib.patheffects as pe
 
-from my_tools.lightning import ConvenientCheckpointLogCallback
 from .data import SparseDataModuleInterface
 from .interface import ExplanationMixin
 from .metrics import RecommendingMetrics
@@ -46,7 +48,7 @@ class WandbWatcher(pl.callbacks.Callback):
     def setup(self, trainer, pl_module, stage=None):
         if self.watch_model_triggered:
             return
-        if not isinstance(trainer.logger, pl_loggers.WandbLogger):
+        if not isinstance(trainer.logger, loggers.WandbLogger):
             raise ValueError("Only wandb logger supports watching model.")
         trainer.logger.watch(pl_module, **self.watch_kwargs)
         self.watch_model_triggered = True
@@ -132,20 +134,24 @@ class RecommendingDataOverviewCallback(pl.callbacks.Callback):
             self.plot_explained_variance()
 
 
-class WandbCheckpointCallback(ConvenientCheckpointLogCallback):
-    def __init__(self, *args, artifact_name, **kwargs):
-        super().__init__(*args, **kwargs)
+class WandbCheckpointCallback(pl.callbacks.ModelCheckpoint):
+    def __init__(self, *args, artifact_name, aliases=None, **kwargs):
         self.artifact_name = artifact_name
+        self.aliases = aliases
+        super().__init__(*args, **kwargs)
 
-    def on_test_end(self, trainer, pl_module):
-        artifact = wandb.Artifact(
+    def on_fit_end(self, trainer, pl_module):
+        if not self.best_model_path:
+            self.save_checkpoint(trainer)
+        trainer.logger.log_text(
+            key="checkpoint", columns=["path"], data=[[self.best_model_path]]
+        )
+        wandb.log_artifact(
+            artifact_or_path=self.best_model_path,
             name=self.artifact_name,
             type="checkpoint",
-            metadata=dict(class_name=pl_module.__class__.__name__),
+            aliases=self.aliases,
         )
-        artifact.add_file(local_path=self.best_model_path, name="checkpoint")
-        wandb.run.log_artifact(artifact)
-        super().on_test_end(trainer, pl_module)
 
 
 class CatBoostMetrics(pl.callbacks.Callback):
@@ -234,8 +240,9 @@ class RecommendingMetricsCallback(pl.callbacks.Callback):
         self.train_metrics = None
         self.val_metrics = None
         self.test_metrics = None
+        self.log_dict = wandb.log
 
-    def setup(self, trainer, pl_module: SparseDataModuleInterface, stage=None):
+    def setup(self, trainer, pl_module, stage=None):
         if self.train_metrics is not None:
             return
         if isinstance(trainer.datamodule, SparseDataModuleInterface):
@@ -247,7 +254,7 @@ class RecommendingMetricsCallback(pl.callbacks.Callback):
                 f"One of lightning_module, datamodule must implement "
                 f"the {SparseDataModuleInterface.__name__} interface"
             )
-
+        self.log_dict = pl_module.log_dict
         if (explicit := module.train_explicit()) is not None:
             self.train_metrics = RecommendingMetrics(explicit)
         if (explicit := module.val_explicit()) is not None:
@@ -319,12 +326,11 @@ class RecommendingMetricsCallback(pl.callbacks.Callback):
         )
         self.log_metrics(metrics_dict, stage=stage)
 
-    @staticmethod
-    def log_metrics(metrics: dict, stage: Literal["train", "val", "test"]):
+    def log_metrics(self, metrics: dict, stage: Literal["train", "val", "test"]):
         metrics = {stage + "_" + k: v for k, v in metrics.items()}
         for metric_name in metrics:
             wandb.define_metric(metric_name, summary="mean")
-        wandb.log(metrics)
+        self.log_dict(metrics)
 
     def on_train_epoch_end(self, trainer=None, pl_module=None):
         self.epoch_end(self.train_metrics, kind="train")
@@ -385,3 +391,79 @@ class RecommendingExplanationCallback(pl.callbacks.Callback):
                     )
             except NotImplementedError:
                 pass
+
+
+class WandbSaveCodeOnceCallback(pl.callbacks.Callback):
+    def __init__(
+        self, root=".", name=None, include_regex=".*\\.py", exclude_regex=None
+    ):
+        self.root = root
+        self.name = name
+        self.include_regex = include_regex
+        self.exclude_regex = exclude_regex
+        self.have_saved_code = False
+
+    def include_fn(self, path_to_code):
+        return bool(re.fullmatch(pattern=self.include_regex, string=path_to_code))
+
+    def exclude_fn(self, path_to_code):
+        if self.exclude_regex is None:
+            return False
+        return bool(re.fullmatch(pattern=self.exclude_regex, string=path_to_code))
+
+    def setup(self, trainer, pl_module, stage=None):
+        if not self.have_saved_code:
+            wandb.run.log_code(
+                root=self.root,
+                name=self.name,
+                include_fn=self.include_fn,
+                exclude_fn=self.exclude_fn,
+            )
+            self.have_saved_code = True
+
+
+class WandbProfiler(profiler.SimpleProfiler):
+    def __init__(self, artifact_name=None, dirpath=None, filename=None, extended=True):
+        self.artifact_name = artifact_name or "unnamed"
+        super().__init__(
+            dirpath=dirpath or "local",
+            filename=filename or "profiler_logs",
+            extended=extended,
+        )
+
+    def get_path(self, stage):
+        return os.path.join(self.dirpath, f"{stage}-{self.filename}.txt")
+
+    def teardown(self, stage=None):
+        super().teardown(stage=stage)
+        path = self.get_path(stage=stage)
+        if os.path.exists(path) and wandb.run is not None:
+            html = wandb.Html(f"<pre>{open(path).read()}</pre>")
+            wandb.log({f"profiler/{stage}": html})
+            os.remove(path)
+
+
+class ParameterStatsLoggerCallback(pl.callbacks.Callback):
+    def __init__(self, every_train_batch=1):
+        self.every_train_batch = every_train_batch
+
+    @staticmethod
+    def parameter_stats(parameter):
+        stats = dict(
+            numel=parameter.numel(),
+            min=parameter.min(),
+            max=parameter.max(),
+            mean=parameter.mean(),
+            isnan_sum=parameter.isnan().sum(),
+            abs_max=parameter.abs().max(),
+        )
+        return stats
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if batch_idx % self.every_train_batch:
+            return
+        for parameter_name, parameter in pl_module.named_parameters():
+            for stat_name, stat_value in self.parameter_stats(parameter).items():
+                pl_module.log(
+                    f"parameter/{stat_name}_{parameter_name}", float(stat_value)
+                )

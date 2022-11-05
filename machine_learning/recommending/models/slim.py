@@ -18,8 +18,6 @@ from ..interface import RecommenderModuleBase, ExplanationMixin
 from ..utils import plt_figure, wandb_plt_figure
 
 
-# TODO: rewrite slim using lightning loop api or just torch,
-# control for O(n_items ** 2) complexity via density or
 class SLIM(RecommenderModuleBase, WandbLoggerMixin, ExplanationMixin):
     """
     The fitted model has sparse matrix W of shape [n_items, n_items],
@@ -29,13 +27,8 @@ class SLIM(RecommenderModuleBase, WandbLoggerMixin, ExplanationMixin):
     due to sparsity. It may be beneficial to add biases to this implementation.
     """
 
-    def __init__(
-        self,
-        explicit=None,
-        l2_coefficient=1.0e-4,
-        l1_coefficient=1.0e-4,
-    ):
-        super().__init__(explicit=explicit)
+    def __init__(self, l2_coefficient=1.0e-4, l1_coefficient=1.0e-4, **kwargs):
+        super().__init__(**kwargs, persistent_explicit=False)
         self.l2_coefficient = l2_coefficient
         self.l1_coefficient = l1_coefficient
 

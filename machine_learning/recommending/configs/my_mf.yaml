@@ -8,7 +8,7 @@ datamodule:
   num_workers: 4
   batch_size: 1000
 lightning_module:
-  class_name: MovieLensMyMFRecommender
+  class_name: MovieLensMFRecommender
 optimizer:
   class_name: Adam
 trainer:

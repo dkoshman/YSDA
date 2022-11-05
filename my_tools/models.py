@@ -14,7 +14,7 @@ class RegularizationGradientHook:
         return grad.clone().detach() + self.decay
 
 
-def register_regularization_hook(tensor, l2_coefficient, l1_coefficient=0):
+def register_regularization_hook(tensor, l2_coefficient, l1_coefficient=0.0):
     """Adds weight decay gradient hook to tensor in place"""
     if tensor.requires_grad and torch.is_grad_enabled():
         hook = RegularizationGradientHook(
@@ -47,18 +47,3 @@ class StoppingMonitor:
             self.lowest_loss = torch.inf
             return True
         return False
-
-
-class IgnoreShapeMismatchOnLoadStateDictMixin:
-    def load_state_dict(
-        self: torch.nn.Module, state_dict: Mapping[str, Any], strict: bool = True
-    ):
-        for key, value in state_dict.items():
-            if hasattr(self, key):
-                attr = getattr(self, key)
-                if isinstance(attr, torch.nn.Parameter):
-                    value = torch.nn.Parameter(
-                        data=value, requires_grad=attr.requires_grad
-                    )
-                setattr(self, key, value)
-        return super().load_state_dict(state_dict=state_dict, strict=strict)

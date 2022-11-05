@@ -1,5 +1,6 @@
 import asyncio
-import os
+import sys
+import time
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -11,12 +12,16 @@ import scipy
 import torch
 import wandb
 
-from machine_learning.recommending.models import SLIM, SVDRecommender
-from machine_learning.recommending.movielens.data import MovieLens25m
 from machine_learning.recommending.utils import wandb_timeit
 
 if TYPE_CHECKING:
     from machine_learning.recommending.interface import RecommenderModuleBase
+
+
+class Session:
+    def __init__(self):
+        self.id = time.time()
+        wandb.log(dict(session_id=self.id))
 
 
 class Feedback(Enum):
@@ -124,31 +129,54 @@ class AheadRecommender:
                 f"Provided movie id {movie_id} doesn't "
                 f"match stored movie id {self.movie_id}"
             )
-        wandb.log(dict(movie_id=self.movie_id, rating=rating))
         self.user_explicit.loc[self.movie_id] = rating
         self.movie_id, self.next_movie_id = self.next_movie_id, None
 
 
 class AsyncRecommendingAppContentDispenser:
-    def __init__(self, recommender: "RecommenderModuleBase", movie_markdown_generator):
+    def __init__(
+        self,
+        recommender: "RecommenderModuleBase",
+        movie_markdown_generator: MovieMarkdownGenerator,
+    ):
         self.ahead_recommender = AheadRecommender(recommender=recommender)
         self.movie_markdown_generator = movie_markdown_generator
         self.movie_id = self.ahead_recommender.movie_id
-        self.initial_content = self.movie_markdown_generator(self.movie_id)
-        self.next_content = asyncio.create_task(self.content_ahead())
+        self._initial_content = self.movie_markdown_generator(item_id=self.movie_id)
+        self.next_content = None
+
+    def initial_content(self):
+        """A workaround to gradio mechanics to create_task on app.launch() and not on initialization."""
+        if self.next_content is None:
+            try:
+                self.next_content = asyncio.create_task(self.content_ahead())
+            except RuntimeError:
+                pass
+        return self._initial_content
+
+    def initial_poster_url(self):
+        return self.initial_content()[1]
+
+    def initial_markdown(self):
+        return self.initial_content()[0]
 
     async def content_ahead(self):
         with wandb_timeit("recommending"):
             movie_id = self.ahead_recommender.next_recommendation()
         with wandb_timeit("tmdb"):
-            content = self.movie_markdown_generator(movie_id)
-        return movie_id, content
+            markdown, poster_url = self.movie_markdown_generator(item_id=movie_id)
+        return movie_id, markdown, poster_url
 
-    async def content(self, feedback: Feedback):
+    async def content(self, feedback: Feedback, session: Session):
+        wandb.log(dict(movie_id=self.movie_id, rating=feedback.int, session=session.id))
+        if self.next_content is None:
+            print("Content not preloaded", file=sys.stderr)
+            self.next_content = asyncio.create_task(self.content_ahead())
+        next_movie_id, markdown, poster_url = await self.next_content
         self.ahead_recommender.save_rating(movie_id=self.movie_id, rating=feedback.int)
-        self.movie_id, content = await self.next_content
+        self.movie_id = next_movie_id
         self.next_content = asyncio.create_task(self.content_ahead())
-        return content
+        return markdown, poster_url
 
 
 def build_app_blocks(
@@ -159,52 +187,22 @@ def build_app_blocks(
         movie_markdown_generator=movie_markdown_generator,
     )
     gr.Markdown("This movie recommender adapts to your preferences")
+    session = gr.State(value=Session())
     with gr.Row():
-        first_movie_markdown, first_image_url = dispenser.initial_content
-        image = gr.Image(first_image_url, interactive=False)
+        image = gr.Image(dispenser.initial_poster_url, interactive=False)
         image.style(width=200)
         with gr.Column(scale=4):
-            markdown = gr.Markdown(first_movie_markdown)
+            markdown = gr.Markdown(dispenser.initial_markdown)
 
             def build_button(feedback):
-                async def wrapper():
-                    return await dispenser.content(feedback=feedback)
+                async def wrapper(session):
+                    return await dispenser.content(feedback=feedback, session=session)
 
                 button = gr.Button(feedback.value)
-                button.click(fn=wrapper, inputs=[], outputs=[markdown, image])
+                button.click(fn=wrapper, inputs=[session], outputs=[markdown, image])
                 return button
 
             build_button(Feedback.NONE)
             with gr.Row():
                 for rated_feedback in list(Feedback)[1:]:
                     build_button(rated_feedback)
-
-
-def main():
-    project = "Recommending"
-    entity = "dkoshman"
-    path_to_movielens_folder = "local/ml-25m"
-    state_dict_path = "svd.pt"
-    tmdb_api_token = os.environ["TMDB_API_TOKEN"]
-
-    movielens = MovieLens25m(path_to_movielens_folder=path_to_movielens_folder)
-    movie_markdown_generator = MovieMarkdownGenerator(
-        movielens=movielens,
-        tmdb_api_token=tmdb_api_token,
-    )
-    model = load_model(torch_nn_module=SVDRecommender, state_dict_path=state_dict_path)
-    model.eval()
-
-    with gr.Blocks() as app:
-        build_app_blocks(
-            recommender=model,
-            movie_markdown_generator=movie_markdown_generator,
-        )
-
-    wandb.finish()
-    wandb.init(job_type="app", project=project, entity=entity)
-    app.launch()
-
-
-if __name__ == "__main__":
-    main()
