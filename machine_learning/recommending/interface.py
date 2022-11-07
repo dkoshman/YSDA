@@ -171,37 +171,6 @@ class RecommenderModuleBase(RecommenderModuleInterface):
         """
 
 
-class ConfidenceRecommenderBase(RecommenderModuleBase, abc.ABC):
-    """
-    Recommender based on the following data generation model:
-    1. Given set of users U and set of items I,
-    a user-item pair [u, i] is chosen with probability p_ui.
-    2. Rating r_ui is generated from normal distribution N(mean_ui, var)
-
-    Then by maximum likelihood principle, we are seeking the parameters defined by:
-        argmax(P_sample) =
-        argmax( product_ui( p_ui * N_{mean_ui, var}(r_ui)))) =
-        argmax( sum_ui ( log p_ui - (mean_ui - r_ui) ** 2 / (2 * var))) =
-        argmin( sum_ui ( (mean_ui - r_ui) ** 2 / ( 2 * var) - log p_ui)))
-
-    And the predicted relevance of item i for user u is:
-        relevance_ui = p_ui * mean_ui
-    """
-
-    @abc.abstractmethod
-    def ratings(self, user_ids, item_ids):
-        ...
-
-    @abc.abstractmethod
-    def probability(self, user_ids, item_ids):
-        ...
-
-    def forward(self, user_ids, item_ids):
-        ratings = self.ratings(user_ids=user_ids, item_ids=item_ids)
-        probability = self.probability(user_ids=user_ids, item_ids=item_ids)
-        return ratings * probability
-
-
 class FitExplicitInterfaceMixin:
     @abc.abstractmethod
     def fit(self) -> None:

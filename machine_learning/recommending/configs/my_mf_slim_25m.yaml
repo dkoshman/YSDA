@@ -1,23 +1,23 @@
 name: "My MF SLIM 25m"
 model:
-  class_name: MFSlimRecommender
-  latent_dimension: 500
+  class_name: MFSlimConfidenceRecommender
+  latent_dimension: 100
   l2_regularization: 0.0
   l1_regularization: 1.0e-6
 loss:
-  class_name: MSELoss
+  class_name: MFSlimConfidenceLoss
 datamodule:
   directory: local/ml-25m
   num_workers: 4
-  batch_size: 4000
-  val_batch_size: 1000
-  test_batch_size: 1000
+  batch_size: 2000
+  val_batch_size: 500
+  test_batch_size: 500
 lightning_module:
   class_name: MovieLens25mMFRecommender
 trainer:
   max_epochs: -1
   accelerator: gpu
-  devices: [2]
+  devices: [5]
   log_every_n_steps: 1
   val_check_interval: 500
   accumulate_grad_batches: 10
@@ -27,7 +27,6 @@ callbacks:
     monitor: val_ndcg@10
     check_on_train_epoch_end: False
     mode: max
-    patience: 1
   WandbCheckpointCallback:
     monitor: val_ndcg@10
     mode: max

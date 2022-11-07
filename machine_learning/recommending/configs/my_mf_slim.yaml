@@ -1,11 +1,11 @@
 name: "My MF SLIM"
 model:
-  class_name: MFSlimRecommender
-  latent_dimension: 100
+  class_name: MFSlimConfidenceRecommender
+  latent_dimension: 50
   l2_regularization: 0.0
   l1_regularization: 1.0e-6
 loss:
-  class_name: MSELoss
+  class_name: MFSlimConfidenceLoss
 datamodule:
   num_workers: 4
   batch_size: 1000
@@ -14,7 +14,7 @@ lightning_module:
 trainer:
   max_epochs: 1000
   accelerator: gpu
-  devices: [1]
+  devices: [5]
   check_val_every_n_epoch: 10
   log_every_n_steps: 1
 callbacks:

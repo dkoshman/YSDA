@@ -19,9 +19,7 @@ def free_cuda():
 
 
 def to_sparse_coo(tensor):
-    if tensor.is_sparse:
-        return tensor
-    return tensor.to_sparse_coo()
+    return tensor if tensor.is_sparse else tensor.to_sparse_coo()
 
 
 def to_torch_coo(sparse_matrix: torch.Tensor or spmatrix) -> SparseTensor:

@@ -1,12 +1,9 @@
-import asyncio
-import sys
 import time
 from enum import Enum
 from typing import TYPE_CHECKING
 
 import gradio as gr
 import numpy as np
-import pandas as pd
 import requests
 import scipy
 import torch
@@ -16,12 +13,6 @@ from machine_learning.recommending.utils import wandb_timeit
 
 if TYPE_CHECKING:
     from machine_learning.recommending.interface import RecommenderModuleBase
-
-
-class Session:
-    def __init__(self):
-        self.id = time.time()
-        wandb.log(dict(session_id=self.id))
 
 
 class Feedback(Enum):
@@ -91,115 +82,101 @@ class MovieMarkdownGenerator:
         return markdown, poster_url
 
 
-class AheadRecommender:
-    def __init__(self, recommender: "RecommenderModuleBase"):
-        self.recommender = recommender
-        self.user_explicit = pd.Series(
-            data=np.full(self.recommender.n_items, fill_value=np.nan)
-        )
-        self.movie_id = self.recommend()
-        self.next_movie_id = None
-
-    def recommend(self):
-        user_explicit = scipy.sparse.coo_matrix(
-            self.user_explicit.fillna(0).values.reshape(1, -1)
-        )
-        with wandb_timeit("online_recommend"):
-            user_recommendations = self.recommender.online_recommend(
-                user_explicit, n_recommendations=self.recommender.n_items
-            )[0].numpy()
-        new_items_mask = self.user_explicit.isna().values
-        new_items_positions = new_items_mask[user_recommendations].nonzero()[0]
-        movie_id = user_recommendations[new_items_positions[0]]
-        return movie_id
-
-    def next_recommendation(self):
-        if self.next_movie_id is not None:
-            raise ValueError(
-                "Before generating another recommendation, "
-                "rating for previous recommendation must be saved."
-            )
-        self.user_explicit.loc[self.movie_id] = 0
-        self.next_movie_id = self.recommend()
-        return self.next_movie_id
-
-    def save_rating(self, movie_id: int, rating: int):
-        if movie_id != self.movie_id:
-            raise ValueError(
-                f"Provided movie id {movie_id} doesn't "
-                f"match stored movie id {self.movie_id}"
-            )
-        self.user_explicit.loc[self.movie_id] = rating
-        self.movie_id, self.next_movie_id = self.next_movie_id, None
-
-
-class AsyncRecommendingAppContentDispenser:
+class Session:
     def __init__(
         self,
         recommender: "RecommenderModuleBase",
         movie_markdown_generator: MovieMarkdownGenerator,
     ):
-        self.ahead_recommender = AheadRecommender(recommender=recommender)
+        self.recommender = recommender
         self.movie_markdown_generator = movie_markdown_generator
-        self.movie_id = self.ahead_recommender.movie_id
-        self._initial_content = self.movie_markdown_generator(item_id=self.movie_id)
-        self.next_content = None
+        self.session_id = time.time()
+        wandb.define_metric("session_length", summary="max")
+        self.session_length = 0
+        self.explicit = np.full(self.recommender.n_items, fill_value=np.nan)
+        self.estimated_user_activity = self.recommender.user_activity.mean().reshape(1)
+        self.movie_id = self.recommend()
+        self.initial_markdown, self.initial_poster_url = self.movie_markdown_generator(
+            item_id=self.movie_id
+        )
 
-    def initial_content(self):
-        """A workaround to gradio mechanics to create_task on app.launch() and not on initialization."""
-        if self.next_content is None:
-            try:
-                self.next_content = asyncio.create_task(self.content_ahead())
-            except RuntimeError:
-                pass
-        return self._initial_content
+    def estimate_user_activity(self):
+        if n_interacted_items := (~np.isnan(self.explicit)).sum():
+            n_rated_items = (self.explicit > 0).sum()
+            self.estimated_user_activity = (
+                self.estimated_user_activity + n_rated_items / n_interacted_items
+            ) / 2
+        return self.estimated_user_activity
 
-    def initial_poster_url(self):
-        return self.initial_content()[1]
+    def recommend(self):
+        explicit = scipy.sparse.coo_matrix(np.nan_to_num(self.explicit).reshape(1, -1))
+        with torch.no_grad():
+            user_recommendations = self.recommender.online_recommend(
+                explicit,
+                n_recommendations=self.recommender.n_items,
+                estimated_users_activity=self.estimate_user_activity(),
+            )[0].numpy()
+        new_items_mask = np.isnan(self.explicit)
+        new_items_positions = new_items_mask[user_recommendations].nonzero()[0]
+        movie_id = user_recommendations[new_items_positions[0]]
+        return movie_id
 
-    def initial_markdown(self):
-        return self.initial_content()[0]
+    def save_rating(self, rating):
+        if not np.isnan(self.explicit[self.movie_id]):
+            raise ValueError(
+                f"Movie {self.movie_id} was already "
+                f"rated {self.explicit[self.movie_id]}"
+            )
+        self.explicit[self.movie_id] = rating
+        self.session_length += 1
+        wandb.log(
+            dict(
+                session_id=self.session_id,
+                movie_id=self.movie_id,
+                rating=rating,
+                session_length=self.session_length,
+            )
+        )
 
-    async def content_ahead(self):
-        with wandb_timeit("recommending"):
-            movie_id = self.ahead_recommender.next_recommendation()
+    def next_content(self, feedback: Feedback):
+        with wandb_timeit("save_rating"):
+            self.save_rating(rating=feedback.int)
+        with wandb_timeit("recommend"):
+            self.movie_id = self.recommend()
         with wandb_timeit("tmdb"):
-            markdown, poster_url = self.movie_markdown_generator(item_id=movie_id)
-        return movie_id, markdown, poster_url
-
-    async def content(self, feedback: Feedback, session: Session):
-        wandb.log(dict(movie_id=self.movie_id, rating=feedback.int, session=session.id))
-        if self.next_content is None:
-            print("Content not preloaded", file=sys.stderr)
-            self.next_content = asyncio.create_task(self.content_ahead())
-        next_movie_id, markdown, poster_url = await self.next_content
-        self.ahead_recommender.save_rating(movie_id=self.movie_id, rating=feedback.int)
-        self.movie_id = next_movie_id
-        self.next_content = asyncio.create_task(self.content_ahead())
+            markdown, poster_url = self.movie_markdown_generator(item_id=self.movie_id)
         return markdown, poster_url
 
 
 def build_app_blocks(
     recommender: "RecommenderModuleBase", movie_markdown_generator
 ) -> None:
-    dispenser = AsyncRecommendingAppContentDispenser(
-        recommender=recommender,
-        movie_markdown_generator=movie_markdown_generator,
-    )
+
     gr.Markdown("This movie recommender adapts to your preferences")
-    session = gr.State(value=Session())
+    session_state = gr.State(
+        value=Session(
+            recommender=recommender, movie_markdown_generator=movie_markdown_generator
+        )
+    )
     with gr.Row():
-        image = gr.Image(dispenser.initial_poster_url, interactive=False)
-        image.style(width=200)
+        image_block = gr.Image(
+            session_state.value.initial_poster_url, interactive=False
+        )
+        image_block.style(width=200)
         with gr.Column(scale=4):
-            markdown = gr.Markdown(dispenser.initial_markdown)
+            markdown_block = gr.Markdown(session_state.value.initial_markdown)
 
             def build_button(feedback):
-                async def wrapper(session):
-                    return await dispenser.content(feedback=feedback, session=session)
+                def click(session: Session):
+                    markdown, poster_url = session.next_content(feedback=feedback)
+                    return session, markdown, poster_url
 
                 button = gr.Button(feedback.value)
-                button.click(fn=wrapper, inputs=[session], outputs=[markdown, image])
+                button.click(
+                    fn=click,
+                    inputs=[session_state],
+                    outputs=[session_state, markdown_block, image_block],
+                )
                 return button
 
             build_button(Feedback.NONE)

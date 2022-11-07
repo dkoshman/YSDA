@@ -5,7 +5,7 @@ import torch
 
 from my_tools.utils import BuilderMixin
 
-from . import losses
+from . import losses, models
 from .data import build_recommending_dataloader, SparseDataModuleBase
 
 if TYPE_CHECKING:
@@ -35,7 +35,7 @@ class LitRecommenderBase(SparseDataModuleBase, pl.LightningModule, BuilderMixin)
 
     @property
     def module_candidates(self):
-        return [losses, torch.optim, torch.optim.lr_scheduler]
+        return [models, losses, torch.optim, torch.optim.lr_scheduler]
 
     @property
     def class_candidates(self):

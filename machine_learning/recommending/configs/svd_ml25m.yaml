@@ -9,8 +9,6 @@ lightning_module:
   class_name: MovieLens25mNonGradientRecommender
 trainer:
   num_sanity_val_steps: 0
-  limit_train_batches: 2
-  limit_val_batches: 2
 callbacks:
   WandbCheckpointCallback:
     monitor: val_ndcg@10

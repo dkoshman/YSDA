@@ -1,5 +1,3 @@
-from typing import TYPE_CHECKING
-
 import einops
 import torch
 import wandb
@@ -7,40 +5,12 @@ import wandb
 from machine_learning.recommending.interface import RecommendingLossInterface
 from machine_learning.recommending.maths import kl_divergence, pairwise_difference
 
-if TYPE_CHECKING:
-    from machine_learning.recommending.interface import ConfidenceRecommenderBase
-
 
 class MSELoss(RecommendingLossInterface):
     def __call__(self, model, explicit, user_ids, item_ids):
         ratings = model(user_ids=user_ids, item_ids=item_ids)
         explicit = explicit.to_dense()
         loss = ((ratings - explicit) ** 2).mean()
-        return loss
-
-
-# TODO: actually add confience here
-class MSEConfidenceLoss(RecommendingLossInterface):
-    """Loss to pair up with ConfidenceRecommenderBase."""
-
-    def __init__(self, confidence=0.9, ratings_deviation=1):
-        """
-        :param confidence: the level of confidence that unrated items are irrelevant
-        :param ratings_deviation: the parameter of ratings normal distribution
-        """
-        self.confidence = confidence
-        self.ratings_variance = ratings_deviation**2
-
-    def __call__(
-        self, model: "ConfidenceRecommenderBase", explicit, user_ids, item_ids
-    ):
-        ratings = model.ratings(user_ids=user_ids, item_ids=item_ids)
-        probability = model.probability(user_ids=user_ids, item_ids=item_ids)
-        explicit = explicit.to_dense()
-        log_normal = (ratings - explicit) ** 2 / (2 * self.ratings_variance)
-        losses = log_normal - torch.log(probability)
-        sample_mask = explicit > 0
-        loss = (sample_mask * losses).sum() / sample_mask.sum()
         return loss
 
 
