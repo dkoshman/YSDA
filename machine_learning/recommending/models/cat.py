@@ -9,16 +9,18 @@ import numpy as np
 import pandas as pd
 import shap
 import torch
+import wandb
 
 from tqdm.auto import tqdm
 
 from my_tools.utils import BuilderMixin, torch_sparse_slice, SparseTensor
+
 from ..interface import (
     FitExplicitInterfaceMixin,
     RecommenderModuleBase,
     ExplanationMixin,
 )
-from ..utils import fetch_artifact, load_path_from_artifact
+from ..movielens import lit as movielens_lit
 
 if TYPE_CHECKING:
     from scipy.sparse import spmatrix
@@ -30,6 +32,10 @@ class CatboostInterface(RecommenderModuleBase, FitExplicitInterfaceMixin, ABC):
     def __init__(self, cb_params=None, **kwargs):
         super().__init__(**kwargs)
         self.model = catboost.CatBoostRanker(**(cb_params or {}))
+
+    def skeleton_dataframe(self):
+        columns = ["user_ids", "item_ids", "explicit"]
+        return pd.DataFrame(columns=columns)
 
     @staticmethod
     def explicit_dataframe(explicit: "spmatrix"):
@@ -75,6 +81,23 @@ class CatboostInterface(RecommenderModuleBase, FitExplicitInterfaceMixin, ABC):
     @abstractmethod
     def pass_user_ids_to_pool(self) -> bool:
         """Whether to pass user ids as feature to pool."""
+
+    def merge_features(self, dataframe):
+        dataframe = pd.merge(
+            dataframe,
+            self.user_features,
+            how="left",
+            left_on="user_ids",
+            right_index=True,
+        )
+        dataframe = pd.merge(
+            dataframe,
+            self.item_features,
+            how="left",
+            left_on="item_ids",
+            right_index=True,
+        )
+        return dataframe
 
     def pool(
         self, dataframe: pd.DataFrame, pass_user_ids_to_pool: bool = None
@@ -197,8 +220,10 @@ class CatboostAggregatorRecommender(CatboostInterface):
         ):
             raise ValueError("Models and their names must be of equal length.")
         super().__init__(**kwargs)
-        self.fit_recommenders = fit_recommenders
-        self.recommender_names = recommender_names
+        self.fit_recommenders = torch.nn.ModuleList(fit_recommenders)
+        self.recommender_names = recommender_names or self.generate_model_names(
+            self.fit_recommenders
+        )
         self.train_n_recommendations = train_n_recommendations
         self.batch_size = batch_size
 
@@ -217,10 +242,8 @@ class CatboostAggregatorRecommender(CatboostInterface):
         return False
 
     def skeleton_dataframe(self):
-        dataframe = self.explicit_dataframe(self.to_scipy_coo(self.explicit))
-        if self.recommender_names is None:
-            self.recommender_names = self.generate_model_names(self.fit_recommenders)
-        return pd.DataFrame(columns=list(dataframe.columns) + self.recommender_names)
+        super_columns = list(super().skeleton_dataframe())
+        return pd.DataFrame(columns=super_columns + self.recommender_names)
 
     def poll_fit_recommenders(self, user_ids, users_explicit=None):
         ratings = []
@@ -243,41 +266,34 @@ class CatboostAggregatorRecommender(CatboostInterface):
         n_recommendations=None,
     ):
         """
-        :return: tensor of shape [topk_item_ids.shape[0], self.n_recommendations]
+        :return: tensor of shape [len(user_ids), self.n_recommendations]
         with most frequent item_ids among recommendations in no particular order
         """
-        topk_item_ids = []
+        reciprocal_ranks = 1 / (torch.arange(self.n_items).repeat(len(user_ids), 1) + 1)
+        reciprocal_ranks_sum = torch.zeros_like(users_explicit)
         for recommender in self.fit_recommenders:
             if users_explicit is not None:
                 item_ids = recommender.online_recommend(
-                    users_explicit=users_explicit, n_recommendations=n_recommendations
+                    users_explicit=users_explicit, n_recommendations=self.n_items
                 )
             else:
-                assert isinstance(n_recommendations, int)
                 item_ids = recommender.recommend(
                     user_ids=user_ids,
-                    n_recommendations=n_recommendations,
+                    n_recommendations=self.n_items,
                     filter_already_liked_items=filter_already_liked_items,
                 )
-            topk_item_ids.append(item_ids.to(self.device))
-        per_user_all_recommendations = torch.cat(topk_item_ids, dim=1)
-
-        per_user_topk_item_ids = []
-        for user_all_recommendations in per_user_all_recommendations:
-            unique_item_ids, counts = user_all_recommendations.unique(
-                return_counts=True
+            reciprocal_ranks_sum += torch.take_along_dim(
+                input=reciprocal_ranks, indices=item_ids, dim=1
             )
-            _, indices = torch.topk(counts, k=n_recommendations)
-            per_user_topk_item_ids.append(unique_item_ids[indices])
-        per_user_topk_item_ids = torch.stack(per_user_topk_item_ids)
-        return per_user_topk_item_ids
+        _, per_user_item_ids = reciprocal_ranks_sum.topk(k=n_recommendations, dim=1)
+        return per_user_item_ids
 
     def dataframe(self, user_ids, per_user_item_ids, ratings, explicit=None):
         dataframes = []
         for i, (user_id, item_ids) in enumerate(zip(user_ids, per_user_item_ids)):
             user_dataframe = self.skeleton_dataframe()
-            user_dataframe["item_ids"] = item_ids.numpy()
             user_dataframe["user_ids"] = user_id.numpy()
+            user_dataframe["item_ids"] = item_ids.numpy()
             if explicit is not None:
                 explicit = explicit.tocsr()
                 user_dataframe["explicit"] = (
@@ -302,37 +318,38 @@ class CatboostAggregatorRecommender(CatboostInterface):
         n_recommendations=None,
     ):
         dataframe = self.skeleton_dataframe()
-        for batch_indices in tqdm(
-            torch.arange(len(user_ids)).split(self.batch_size), "Building dataframe"
-        ):
-            batch_user_ids = user_ids[batch_indices]
-            batch_users_explicit = None
-            if users_explicit is not None:
-                batch_users_explicit = torch_sparse_slice(
-                    users_explicit, row_ids=batch_indices
-                )
-            batch_ratings = self.poll_fit_recommenders(
-                user_ids=batch_user_ids,
-                users_explicit=batch_users_explicit,
-            )
-            if item_ids is None:
-                per_user_item_ids = self.aggregate_topk_recommendations(
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for batch_indices in tqdm(
+                iterable=torch.arange(len(user_ids)).split(self.batch_size),
+                desc="Building dataframe",
+            ):
+                batch_user_ids = user_ids[batch_indices]
+                batch_users_explicit = None
+                if users_explicit is not None:
+                    batch_users_explicit = torch_sparse_slice(
+                        users_explicit, row_ids=batch_indices
+                    )
+                batch_ratings = self.poll_fit_recommenders(
                     user_ids=batch_user_ids,
                     users_explicit=batch_users_explicit,
-                    filter_already_liked_items=filter_already_liked_items,
-                    n_recommendations=n_recommendations,
                 )
-            else:
-                per_user_item_ids = item_ids.repeat(len(batch_indices), 1)
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
+                if item_ids is None:
+                    per_user_item_ids = self.aggregate_topk_recommendations(
+                        user_ids=batch_user_ids,
+                        users_explicit=batch_users_explicit,
+                        filter_already_liked_items=filter_already_liked_items,
+                        n_recommendations=n_recommendations,
+                    )
+                else:
+                    per_user_item_ids = item_ids.repeat(len(batch_indices), 1)
                 df = self.dataframe(
                     user_ids=batch_user_ids,
                     per_user_item_ids=per_user_item_ids,
                     ratings=batch_ratings,
                     explicit=explicit,
                 )
-            dataframe = pd.concat([dataframe, df])
+                dataframe = pd.concat([dataframe, df])
 
         return dataframe
 
@@ -354,7 +371,7 @@ class CatboostAggregatorRecommender(CatboostInterface):
     def recommend(
         self,
         user_ids: torch.IntTensor,
-        n_recommendations=10,
+        n_recommendations: int,
         filter_already_liked_items=True,
     ) -> torch.IntTensor:
         dataframe = self.dataframe_from_batches(
@@ -380,7 +397,7 @@ class CatboostAggregatorRecommender(CatboostInterface):
         )
         return item_ids.to(torch.int64)
 
-    def online_recommend(self, users_explicit, n_recommendations=10):
+    def online_recommend(self, users_explicit, n_recommendations=10, **kwargs):
         users_explicit = self.to_torch_coo(users_explicit)
         fictive_user_ids = torch.arange(
             self.n_users, self.n_users + users_explicit.shape[0]
@@ -426,41 +443,30 @@ class CatboostAggregatorRecommender(CatboostInterface):
 
 class CatboostAggregatorFromArtifacts(BuilderMixin, CatboostAggregatorRecommender):
     def __init__(
-        self, *args, entity=None, project=None, recommender_artifact_names=(), **kwargs
+        self,
+        *args,
+        recommender_artifacts: "tuple[str]" = (),
+        lit_modules: "tuple[str]" = (),
+        **kwargs,
     ):
         fit_recommenders = []
-        for artifact_name in recommender_artifact_names:
-            artifact = fetch_artifact(
-                entity=entity, project=project, artifact_name=artifact_name
-            )
-            checkpoint_path = load_path_from_artifact(
-                artifact, path_inside_artifact="checkpoint"
-            )
-            checkpoint = torch.load(checkpoint_path)
-            recommender = self.build_class(
-                class_name=checkpoint["hyper_parameters"]["model_config"]["class_name"]
-            )
-            state_dict = {
-                k.split(".")[1]: v
-                for k, v in checkpoint["state_dict"].items()
-                if k.startswith("model.")
-            }
-            recommender.load_state_dict(state_dict)
+        for artifact_name, lit_name in zip(recommender_artifacts, lit_modules):
+            artifact = wandb.use_artifact(artifact_name)
+            checkpoint_path = artifact.file()
+            lit_module = getattr(movielens_lit, lit_name)
+            lit_module = lit_module.load_from_checkpoint(checkpoint_path)
+            recommender = lit_module.model
             fit_recommenders.append(recommender)
         super().__init__(
             *args,
             fit_recommenders=fit_recommenders,
-            recommender_names=recommender_artifact_names,
+            recommender_names=recommender_artifacts,
             **kwargs,
         )
 
     def get_extra_state(self):
         state = dict(
             super_extra_state=super().get_extra_state(),
-            fit_recommenders=[
-                dict(class_name=i.__class__.__name__, state_dict=i.state_dict())
-                for i in self.fit_recommenders
-            ],
             recommender_names=self.recommender_names,
             train_n_recommendations=self.train_n_recommendations,
             batch_size=self.batch_size,
@@ -471,9 +477,4 @@ class CatboostAggregatorFromArtifacts(BuilderMixin, CatboostAggregatorRecommende
         self.recommender_names = state["recommender_names"]
         self.train_n_recommendations = state["train_n_recommendations"]
         self.batch_size = state["batch_size"]
-        self.fit_recommenders = []
-        for i in state["fit_recommenders"]:
-            recommender = self.build_class(class_name=i["class_name"])
-            recommender.load_state_dict(i["state_dict"])
-            self.fit_recommenders.append(recommender)
         super().set_extra_state(state["super_extra_state"])

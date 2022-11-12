@@ -15,3 +15,6 @@ callbacks:
     mode: max
     save_on_train_epoch_end: False
     artifact_name: svd_movielens_25m
+  RecommendingMetricsCallback:
+    every_test_epoch: 0
+    k: 10

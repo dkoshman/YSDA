@@ -1,4 +1,5 @@
 import einops
+import numpy as np
 import torch
 import wandb
 
@@ -12,6 +13,60 @@ class MSELoss(RecommendingLossInterface):
         explicit = explicit.to_dense()
         loss = ((ratings - explicit) ** 2).mean()
         return loss
+
+
+class MSEL1Loss(RecommendingLossInterface):
+    def __init__(self, explicit, ratings_deviation=1, mean_unobserved_rating=0):
+        super().__init__(explicit)
+        self.ratings_variance = ratings_deviation**2
+        self.mean_unobserved_rating = mean_unobserved_rating
+
+    def __call__(self, model, explicit, user_ids, item_ids):
+        explicit = explicit.to_dense()
+        observed_mask = explicit > 0
+        ratings = model(user_ids=user_ids, item_ids=item_ids)
+        loss = observed_mask * (ratings - explicit) ** 2 / (2 * self.ratings_variance)
+        loss += ~observed_mask * (ratings - self.mean_unobserved_rating).abs()
+        return loss.sum()
+
+
+class MSEProbabilityLoss(RecommendingLossInterface):
+    """
+    Recommender based on the following data generation model:
+    1. Each user-item pair has a true, unknown, rating
+    generated from normal distribution N_{r_ui, var}.
+    2. Each rating has a probability to be observed p_ui = f(r_ui),
+    where f is a non-decreasing function.
+    That way higher quality items are more likely to be observed.
+
+    Then the likelihood of given data sample is:
+    likelihood(sample) =
+    prod_observed_ui(p_ui * N_{r_ui, var}(rating_ui))) * prod_unobserved_ui(1 - p_ui)
+
+    argmax(likelihood(sample)) =
+    argmax(prod_observed_ui(f(r_ui) * N_{r_ui, var}(rating_ui))) * prod_unobserved_ui(1 - f(r_ui))) =
+    argmax(sum_observed_ui(log f(r_ui) - (r_ui - rating_ui) ** 2 / (2 * var)) + sum_unobserved_ui(log(1 - f(r_ui))))
+
+    The default for f is f(x) = c * x, where c is estimated as density / mean_rating
+    """
+
+    def __init__(self, explicit, ratings_deviation=1.0):
+        super().__init__(explicit)
+        self.ratings_variance = ratings_deviation**2
+        mean_observed_rating = explicit.data.mean()
+        density = len(explicit.data) / np.prod(explicit.shape)
+        self.probability_to_be_observed_coef = density / mean_observed_rating
+
+    def __call__(self, model, explicit, user_ids, item_ids):
+        explicit = explicit.to_dense()
+        observed_mask = explicit > 0
+        ratings = model(user_ids=user_ids, item_ids=item_ids)
+        loss = observed_mask * (ratings - explicit) ** 2 / (2 * self.ratings_variance)
+        prob_to_be_observed = self.probability_to_be_observed_coef * ratings
+        prob_to_be_observed = torch.clip(prob_to_be_observed, 1e-7, 1 - 1e-7)
+        loss -= observed_mask * torch.log(prob_to_be_observed)
+        loss -= ~observed_mask * torch.log(1 - prob_to_be_observed)
+        return loss.sum()
 
 
 def probability_of_user_preferences(

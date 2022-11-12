@@ -6,7 +6,7 @@ from my_tools.utils import to_torch_coo, torch_sparse_slice
 
 from ..lit import LitRecommenderBase
 from ..data import SparseDataset, build_recommending_dataloader, GridIterableDataset
-from ..interface import RecommenderModuleBase, RecommendingLossInterface
+from ..interface import RecommenderModuleBase
 from ..utils import build_bias, build_weight, batch_size_in_bytes, wandb_timeit
 
 
@@ -98,7 +98,7 @@ class MFSlimRecommender(RecommenderModuleBase):
         l1_regularization=0.0,
         **kwargs,
     ):
-        super().__init__(persistent_explicit=False, **kwargs)
+        super().__init__(**kwargs)
         self.encoder = build_weight(self.n_items, latent_dimension)
         self.decoder = build_weight(latent_dimension, self.n_items)
         self.item_bias = build_bias(self.n_items)
@@ -111,7 +111,7 @@ class MFSlimRecommender(RecommenderModuleBase):
         ratings = self.online_ratings(users_explicit=users_explicit)
         return ratings[:, item_ids]
 
-    def online_ratings(self, users_explicit):
+    def online_ratings(self, users_explicit, **kwargs):
         users_explicit = users_explicit.to(self.device, torch.float32)
         encoder = self.encoder.clone()
         decoder = self.decoder.clone()
@@ -132,116 +132,6 @@ class MFSlimRecommender(RecommenderModuleBase):
         return ratings
 
 
-class MFSlimConfidenceRecommender(RecommenderModuleBase):
-    """
-    Recommender based on the following data generation model:
-    1. Each user-item pair has a true, unknown, rating
-    generated from normal distribution N_{r_ui, var}.
-    2. Each rating has a probability to be observed p_ui = f(r_ui),
-    where f is a non-decreasing function, f(0) = 0.
-    That way higher quality items are more likely to be observed.
-
-    Then the likelihood of given data sample is:
-    likelihood(sample) =
-    prod_observed_ui(p_ui * N_{r_ui, var}(rating_ui))) * prod_unobserved_ui(1 - p_ui)
-
-    argmax(likelihood(sample)) =
-    argmax(prod_observed_ui(f(r_ui) * N_{r_ui, var}(rating_ui))) * prod_unobserved_ui(1 - f(r_ui))) =
-    argmax(sum_observed_ui(log f(r_ui) - (r_ui - rating_ui) ** 2 / (2 * var)) + sum_unobserved_ui(log(1 - f(r_ui))))
-
-    Another change is in the way I recommend items to users:
-    I want to recommend items which the users haven't previously seen,
-    so given probability p_ui that user has seen item, I want to scale
-    down the expected rating r_ui with that probability:
-    predicted_relevance_ui = r_ui * g(1 - p_ui),
-    where g is a non-decreasing function.
-
-    And p_ui can be factorized as p_u * p_i, and p_u and p_i
-    can be estimated as their sample frequencies.
-
-    The default for g is g(x) = x, and for f:
-    f(x) = sigmoid(x / sigmoid(a) + b), where a, b are parameters.
-    """
-
-    def __init__(
-        self,
-        latent_dimension=10,
-        l2_regularization=0.0,
-        l1_regularization=0.0,
-        **kwargs,
-    ):
-        super().__init__(persistent_explicit=False, **kwargs)
-        self.ratings_mfs = MFSlimRecommender(
-            latent_dimension=latent_dimension,
-            l2_regularization=l2_regularization,
-            l1_regularization=l1_regularization,
-            **kwargs,
-        )
-        self.register_buffer(name="user_activity", tensor=torch.zeros(self.n_users))
-        self.register_buffer(name="item_popularity", tensor=torch.zeros(self.n_items))
-        if self.explicit is not None:
-            self.user_activity = torch.tensor(
-                self.to_scipy_coo(self.explicit).mean(1).A.squeeze()
-            )
-            self.item_popularity = torch.tensor(
-                self.to_scipy_coo(self.explicit).mean(0).A.squeeze()
-            )
-
-    @staticmethod
-    def probability_that_user_seen_item(user_activity, item_popularity):
-        return torch.einsum("u, i -> ui", user_activity, item_popularity)
-
-    def forward(self, user_ids, item_ids, predicting=True):
-        ratings = self.ratings_mfs(user_ids=user_ids, item_ids=item_ids)
-        if predicting:
-            ratings *= 1 - self.probability_that_user_seen_item(
-                user_activity=self.user_activity[user_ids],
-                item_popularity=self.item_popularity[item_ids],
-            )
-        return ratings
-
-    def online_ratings(self, users_explicit, estimated_users_activity=None):
-        users_explicit = users_explicit.to(self.device, torch.float32)
-        if estimated_users_activity is None:
-            torch.tensor(self.to_scipy_coo(users_explicit).mean(1).A.squeeze())
-        ratings = self.ratings_mfs.online_ratings(users_explicit=users_explicit)
-        ratings *= 1 - self.probability_that_user_seen_item(
-            user_activity=estimated_users_activity,
-            item_popularity=self.item_popularity,
-        )
-        return ratings
-
-    def online_recommend(
-        self, users_explicit, n_recommendations: int = 10, estimated_users_activity=None
-    ) -> torch.IntTensor:
-        users_explicit = self.to_torch_coo(users_explicit).to(self.device)
-        ratings = self.online_ratings(
-            users_explicit, estimated_users_activity=estimated_users_activity
-        )
-        ratings = self.filter_already_liked_items(users_explicit, ratings)
-        recommendations = self.ratings_to_recommendations(ratings, n_recommendations)
-        return recommendations
-
-
-class MFSlimConfidenceLoss(RecommendingLossInterface):
-    def __init__(self, ratings_deviation=1, l1_coefficient=1, mean_unobserved_rating=0):
-        self.ratings_variance = ratings_deviation**2
-        self.l1_coefficient = l1_coefficient
-        self.mean_unobserved_rating = mean_unobserved_rating
-
-    def __call__(self, model, explicit, user_ids, item_ids):
-        explicit = explicit.to_dense()
-        observed_mask = explicit > 0
-        ratings = model(user_ids=user_ids, item_ids=item_ids, predicting=False)
-        loss = observed_mask * (ratings - explicit) ** 2 / (2 * self.ratings_variance)
-        loss += (
-            ~observed_mask
-            * (ratings - self.mean_unobserved_rating).abs()
-            * self.l1_coefficient
-        )
-        return loss.sum()
-
-
 class MFRecommender(LitRecommenderBase):
     @property
     def class_candidates(self):
@@ -249,7 +139,6 @@ class MFRecommender(LitRecommenderBase):
             MatrixFactorization,
             ConstrainedProbabilityMatrixFactorization,
             MFSlimRecommender,
-            MFSlimConfidenceRecommender,
         ]
 
     def train_dataloader(self):

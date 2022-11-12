@@ -31,7 +31,7 @@ def _test_lightning_module(config):
     trainer.test(lightning_module)
     model = lightning_module.model
 
-    recommendations = model.recommend(user_ids=torch.arange(100))
+    recommendations = model.content(user_ids=torch.arange(100))
     explicit = random_explicit_feedback(n_items=model.n_items)
     explicit = to_torch_coo(explicit)
     online = model.online_recommend(explicit)
@@ -39,7 +39,7 @@ def _test_lightning_module(config):
 
     loaded_model = type(model)()
     loaded_model.load_state_dict(state_dict)
-    loaded_recommendations = loaded_model.recommend(user_ids=torch.arange(100))
+    loaded_recommendations = loaded_model.content(user_ids=torch.arange(100))
     loaded_online = loaded_model.online_recommend(explicit)
     assert (recommendations == loaded_recommendations).all()
     assert (online == loaded_online).all()

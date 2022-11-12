@@ -1,13 +1,11 @@
 name: "Catboost aggregator"
 model:
   class_name: CatboostMovieLensAggregatorFromArtifacts
-  entity: dkoshman
-  project: Recommending
-  recommender_artifact_names: [als, svd, mf, slim, implicit_nn]
-  task_type: GPU
-  devices: [0]
-#   If errors with OOM errors on other gpus, try running script with CUDA_VISIBLE_DEVICES=0,1
-  train_dir: local
+  recommender_artifacts: [svd:latest, my_mf_slim:latest]
+  lit_modules: [MovieLensNonGradientRecommender, MovieLensMFRecommender]
+#  cb_params:
+#    task_type: GPU
+#    devices: [5]
 lightning_module:
   class_name: MovieLensNonGradientRecommender
 trainer:

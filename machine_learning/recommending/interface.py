@@ -1,4 +1,5 @@
 import abc
+from abc import ABC
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -32,7 +33,7 @@ class RecommenderModuleInterface(torch.nn.Module, abc.ABC):
     def recommend(
         self,
         user_ids: torch.IntTensor,
-        n_recommendations: int or None = None,
+        n_recommendations: int,
         filter_already_liked_items=True,
     ) -> torch.IntTensor:
         """Returns recommended item ids."""
@@ -56,7 +57,7 @@ class RecommenderModuleBase(RecommenderModuleInterface):
         n_users,
         n_items,
         explicit: "SparseTensor" or "spmatrix" or None = None,
-        persistent_explicit=True,
+        persistent_explicit=False,
     ):
         super().__init__()
         self.n_users = n_users
@@ -94,7 +95,7 @@ class RecommenderModuleBase(RecommenderModuleInterface):
     def recommend(
         self,
         user_ids: torch.IntTensor,
-        n_recommendations: int = 10,
+        n_recommendations: int,
         filter_already_liked_items=True,
     ) -> torch.IntTensor:
         with torch.inference_mode():
@@ -137,7 +138,7 @@ class RecommenderModuleBase(RecommenderModuleInterface):
             ratings[i] = user_ratings
         return ratings
 
-    def online_ratings(self, users_explicit: "SparseTensor" or spmatrix):
+    def online_ratings(self, users_explicit: "SparseTensor" or spmatrix, **kwargs):
         """
         The fallback method is based on nearest neighbours,
         as it can be applied to any model, but may give suboptimal
@@ -150,9 +151,10 @@ class RecommenderModuleBase(RecommenderModuleInterface):
         self,
         users_explicit: "SparseTensor" or spmatrix,
         n_recommendations: int = 10,
+        **online_ratings_kwargs
     ) -> torch.IntTensor:
         users_explicit = self.to_torch_coo(users_explicit).to(self.device)
-        ratings = self.online_ratings(users_explicit)
+        ratings = self.online_ratings(users_explicit, **online_ratings_kwargs)
         ratings = self.filter_already_liked_items(users_explicit, ratings)
         recommendations = self.ratings_to_recommendations(ratings, n_recommendations)
         return recommendations
@@ -169,6 +171,51 @@ class RecommenderModuleBase(RecommenderModuleInterface):
         Init module from whatever was returned by getter to be ready for inference.
         This is torch.nn.Module method, this stub is just for clarity.
         """
+
+
+class UnpopularRecommenderMixin:
+    """
+    I want to recommend items which the users haven't previously seen,
+    so given probability p_ui that user has seen item, I want to scale
+    down the expected rating r_ui with that probability:
+    predicted_relevance_ui = r_ui * g(1 - p_ui),
+    where g is a non-decreasing function.
+
+    And p_ui can be factorized as p_u * p_i, and p_u and p_i
+    can be estimated as their sample frequencies.
+
+    The default for g is g(x) = x.
+    """
+
+    def init_unpopular_recommender_mixin(
+        self: RecommenderModuleBase, unpopularity_coef=1e-3
+    ):
+        self.register_buffer(
+            name="unpopularity_coef", tensor=torch.tensor(unpopularity_coef)
+        )
+        self.register_buffer(name="users_activity", tensor=torch.zeros(self.n_users))
+        self.register_buffer(name="items_popularity", tensor=torch.zeros(self.n_items))
+
+    def fit_unpopular_recommender_mixin(self: RecommenderModuleBase):
+        self.users_activity = torch.tensor(
+            (self.to_scipy_coo(self.explicit) > 0).mean(1).A.squeeze(1)
+        )
+        self.items_popularity = torch.tensor(
+            (self.to_scipy_coo(self.explicit) > 0).mean(0).A.squeeze(0)
+        )
+
+    @property
+    def mean_user_activity(self):
+        return self.users_activity.mean(dim=0, keepdims=True)
+
+    def probability_that_user_has_seen_item(self, users_activity):
+        return torch.einsum("u, i -> ui", users_activity, self.items_popularity)
+
+    def additive_rating_offset(self, users_activity):
+        return -self.unpopularity_coef * torch.log(
+            1.0e-8
+            + self.probability_that_user_has_seen_item(users_activity=users_activity)
+        )
 
 
 class FitExplicitInterfaceMixin:
@@ -201,6 +248,9 @@ class ExplanationMixin:
 
 
 class RecommendingLossInterface:
+    def __init__(self, explicit):
+        ...
+
     @abc.abstractmethod
     def __call__(
         self,

@@ -1,6 +1,5 @@
-from .callbacks import RecommendingExplanationIMDBCallback
 from .cat import CatboostMovieLensFeatureRecommender
-from .data import ImdbRatings, MovieLens100k
+from .data import MovieLens100k, MovieLens25m
 from .lit import (
     MovieLensRecommender,
     MovieLensNonGradientRecommender,

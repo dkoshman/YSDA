@@ -6,22 +6,14 @@ metric:
   name: test_ndcg@10.mean
 parameters:
   model:
-    class_name: MFSlimConfidenceRecommender
-    latent_dimension: 50
+    class_name: MFSlimRecommender
+    latent_dimension:
+      min: 10
+      max: 150
     l2_regularization: 0.0
     l1_regularization: 1.0e-6
   loss:
-    class_name: MFSlimConfidenceLoss
-    l1_coefficient:
-      values:
-        - 1.0e-1
-        - 5.0e-1
-        - 1.0e-0
-        - 5.0e-0
-        - 1.0e+1
-    mean_unobserved_rating:
-      min: 0.1
-      max: 3.1
+    class_name: MSELoss
   datamodule:
     num_workers: 4
     batch_size: 1000

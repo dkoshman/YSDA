@@ -1,7 +1,6 @@
 import io
 import os.path
 import re
-import time
 from typing import Literal, TYPE_CHECKING, TextIO
 
 import numpy as np
@@ -86,12 +85,6 @@ class RecommendingDataOverviewCallback(pl.callbacks.Callback):
                 path_effects=[pe.withStroke(linewidth=2, foreground="black")],
             )
 
-    def plot_explained_variance(self):
-        max_n_components = min(self.explicit.shape)
-        truncated_svd = TruncatedSVD(n_components=max_n_components)
-        truncated_svd.fit(self.explicit)
-        plt.plot(np.cumsum(truncated_svd.explained_variance_ratio_))
-
     def log_data_description(self):
         series = pd.Series(
             {
@@ -125,13 +118,6 @@ class RecommendingDataOverviewCallback(pl.callbacks.Callback):
             plt.xlabel("Number of reviews per rating value")
             plt.ylabel("Quantity")
             plt.hist(self.explicit.data, histtype="stepfilled", bins=50)
-
-        with wandb_plt_figure(
-            title="Explained variance depending on number of components"
-        ):
-            plt.xlabel("Number of components")
-            plt.ylabel("Explained cumulative variance ratio")
-            self.plot_explained_variance()
 
 
 class WandbCheckpointCallback(pl.callbacks.ModelCheckpoint):
@@ -450,20 +436,18 @@ class ParameterStatsLoggerCallback(pl.callbacks.Callback):
     @staticmethod
     def parameter_stats(parameter):
         stats = dict(
-            numel=parameter.numel(),
-            min=parameter.min(),
-            max=parameter.max(),
+            numel=float(parameter.numel()),
             mean=parameter.mean(),
-            isnan_sum=parameter.isnan().sum(),
+            isnan_sum=float(parameter.isnan().sum()),
             abs_max=parameter.abs().max(),
+            norm=parameter.norm(),
         )
+        if (grad := parameter.grad) is not None:
+            stats["grad_norm"] = grad.detach().norm()
         return stats
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        if batch_idx % self.every_train_batch:
-            return
-        for parameter_name, parameter in pl_module.named_parameters():
-            for stat_name, stat_value in self.parameter_stats(parameter).items():
-                pl_module.log(
-                    f"parameter/{stat_name}_{parameter_name}", float(stat_value)
-                )
+        if batch_idx % self.every_train_batch == 0:
+            for parameter_name, parameter in pl_module.named_parameters():
+                for stat_name, stat_value in self.parameter_stats(parameter).items():
+                    pl_module.log(f"parameter/{stat_name}_{parameter_name}", stat_value)

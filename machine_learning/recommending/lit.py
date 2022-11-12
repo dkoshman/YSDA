@@ -22,7 +22,9 @@ class LitRecommenderBase(SparseDataModuleBase, pl.LightningModule, BuilderMixin)
         self.model: "RecommenderModuleBase" = self.build_model()
         self.loss: "RecommendingLossInterface" or None = None
         if "loss" in config:
-            self.loss = self.build_class(**config["loss"])
+            self.loss = self.build_class(
+                explicit=self.train_explicit(), **config["loss"]
+            )
 
     def build_model(self):
         model_config = self.hparams["model"]

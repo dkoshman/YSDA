@@ -19,11 +19,6 @@ trainer:
 callbacks:
   WandbSaveCodeOnceCallback: {}
   LearningRateMonitor: {}
-#  RecommendingExplanationIMDBCallback:
-#    path_to_imdb_ratings_csv: local/my_imdb_ratings.csv
-#    path_to_movielens_folder: local/ml-100k
-#    n_recommendations: 10
-#  WandbWatcher: {}
   ParameterStatsLoggerCallback: {}
   RecommendingMetricsCallback:
     k: 10

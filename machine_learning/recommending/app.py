@@ -1,7 +1,10 @@
+import asyncio
+import functools
+import os.path
 import time
-from enum import Enum
 from typing import TYPE_CHECKING
 
+from aenum import Enum, MultiValue, Unique
 import gradio as gr
 import numpy as np
 import requests
@@ -9,19 +12,28 @@ import scipy
 import torch
 import wandb
 
+from machine_learning.recommending.movielens.data import read_csv_imdb_ratings
 from machine_learning.recommending.utils import wandb_timeit
+from machine_learning.recommending.interface import UnpopularRecommenderMixin
+
 
 if TYPE_CHECKING:
     from machine_learning.recommending.interface import RecommenderModuleBase
 
 
-class Feedback(Enum):
-    NONE = "Haven't seen it"
-    ONE, TWO, THREE, FOUR, FIVE = map(str, range(1, 6))
-
-    @property
-    def int(self):
-        return {v: i for i, v in enumerate(Feedback)}[self]
+class Feedback(Enum, settings=(MultiValue, Unique), init="str rating"):
+    not_interested = "Haven't seen it and not interested", 0
+    interested = "Haven't seen it, but I'm interested", 3.5
+    # one = "1", 1
+    # two = "2", 2
+    # three = "3", 3
+    # four = "4", 4
+    # five = "5", 5
+    one = "⭐️", 1
+    two = "⭐️⭐️", 2
+    three = "⭐️⭐️⭐️", 3
+    four = "⭐️⭐️⭐️⭐️", 4
+    five = "⭐️⭐️⭐️⭐️⭐️", 5
 
 
 def load_model(torch_nn_module, state_dict_path):
@@ -52,13 +64,19 @@ class MovieMarkdownGenerator:
     def poster_url_from_tmdb_poster_path(poster_path, size="w200"):
         return f"https://image.tmdb.org/t/p/{size}{poster_path}"
 
+    @staticmethod
+    @functools.lru_cache(maxsize=10_000)
+    def cached_request(url):
+        """Caching requests saves a lot of time."""
+        return requests.get(url)
+
     def __call__(self, item_id):
-        tmdb_id = self.movielens.model_item_ids_to_tmdb_movie_ids(np.array([item_id]))
-        imdb_id = self.movielens.tmdb_movie_ids_to_imdb_movie_ids(tmdb_id)[0]
+        movielens_id = self.movielens.model_item_to_movielens_movie_ids([item_id])[0]
+        imdb_id = self.movielens.movielens_movie_to_imdb_movie_ids([movielens_id])[0]
         tmdb_request_url = self.tmdb_request_url(
             imdb_id=imdb_id, tmdb_api_token=self.tmdb_api_token
         )
-        request = requests.get(tmdb_request_url)
+        request = self.cached_request(url=tmdb_request_url)
         if not request.ok:
             wandb.log(
                 dict(
@@ -69,7 +87,7 @@ class MovieMarkdownGenerator:
                     )
                 )
             )
-            markdown = self.movies_dataframe.loc[tmdb_id]["movie title"]
+            markdown = self.movies_dataframe.loc[movielens_id]["movie title"]
             return markdown, ""
 
         movie_results = request.json()["movie_results"][0]
@@ -87,69 +105,143 @@ class Session:
         self,
         recommender: "RecommenderModuleBase",
         movie_markdown_generator: MovieMarkdownGenerator,
+        n_recommendations=10,
+        # user_activity_running_mean_coef=0.1,???
     ):
         self.recommender = recommender
         self.movie_markdown_generator = movie_markdown_generator
-        self.session_id = time.time()
-        wandb.define_metric("session_length", summary="max")
+        self.movielens = self.movie_markdown_generator.movielens
+        self.user_activity = None
+        # self.user_activity_running_mean_coef = user_activity_running_mean_coef
         self.session_length = 0
+        self.n_recommendations = n_recommendations
+        wandb.define_metric("session_length", summary="max")
+        self.session_id = time.time()
         self.explicit = np.full(self.recommender.n_items, fill_value=np.nan)
-        self.estimated_user_activity = self.recommender.user_activity.mean().reshape(1)
-        self.movie_id = self.recommend()
-        self.initial_markdown, self.initial_poster_url = self.movie_markdown_generator(
-            item_id=self.movie_id
+        self.movie_id, self.initial_markdown, self.initial_poster_url = self.content()
+        self.content_task = asyncio.create_task(self.async_content())
+
+    def __deepcopy__(self, memo):
+        """
+        Gradio makes a copy of state block at some point, I don't know why exactly.
+        The problem is that you can't copy a task, and returning new instance instead
+        doesn't break anything, so that's what I'm going to do.
+        """
+        return Session(
+            recommender=self.recommender,
+            movie_markdown_generator=self.movie_markdown_generator,
         )
 
-    def estimate_user_activity(self):
-        if n_interacted_items := (~np.isnan(self.explicit)).sum():
-            n_rated_items = (self.explicit > 0).sum()
-            self.estimated_user_activity = (
-                self.estimated_user_activity + n_rated_items / n_interacted_items
-            ) / 2
-        return self.estimated_user_activity
-
-    def recommend(self):
+    def content(self):
+        kwargs = {}
+        # if isinstance(self.recommender, UnpopularRecommenderMixin):
+        #     if self.user_activity is None:
+        #         self.user_activity = self.recommender.mean_user_activity
+        #     else:
+        #         latest_activity_estimation = (self.explicit > 0).sum() / (
+        #             (~np.isnan(self.explicit)).sum()
+        #         )
+        #         self.user_activity = (
+        #             self.user_activity * (1 - self.user_activity_running_mean_coef)
+        #             + latest_activity_estimation * self.user_activity_running_mean_coef
+        #         )
+        #     kwargs = dict(users_activity=self.user_activity)
         explicit = scipy.sparse.coo_matrix(np.nan_to_num(self.explicit).reshape(1, -1))
-        with torch.no_grad():
+        with torch.no_grad(), wandb_timeit("online_recommend"):
             user_recommendations = self.recommender.online_recommend(
-                explicit,
-                n_recommendations=self.recommender.n_items,
-                estimated_users_activity=self.estimate_user_activity(),
+                explicit, n_recommendations=self.recommender.n_items, **kwargs
             )[0].numpy()
+
         new_items_mask = np.isnan(self.explicit)
         new_items_positions = new_items_mask[user_recommendations].nonzero()[0]
         movie_id = user_recommendations[new_items_positions[0]]
-        return movie_id
 
-    def save_rating(self, rating):
-        if not np.isnan(self.explicit[self.movie_id]):
+        # To not recommend same item twice before rating gets saved.
+        self.explicit[movie_id] = 0
+
+        with wandb_timeit("tmdb"):
+            markdown, poster_url = self.movie_markdown_generator(item_id=movie_id)
+
+        return movie_id, markdown, poster_url
+
+    async def async_content(self):
+        return self.content()
+
+    def save_rating(self, rating, movie_id):
+        if self.explicit[movie_id] != 0:
             raise ValueError(
-                f"Movie {self.movie_id} was already "
-                f"rated {self.explicit[self.movie_id]}"
+                f"Movie {movie_id} was already rated {self.explicit[movie_id]}."
             )
-        self.explicit[self.movie_id] = rating
+        self.explicit[movie_id] = rating
         self.session_length += 1
         wandb.log(
             dict(
                 session_id=self.session_id,
-                movie_id=self.movie_id,
+                movie_id=movie_id,
                 rating=rating,
                 session_length=self.session_length,
+                user_activity=self.user_activity,
             )
         )
 
-    def next_content(self, feedback: Feedback):
-        with wandb_timeit("save_rating"):
-            self.save_rating(rating=feedback.int)
-        with wandb_timeit("recommend"):
-            self.movie_id = self.recommend()
-        with wandb_timeit("tmdb"):
-            markdown, poster_url = self.movie_markdown_generator(item_id=self.movie_id)
+    async def next_content(self, feedback: Feedback):
+        with wandb_timeit("await_content"):
+            next_movie_id, markdown, poster_url = await self.content_task
+        self.save_rating(rating=feedback.rating, movie_id=self.movie_id)
+        wandb.log(
+            dict(
+                interested=float(feedback == Feedback.interested),
+                not_interested=float(feedback == Feedback.not_interested),
+            )
+        )
+        self.movie_id = next_movie_id
+        self.content_task = asyncio.create_task(self.async_content())
         return markdown, poster_url
+
+    def upload(self, file_object) -> str:
+        filename = file_object.name
+        try:
+            dataframe = read_csv_imdb_ratings(filename)
+        except Exception as e:
+            wandb.log(dict(upload_error=str(e)))
+            return f"Couldn't read imdb ratings file: \n{str(e)}"
+
+        known_imdb_ids = self.movielens["links"]["imdbId"]
+        dataframe = dataframe.query("imdbId in @known_imdb_ids")
+        imdb_ids = dataframe.index.values
+        item_ids = self.movielens.imdb_movie_to_model_item_ids(imdb_ids)
+        ratings = dataframe["your rating"].values / 2
+        explicit = np.zeros(self.recommender.n_items)
+        explicit[item_ids] = ratings
+        explicit = scipy.sparse.coo_matrix(explicit)
+        with torch.no_grad(), wandb_timeit("online_recommend"):
+            recommendations = self.recommender.online_recommend(
+                explicit, n_recommendations=self.n_recommendations
+            )
+
+        markdown = ""
+        for i, item_id in enumerate(recommendations[0].numpy(), start=1):
+            movie_markdown, poster_url = self.movie_markdown_generator(item_id=item_id)
+            markdown += f"""{i}. {movie_markdown} ![poster]({poster_url}) \n"""
+        return markdown
+
+
+def interactive_feedback_click(feedback: Feedback):
+    async def click_inner(session: Session):
+        markdown, poster_url = await session.next_content(feedback=feedback)
+        return session, markdown, poster_url
+
+    return click_inner
+
+
+def gradio_relative_html_path(relative_path):
+    return os.path.join("file", relative_path)
 
 
 def build_app_blocks(
-    recommender: "RecommenderModuleBase", movie_markdown_generator
+    recommender: "RecommenderModuleBase",
+    movie_markdown_generator: MovieMarkdownGenerator,
+    media_directory: str,
 ) -> None:
 
     gr.Markdown("This movie recommender adapts to your preferences")
@@ -158,28 +250,65 @@ def build_app_blocks(
             recommender=recommender, movie_markdown_generator=movie_markdown_generator
         )
     )
-    with gr.Row():
-        image_block = gr.Image(
-            session_state.value.initial_poster_url, interactive=False
-        )
-        image_block.style(width=200)
-        with gr.Column(scale=4):
-            markdown_block = gr.Markdown(session_state.value.initial_markdown)
 
-            def build_button(feedback):
-                def click(session: Session):
-                    markdown, poster_url = session.next_content(feedback=feedback)
-                    return session, markdown, poster_url
-
-                button = gr.Button(feedback.value)
-                button.click(
-                    fn=click,
-                    inputs=[session_state],
-                    outputs=[session_state, markdown_block, image_block],
+    with gr.Tab("Interactively rate movies"):
+        with gr.Row():
+            image_block = gr.Image(
+                session_state.value.initial_poster_url, interactive=False
+            )
+            image_block.style(width=200)
+            with gr.Column(scale=4):
+                recommendations_markdown_block = gr.Markdown(
+                    session_state.value.initial_markdown
                 )
-                return button
 
-            build_button(Feedback.NONE)
-            with gr.Row():
-                for rated_feedback in list(Feedback)[1:]:
-                    build_button(rated_feedback)
+                def build_button(feedback: Feedback):
+                    button = gr.Button(feedback.str)
+                    button.click(
+                        fn=interactive_feedback_click(feedback),
+                        inputs=[session_state],
+                        outputs=[
+                            session_state,
+                            recommendations_markdown_block,
+                            image_block,
+                        ],
+                    )
+                    return button
+
+                with gr.Row():
+                    build_button(Feedback.not_interested)
+                    build_button(Feedback.interested)
+                with gr.Row():
+                    for rated_feedback in list(Feedback)[2:]:
+                        build_button(rated_feedback)
+
+    with gr.Tab("Upload IMDb ratings"):
+
+        def image_html(filename, width=400):
+            path = gradio_relative_html_path(os.path.join(media_directory, filename))
+            return f"""<img src="{path}" width="{width}">"""
+
+        howto_markdown = gr.Markdown(
+            f"""
+            If you have a profile on IMDb, you can upload the ratings from your profile page:
+            
+            1. Go to [imdb.com](https://www.imdb.com)
+            2. Click on your profile and then on the "Your ratings" tab
+            {image_html("step1.png")}
+            3. Click on the ellipsis menu on "Your ratings" page
+            {image_html("step2.png")}
+            4. Select "Export"
+            {image_html("step3.png")}
+            5. Now your ratings will be downloaded in csv format, and you can upload them below
+            """
+        )
+        file_block = gr.File(interactive=True)
+        recommendations_markdown_block = gr.Markdown("")
+        file_block.upload(
+            fn=lambda file: (
+                howto_markdown.update(visible=False),
+                session_state.value.upload(file),
+            ),
+            inputs=[file_block],
+            outputs=[howto_markdown, recommendations_markdown_block],
+        )

@@ -54,7 +54,7 @@ def _test_recommender_module(module, test_reload=True):
         assert torch.is_tensor(ratings)
         assert not ratings.is_sparse and not ratings.is_sparse_csr
         assert ratings.dtype == torch.float32
-        recommendations = module.recommend(
+        recommendations = module.content(
             user_ids=user_ids,
             n_recommendations=n_recommendations,
             filter_already_liked_items=filter_already_liked_items,
@@ -79,7 +79,7 @@ def _test_recommender_module(module, test_reload=True):
             loaded_module.load_state_dict(state_dict)
             loaded_ratings = loaded_module(user_ids=user_ids, item_ids=item_ids)
             assert torch.isclose(ratings, loaded_ratings, atol=1e-5).all()
-            loaded_recommendations = loaded_module.recommend(
+            loaded_recommendations = loaded_module.content(
                 user_ids=user_ids,
                 n_recommendations=n_recommendations,
                 filter_already_liked_items=filter_already_liked_items,
@@ -148,7 +148,7 @@ def test_catboost_aggregator():
     module = CatboostMovieLensAggregatorFromArtifacts(
         entity="dkoshman",
         project="Recommending",
-        recommender_artifact_names=recommender_artifact_names,
+        recommender_artifacts=recommender_artifact_names,
         explicit=explicit,
     )
     module.fit()

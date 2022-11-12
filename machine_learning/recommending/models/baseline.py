@@ -5,11 +5,18 @@ from typing import Literal
 import implicit
 import numpy as np
 import torch
+import wandb
+from matplotlib import pyplot as plt
 from sklearn.decomposition import TruncatedSVD
 
-from my_tools.utils import build_class
+from my_tools.utils import build_class, torch_sparse_slice
 
-from ..interface import RecommenderModuleBase, FitExplicitInterfaceMixin
+from ..interface import (
+    RecommenderModuleBase,
+    FitExplicitInterfaceMixin,
+    UnpopularRecommenderMixin,
+)
+from ..utils import wandb_plt_figure
 
 
 class RandomRecommender(RecommenderModuleBase, FitExplicitInterfaceMixin):
@@ -42,11 +49,29 @@ class SVDRecommender(RecommenderModuleBase, FitExplicitInterfaceMixin):
 
     def fit(self):
         self.model.fit(self.to_scipy_coo(self.explicit))
+        if wandb.run is not None:
+            self.plot_explained_variance()
+
+    def plot_explained_variance(self):
+        wandb.log(
+            dict(explained_variance_ratio=self.model.explained_variance_ratio_.sum())
+        )
+        with wandb_plt_figure(
+            title="Explained variance depending on number of components"
+        ):
+            plt.xlabel("Number of components")
+            plt.ylabel("Explained cumulative variance ratio")
+            plt.plot(np.cumsum(self.model.explained_variance_ratio_))
 
     def forward(self, user_ids, item_ids):
-        explicit_feedback = self.to_scipy_coo(self.explicit).tocsr()
-        embedding = self.model.transform(explicit_feedback[user_ids].A)
-        ratings = self.model.inverse_transform(embedding)[:, item_ids]
+        users_explicit = torch_sparse_slice(self.explicit, row_ids=user_ids)
+        ratings = self.online_ratings(users_explicit=users_explicit)
+        return ratings[:, item_ids]
+
+    def online_ratings(self, users_explicit, **kwargs):
+        users_explicit = self.to_scipy_coo(users_explicit)
+        embedding = self.model.transform(users_explicit)
+        ratings = self.model.inverse_transform(embedding)
         return torch.from_numpy(ratings).to(torch.float32)
 
     def get_extra_state(self):
@@ -55,6 +80,25 @@ class SVDRecommender(RecommenderModuleBase, FitExplicitInterfaceMixin):
 
     def set_extra_state(self, pickled_bytes):
         self.model = pickle.load(io.BytesIO(pickled_bytes))
+
+
+class UnpopularSVDRecommender(SVDRecommender, UnpopularRecommenderMixin):
+    def __init__(self, *args, unpopularity_coef=1e-3, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.init_unpopular_recommender_mixin(unpopularity_coef=unpopularity_coef)
+
+    def fit(self):
+        self.fit_unpopular_recommender_mixin()
+        return super().fit()
+
+    def online_ratings(self, users_explicit, users_activity=None):
+        ratings = super().online_ratings(users_explicit=users_explicit)
+        if users_activity is None:
+            users_activity = torch.from_numpy(
+                (self.to_scipy_coo(users_explicit) > 0).mean(1).A.squeeze(1)
+            )
+        ratings += self.additive_rating_offset(users_activity=users_activity)
+        return ratings
 
 
 class ImplicitRecommenderBase(RecommenderModuleBase, FitExplicitInterfaceMixin):
@@ -77,7 +121,7 @@ class ImplicitRecommenderBase(RecommenderModuleBase, FitExplicitInterfaceMixin):
 
     def forward(self, user_ids, item_ids):
         explicit_feedback = self.to_scipy_coo(self.explicit).tocsr()
-        recommended_item_ids, item_ratings = self.model.recommend(
+        recommended_item_ids, item_ratings = self.model.content(
             userid=user_ids.numpy(),
             user_items=explicit_feedback[user_ids],
             N=self.n_items,
@@ -94,9 +138,7 @@ class ImplicitRecommenderBase(RecommenderModuleBase, FitExplicitInterfaceMixin):
         return ratings[:, item_ids]
 
     @torch.inference_mode()
-    def recommend(
-        self, user_ids, n_recommendations=10, filter_already_liked_items=True
-    ):
+    def recommend(self, user_ids, n_recommendations, filter_already_liked_items=True):
         item_ids, item_ratings = self.model.recommend(
             userid=user_ids.numpy(),
             user_items=self.to_scipy_coo(self.explicit).tocsr()[user_ids],
@@ -135,12 +177,14 @@ class ImplicitNearestNeighborsRecommender(ImplicitRecommenderBase):
         self,
         users_explicit,
         n_recommendations=None,
+        **kwargs,
     ) -> torch.IntTensor:
         users_explicit = self.to_torch_coo(users_explicit)
         item_ids, item_ratings = self.model.recommend(
             userid=np.arange(users_explicit.shape[0]),
             user_items=self.to_scipy_coo(users_explicit.to(torch.float32)).tocsr(),
             N=n_recommendations or self.n_items,
+            **kwargs,
         )
         return torch.from_numpy(item_ids).to(torch.int64)
 
