@@ -12,7 +12,6 @@ import wandb
 
 from matplotlib import pyplot as plt
 from pytorch_lightning import loggers, profiler
-from sklearn.decomposition import TruncatedSVD
 import matplotlib.patheffects as pe
 
 from .data import SparseDataModuleInterface
@@ -21,6 +20,7 @@ from .metrics import RecommendingMetrics
 from .utils import wandb_plt_figure
 
 if TYPE_CHECKING:
+    import catboost
     from scipy.sparse import spmatrix
     from .interface import RecommenderModuleBase
     from .lit import LitRecommenderBase
@@ -149,19 +149,28 @@ class CatBoostMetrics(pl.callbacks.Callback):
 
     def on_test_epoch_end(self, trainer=None, pl_module: "LitRecommenderBase" = None):
         model: "CatboostInterface" = pl_module.model
-        for explicit, stage in zip(
-            [pl_module.train_explicit(), pl_module.test_explicit()], ["train", "test"]
+        for pool_kwargs, stage in zip(
+            [
+                model.full_train_pool_kwargs(),
+                model.train_pool_kwargs(explicit=pl_module.test_explicit()),
+            ],
+            ["train", "test"],
         ):
-            self.log_feature_importance(model, explicit, stage)
+            self.log_feature_importance(
+                model=model, pool=model.pool(**pool_kwargs), stage=stage
+            )
             self.log_shap_plots(
-                model, explicit, stage, plot_dependence=self.plot_dependence
+                model=model,
+                pool_kwargs=pool_kwargs,
+                stage=stage,
+                plot_dependence=self.plot_dependence,
             )
 
     @staticmethod
     def log_feature_importance(
-        model: "CatboostInterface", explicit: "spmatrix", stage: str
+        model: "CatboostInterface", pool: "catboost.Pool", stage: str
     ):
-        dataframe = model.feature_importance(explicit=explicit)
+        dataframe = model.feature_importance(pool=pool)
         wandb_table = wandb.Table(dataframe=dataframe)
         wandb.log({f"Catboost {stage} feature importance": wandb_table})
 
@@ -188,11 +197,11 @@ class CatBoostMetrics(pl.callbacks.Callback):
     def log_shap_plots(
         self,
         model: "CatboostInterface",
-        explicit: "spmatrix",
+        pool_kwargs: dict,
         stage: str,
         plot_dependence=False,
     ):
-        shap_values, expected_value, features = model.shap(explicit)
+        shap_values, expected_value, features = model.shap(pool_kwargs=pool_kwargs)
         prefix = f"{stage} shap "
 
         textio = self.force_plot(shap_values, expected_value, features)
@@ -290,33 +299,22 @@ class RecommendingMetricsCallback(pl.callbacks.Callback):
     ):
         if user_ids is None:
             user_ids = torch.arange(model.n_users)
-        if stage == "train":
-            filter_already_liked_items = False
-            metrics = self.train_metrics
-        elif stage == "val":
-            filter_already_liked_items = True
-            metrics = self.val_metrics
-        elif stage == "test":
-            filter_already_liked_items = True
-            metrics = self.test_metrics
-        else:
-            raise ValueError(f"Unknown stage {stage}")
-
-        recommendations = model.recommend(
-            user_ids=user_ids,
-            n_recommendations=self.k,
-            filter_already_liked_items=filter_already_liked_items,
-        )
+        metrics = dict(
+            train=self.train_metrics,
+            val=self.val_metrics,
+            test=self.test_metrics,
+        )[stage]
+        recommendations = model.recommend(user_ids=user_ids, n_recommendations=self.k)
         metrics_dict = metrics.batch_metrics(
             user_ids=user_ids, recommendations=recommendations
         )
-        self.log_metrics(metrics_dict, stage=stage)
+        self.log_metrics(metrics_dict=metrics_dict, stage=stage)
 
-    def log_metrics(self, metrics: dict, stage: Literal["train", "val", "test"]):
-        metrics = {stage + "_" + k: v for k, v in metrics.items()}
-        for metric_name in metrics:
+    def log_metrics(self, metrics_dict: dict, stage: Literal["train", "val", "test"]):
+        metrics_dict = {stage + "_" + k: v for k, v in metrics_dict.items()}
+        for metric_name in metrics_dict:
             wandb.define_metric(metric_name, summary="mean")
-        self.log_dict(metrics)
+        self.log_dict(metrics_dict)
 
     def on_train_epoch_end(self, trainer=None, pl_module=None):
         self.epoch_end(self.train_metrics, kind="train")

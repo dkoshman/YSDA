@@ -1,10 +1,10 @@
 name: "Catboost run"
 model:
   class_name: CatboostExplicitRecommender
-  task_type: GPU
-  devices: [0]
-#   If errors with OOM errors on other gpus, try running script with CUDA_VISIBLE_DEVICES=0,1
-  train_dir: local
+  cb_params:
+#    loss_function: ...
+    task_type: GPU
+    devices: [0]
 lightning_module:
   class_name: MovieLensNonGradientRecommender
 trainer:

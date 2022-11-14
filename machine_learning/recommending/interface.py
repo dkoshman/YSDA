@@ -3,7 +3,6 @@ from abc import ABC
 from typing import TYPE_CHECKING, Any
 
 import torch
-from torch import IntTensor
 
 from machine_learning.recommending.maths import (
     Distance,
@@ -31,10 +30,7 @@ class RecommenderModuleInterface(torch.nn.Module, abc.ABC):
 
     @abc.abstractmethod
     def recommend(
-        self,
-        user_ids: torch.IntTensor,
-        n_recommendations: int,
-        filter_already_liked_items=True,
+        self, user_ids: torch.IntTensor, n_recommendations: int = None
     ) -> torch.IntTensor:
         """Returns recommended item ids."""
 
@@ -46,12 +42,12 @@ class RecommenderModuleInterface(torch.nn.Module, abc.ABC):
     def online_recommend(
         self,
         explicit: "SparseTensor" or "spmatrix",
-        n_recommendations: int = 10,
+        n_recommendations: int = None,
     ) -> torch.IntTensor:
         """Generate recommendations for new users defined by their explicit feedback."""
 
 
-class RecommenderModuleBase(RecommenderModuleInterface):
+class RecommenderModuleBase(RecommenderModuleInterface, ABC):
     def __init__(
         self,
         n_users,
@@ -77,34 +73,24 @@ class RecommenderModuleBase(RecommenderModuleInterface):
         for parameter in self.parameters():
             return parameter.device
 
-    @abc.abstractmethod
-    def forward(
-        self, user_ids: torch.IntTensor, item_ids: torch.IntTensor
-    ) -> torch.FloatTensor:
-        ...
-
     @staticmethod
     def filter_already_liked_items(explicit, ratings):
-        return torch.where(explicit.to_dense() > 0, torch.finfo().min, ratings)
+        return torch.where(explicit.to_dense() > 0, -torch.inf, ratings)
 
     @staticmethod
     def ratings_to_recommendations(ratings, n_recommendations):
         item_ratings, item_ids = torch.topk(input=ratings, k=n_recommendations)
+        item_ids[item_ratings == -torch.inf] = -1
         return item_ids
 
-    def recommend(
-        self,
-        user_ids: torch.IntTensor,
-        n_recommendations: int,
-        filter_already_liked_items=True,
-    ) -> torch.IntTensor:
+    def recommend(self, user_ids, n_recommendations=None):
+        n_recommendations = n_recommendations or self.n_items
         with torch.inference_mode():
             ratings = self(user_ids=user_ids, item_ids=torch.arange(self.n_items))
-        if filter_already_liked_items:
-            users_explicit = torch_sparse_slice(self.explicit, row_ids=user_ids).to(
-                self.device
-            )
-            ratings = self.filter_already_liked_items(users_explicit, ratings)
+        users_explicit = torch_sparse_slice(self.explicit, row_ids=user_ids).to(
+            self.device
+        )
+        ratings = self.filter_already_liked_items(users_explicit, ratings)
         recommendations = self.ratings_to_recommendations(ratings, n_recommendations)
         return recommendations
 
@@ -112,7 +98,7 @@ class RecommenderModuleBase(RecommenderModuleInterface):
         self,
         explicit: "SparseTensor" or spmatrix,
         distance: Distance or None = cosine_distance,
-        n_neighbours: int or None = 10,
+        n_neighbours: int = 10,
     ):
         explicit = self.to_torch_coo(explicit).to(self.device).detach().clone()
         distances = distance(explicit, self.explicit.detach().clone())
@@ -138,7 +124,7 @@ class RecommenderModuleBase(RecommenderModuleInterface):
             ratings[i] = user_ratings
         return ratings
 
-    def online_ratings(self, users_explicit: "SparseTensor" or spmatrix, **kwargs):
+    def online_ratings(self, users_explicit):
         """
         The fallback method is based on nearest neighbours,
         as it can be applied to any model, but may give suboptimal
@@ -147,14 +133,10 @@ class RecommenderModuleBase(RecommenderModuleInterface):
         """
         return self.online_nn_ratings(users_explicit)
 
-    def online_recommend(
-        self,
-        users_explicit: "SparseTensor" or spmatrix,
-        n_recommendations: int = 10,
-        **online_ratings_kwargs
-    ) -> torch.IntTensor:
+    def online_recommend(self, users_explicit, n_recommendations=None):
         users_explicit = self.to_torch_coo(users_explicit).to(self.device)
-        ratings = self.online_ratings(users_explicit, **online_ratings_kwargs)
+        n_recommendations = n_recommendations or self.n_items
+        ratings = self.online_ratings(users_explicit)
         ratings = self.filter_already_liked_items(users_explicit, ratings)
         recommendations = self.ratings_to_recommendations(ratings, n_recommendations)
         return recommendations
@@ -170,6 +152,35 @@ class RecommenderModuleBase(RecommenderModuleInterface):
         """
         Init module from whatever was returned by getter to be ready for inference.
         This is torch.nn.Module method, this stub is just for clarity.
+        """
+
+
+class FitExplicitInterfaceMixin:
+    @abc.abstractmethod
+    def fit(self) -> None:
+        """Fit to self.explicit feedback matrix."""
+
+
+class ExplanationMixin:
+    @abc.abstractmethod
+    def explain_recommendations(
+        self,
+        user_id: int or torch.IntTensor = None,
+        user_explicit: "SparseTensor" = None,
+        n_recommendations=10,
+        log: bool = False,
+        logging_prefix: str = "",
+    ) -> Any:
+        """
+        Return any data that will aid in understanding why
+        the model recommends the way it does.
+        :param user_id: the id of user, for whom the
+        recommendations are generated, if he has one
+        :param user_explicit: the user's feedback of
+        shape [1, self.n_items], if he doesn't have an id
+        :param n_recommendations: number of recommendations
+        :param log: whether to log explanations to wandb
+        :param logging_prefix: the prefix for log entries
         """
 
 
@@ -218,38 +229,9 @@ class UnpopularRecommenderMixin:
         )
 
 
-class FitExplicitInterfaceMixin:
-    @abc.abstractmethod
-    def fit(self) -> None:
-        """Fit to self.explicit feedback matrix."""
-
-
-class ExplanationMixin:
-    @abc.abstractmethod
-    def explain_recommendations(
-        self,
-        user_id: int or IntTensor = None,
-        user_explicit: "SparseTensor" = None,
-        n_recommendations=10,
-        log: bool = False,
-        logging_prefix: str = "",
-    ) -> Any:
-        """
-        Return any data that will aid in understanding why
-        the model recommends the way it does.
-        :param user_id: the id of user, for whom the
-        recommendations are generated, if he has one
-        :param user_explicit: the user's feedback of
-        shape [1, self.n_items], if he doesn't have an id
-        :param n_recommendations: number of recommendations
-        :param log: whether to log explanations to wandb
-        :param logging_prefix: the prefix for log entries
-        """
-
-
 class RecommendingLossInterface:
     def __init__(self, explicit):
-        ...
+        pass
 
     @abc.abstractmethod
     def __call__(

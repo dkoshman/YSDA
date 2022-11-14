@@ -11,8 +11,8 @@ optimizer:
 logger:
   class_name: WandbLogger
   save_dir: local
-profiler:
-  class_name: WandbProfiler
+#profiler:
+#  class_name: WandbProfiler
 trainer:
   default_root_dir: local
   amp_backend: native

@@ -3,13 +3,15 @@ model:
   class_name: CatboostMovieLensAggregatorFromArtifacts
   recommender_artifacts: [svd:latest, my_mf_slim:latest]
   lit_modules: [MovieLensNonGradientRecommender, MovieLensMFRecommender]
-#  cb_params:
-#    task_type: GPU
-#    devices: [5]
+  cb_params:
+    task_type: GPU
+    devices: [0]
+#    loss_function: QueryCrossEntropy
 lightning_module:
   class_name: MovieLensNonGradientRecommender
 trainer:
   num_sanity_val_steps: 0
+  max_epochs: -1
 callbacks:
   CatBoostMetrics:
     plot_dependence: true

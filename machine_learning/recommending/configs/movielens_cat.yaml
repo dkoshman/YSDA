@@ -1,11 +1,10 @@
 name: "Catboost movielens run"
 model:
-  class_name: CatboostMovieLensFeatureRecommender
+  class_name: CatboostMovieLens100kFeatureRecommender
   movielens_directory: local/ml-100k
-  task_type: GPU
-  devices: [1]
-#   If errors with OOM errors on other gpus, try running script with CUDA_VISIBLE_DEVICES=0,1
-  train_dir: local
+  cb_params:
+    task_type: GPU
+    devices: [0]
 lightning_module:
   class_name: MovieLensNonGradientRecommender
 trainer:

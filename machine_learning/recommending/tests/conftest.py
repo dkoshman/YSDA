@@ -23,7 +23,9 @@ def seed_everything(seed=None):
     import sys
     import time
 
+    # Save seed to enable reproducibility.
     seed_file = "_latest_seed.txt"
+    # To avoid resetting rng when called from different points in code.
     environment_variable = "_SEEDED_EVERYTHING"
 
     if os.environ.get(environment_variable) == "True":

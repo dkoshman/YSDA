@@ -1,6 +1,7 @@
 import contextlib
 import os
 import time
+import warnings
 
 import torch
 import wandb
@@ -76,10 +77,8 @@ def plt_figure(*args, **kwargs):
 def wandb_plt_figure(title, *args, **kwargs):
     with plt_figure(*args, **kwargs) as figure:
         plt.title(title)
-        try:
-            yield figure
-        finally:
-            wandb.log({title: wandb.Image(figure)})
+        yield figure
+        wandb.log({title: wandb.Image(figure)})
 
 
 @contextlib.contextmanager
@@ -100,3 +99,10 @@ def batch_size_in_bytes(batch):
     elif isinstance(batch, dict):
         return sum(batch_size_in_bytes(i) for i in batch.values())
     return 0
+
+
+@contextlib.contextmanager
+def filter_warnings(action: str, category=None):
+    with warnings.catch_warnings():
+        warnings.simplefilter(action=action, category=category)
+        yield

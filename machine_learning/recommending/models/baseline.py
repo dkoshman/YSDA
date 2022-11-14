@@ -30,12 +30,12 @@ class RandomRecommender(RecommenderModuleBase, FitExplicitInterfaceMixin):
 
 class PopularRecommender(RecommenderModuleBase, FitExplicitInterfaceMixin):
     def __init__(self, **kwargs):
-        super().__init__(**kwargs, persistent_explicit=False)
+        super().__init__(**kwargs)
         self.register_buffer(name="items_count", tensor=torch.zeros(self.n_items))
 
     def fit(self):
         implicit_feedback = self.to_scipy_coo(self.explicit) > 0
-        self.items_count = torch.from_numpy(implicit_feedback.sum(axis=0).A.squeeze())
+        self.items_count = torch.from_numpy(implicit_feedback.sum(axis=0).A.squeeze(0))
 
     def forward(self, user_ids, item_ids):
         ratings = self.items_count[item_ids].repeat(len(user_ids), 1)
@@ -49,10 +49,11 @@ class SVDRecommender(RecommenderModuleBase, FitExplicitInterfaceMixin):
 
     def fit(self):
         self.model.fit(self.to_scipy_coo(self.explicit))
-        if wandb.run is not None:
-            self.plot_explained_variance()
+        self.plot_explained_variance()
 
     def plot_explained_variance(self):
+        if wandb.run is None:
+            return
         wandb.log(
             dict(explained_variance_ratio=self.model.explained_variance_ratio_.sum())
         )
@@ -68,7 +69,7 @@ class SVDRecommender(RecommenderModuleBase, FitExplicitInterfaceMixin):
         ratings = self.online_ratings(users_explicit=users_explicit)
         return ratings[:, item_ids]
 
-    def online_ratings(self, users_explicit, **kwargs):
+    def online_ratings(self, users_explicit):
         users_explicit = self.to_scipy_coo(users_explicit)
         embedding = self.model.transform(users_explicit)
         ratings = self.model.inverse_transform(embedding)
@@ -80,25 +81,6 @@ class SVDRecommender(RecommenderModuleBase, FitExplicitInterfaceMixin):
 
     def set_extra_state(self, pickled_bytes):
         self.model = pickle.load(io.BytesIO(pickled_bytes))
-
-
-class UnpopularSVDRecommender(SVDRecommender, UnpopularRecommenderMixin):
-    def __init__(self, *args, unpopularity_coef=1e-3, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.init_unpopular_recommender_mixin(unpopularity_coef=unpopularity_coef)
-
-    def fit(self):
-        self.fit_unpopular_recommender_mixin()
-        return super().fit()
-
-    def online_ratings(self, users_explicit, users_activity=None):
-        ratings = super().online_ratings(users_explicit=users_explicit)
-        if users_activity is None:
-            users_activity = torch.from_numpy(
-                (self.to_scipy_coo(users_explicit) > 0).mean(1).A.squeeze(1)
-            )
-        ratings += self.additive_rating_offset(users_activity=users_activity)
-        return ratings
 
 
 class ImplicitRecommenderBase(RecommenderModuleBase, FitExplicitInterfaceMixin):
@@ -138,12 +120,12 @@ class ImplicitRecommenderBase(RecommenderModuleBase, FitExplicitInterfaceMixin):
         return ratings[:, item_ids]
 
     @torch.inference_mode()
-    def recommend(self, user_ids, n_recommendations, filter_already_liked_items=True):
+    def recommend(self, user_ids, n_recommendations=None):
         item_ids, item_ratings = self.model.recommend(
             userid=user_ids.numpy(),
             user_items=self.to_scipy_coo(self.explicit).tocsr()[user_ids],
-            N=n_recommendations,
-            filter_already_liked_items=filter_already_liked_items,
+            N=n_recommendations or self.n_items,
+            filter_already_liked_items=True,
         )
         return torch.from_numpy(item_ids).to(torch.int64)
 
@@ -174,10 +156,7 @@ class ImplicitNearestNeighborsRecommender(ImplicitRecommenderBase):
         )
 
     def online_recommend(
-        self,
-        users_explicit,
-        n_recommendations=None,
-        **kwargs,
+        self, users_explicit, n_recommendations=None, **kwargs
     ) -> torch.IntTensor:
         users_explicit = self.to_torch_coo(users_explicit)
         item_ids, item_ratings = self.model.recommend(
@@ -220,3 +199,22 @@ class ImplicitMatrixFactorizationRecommender(ImplicitRecommenderBase):
         super().__init__(
             implicit_model=implicit_model, implicit_kwargs=implicit_kwargs, **kwargs
         )
+
+
+class UnpopularSVDRecommender(SVDRecommender, UnpopularRecommenderMixin):
+    def __init__(self, *args, unpopularity_coef=1e-3, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.init_unpopular_recommender_mixin(unpopularity_coef=unpopularity_coef)
+
+    def fit(self):
+        self.fit_unpopular_recommender_mixin()
+        return super().fit()
+
+    def online_ratings(self, users_explicit, users_activity=None):
+        ratings = super().online_ratings(users_explicit=users_explicit)
+        if users_activity is None:
+            users_activity = torch.from_numpy(
+                (self.to_scipy_coo(users_explicit) > 0).mean(1).A.squeeze(1)
+            )
+        ratings += self.additive_rating_offset(users_activity=users_activity)
+        return ratings

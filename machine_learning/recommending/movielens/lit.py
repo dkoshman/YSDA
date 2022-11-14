@@ -1,7 +1,6 @@
 from ..models import als, baseline, cat, mf, slim
 from ..lit import LitRecommenderBase, NonGradientRecommenderMixin
 from .data import MovieLens100k, MovieLens25m
-from . import callbacks as movielens_callbacks
 from . import cat as movielens_cat
 
 
@@ -56,7 +55,6 @@ class MovieLensNonGradientRecommenderMixin(NonGradientRecommenderMixin):
             baseline,
             cat,
             movielens_cat,
-            movielens_callbacks,
         ]
 
 

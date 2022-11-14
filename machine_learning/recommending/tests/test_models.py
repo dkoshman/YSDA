@@ -196,11 +196,11 @@ def test_baseline():
 def test_catboost():
     for cls in [
         cat.CatboostExplicitRecommender,
-        movielens_cat.CatboostMovieLensFeatureRecommender,
+        movielens_cat.CatboostMovieLens100kFeatureRecommender,
     ]:
         explicit = random_explicit_feedback(max_rating=np.random.randint(2, 11))
         kwargs = dict(explicit=explicit, iterations=np.random.randint(1, 10))
-        if cls == movielens_cat.CatboostMovieLensFeatureRecommender:
+        if cls == movielens_cat.CatboostMovieLens100kFeatureRecommender:
             kwargs["movielens_directory"] = "local/ml-100k"
         module = cls(**kwargs)
         lightning_module = MockNonGradientRecommender(model=module)

@@ -14,7 +14,6 @@ import wandb
 
 from machine_learning.recommending.movielens.data import read_csv_imdb_ratings
 from machine_learning.recommending.utils import wandb_timeit
-from machine_learning.recommending.interface import UnpopularRecommenderMixin
 
 
 if TYPE_CHECKING:
@@ -106,13 +105,11 @@ class Session:
         recommender: "RecommenderModuleBase",
         movie_markdown_generator: MovieMarkdownGenerator,
         n_recommendations=10,
-        # user_activity_running_mean_coef=0.1,???
     ):
         self.recommender = recommender
         self.movie_markdown_generator = movie_markdown_generator
         self.movielens = self.movie_markdown_generator.movielens
         self.user_activity = None
-        # self.user_activity_running_mean_coef = user_activity_running_mean_coef
         self.session_length = 0
         self.n_recommendations = n_recommendations
         wandb.define_metric("session_length", summary="max")
@@ -133,23 +130,10 @@ class Session:
         )
 
     def content(self):
-        kwargs = {}
-        # if isinstance(self.recommender, UnpopularRecommenderMixin):
-        #     if self.user_activity is None:
-        #         self.user_activity = self.recommender.mean_user_activity
-        #     else:
-        #         latest_activity_estimation = (self.explicit > 0).sum() / (
-        #             (~np.isnan(self.explicit)).sum()
-        #         )
-        #         self.user_activity = (
-        #             self.user_activity * (1 - self.user_activity_running_mean_coef)
-        #             + latest_activity_estimation * self.user_activity_running_mean_coef
-        #         )
-        #     kwargs = dict(users_activity=self.user_activity)
         explicit = scipy.sparse.coo_matrix(np.nan_to_num(self.explicit).reshape(1, -1))
         with torch.no_grad(), wandb_timeit("online_recommend"):
             user_recommendations = self.recommender.online_recommend(
-                explicit, n_recommendations=self.recommender.n_items, **kwargs
+                explicit, n_recommendations=self.recommender.n_items
             )[0].numpy()
 
         new_items_mask = np.isnan(self.explicit)

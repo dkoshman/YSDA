@@ -233,7 +233,8 @@ def main():
         description="Split and save movielens 25m dataset by timestamps into train and test in provided proportion."
     )
     parser.add_argument("directory", default="local/ml-25m", type=str, nargs="?")
-    parser.add_argument("quantile", default=0.8, type=float, nargs="?")
+    # TODO: multiple quantiles
+    parser.add_argument("quantiles", default=0.8, type=float, nargs="*")
     args = parser.parse_args()
 
     with wandb.init(

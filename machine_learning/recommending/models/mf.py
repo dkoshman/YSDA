@@ -111,7 +111,7 @@ class MFSlimRecommender(RecommenderModuleBase):
         ratings = self.online_ratings(users_explicit=users_explicit)
         return ratings[:, item_ids]
 
-    def online_ratings(self, users_explicit, **kwargs):
+    def online_ratings(self, users_explicit):
         users_explicit = users_explicit.to(self.device, torch.float32)
         encoder = self.encoder.clone()
         decoder = self.decoder.clone()

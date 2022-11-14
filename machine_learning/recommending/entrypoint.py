@@ -5,7 +5,6 @@ import torch
 from my_tools.entrypoints import LightningConfigBuilder, ConfigDispenser
 
 from . import callbacks, metrics, models
-from .movielens import callbacks as movielens_callbacks
 from .movielens import lit as movielens_lit
 from .utils import wandb_context_manager
 
@@ -16,7 +15,6 @@ class RecommendingBuilder(LightningConfigBuilder):
         return super().module_candidates + [
             callbacks,
             metrics,
-            movielens_callbacks,
             models,
             movielens_lit,
         ]
