@@ -1,6 +1,8 @@
 project: Recommending
 datamodule:
-  directory: local/ml-100k
+  movielens:
+    class_name: MovieLens100k
+    directory: local/ml-100k
   train_explicit_file: u1.base
   val_explicit_file: u1.test
   test_explicit_file: u1.test
@@ -22,3 +24,4 @@ callbacks:
   ParameterStatsLoggerCallback: {}
   RecommendingMetricsCallback:
     k: 10
+  RecommendingExplanationIMDBCallback: {}

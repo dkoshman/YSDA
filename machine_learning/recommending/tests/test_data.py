@@ -59,7 +59,7 @@ def test_sparse_datamodule_base():
 
 
 def test_movielens():
-    movielens = MovieLens100k(path_to_movielens_folder="local/ml-100k")
+    movielens = MovieLens100k(directory="local/ml-100k")
     n_users, n_items = movielens.shape
     assert np.isscalar(n_users)
     assert np.isscalar(n_items)
@@ -91,6 +91,6 @@ def test_imdb_ratings():
     assert isinstance(ratings, pd.DataFrame)
     explicit = imdb_ratings.explicit_feedback_scipy()
     assert isinstance(explicit, coo_matrix)
-    item_ids = np.arange(imdb_ratings.movielens.shape[1])
+    item_ids = np.arange(imdb_ratings.movielens25m.shape[1])
     items_description = imdb_ratings.items_description(item_ids)
     assert isinstance(items_description, pd.DataFrame)

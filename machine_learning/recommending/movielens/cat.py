@@ -1,114 +1,161 @@
+import functools
+from typing import Literal
+
 import catboost
-import numpy as np
 import pandas as pd
 
 from ..models import als, baseline, cat, mf, slim
-from ..models.cat import (
-    CatboostInterface,
-    CatboostAggregatorFromArtifacts,
-    CatboostAggregatorRecommender,
-)
+from ..models.cat import CatboostAggregatorFromArtifacts, CatboostFeatureRecommenderBase
 from .data import MovieLens100k, MovieLens25m
 
 
-class CatboostMovieLens100kFeatureRecommender(CatboostInterface):
+class CatboostMovieLensFeatureRecommenderMixin:
+    @staticmethod
+    def common_ratings_features(
+        features: pd.DataFrame,
+        ratings: pd.DataFrame,
+        kind: 'Literal["user", "item"]',
+    ) -> pd.DataFrame:
+        features[f"mean_{kind}_ratings"] = ratings.groupby(f"{kind}_id")[
+            "rating"
+        ].mean()
+        features[f"{kind}_n_ratings"] = ratings.groupby(f"{kind}_id").size()
+        return features
+
+    def merge_user_ratings_features(
+        self, user_features: pd.DataFrame, ratings: pd.DataFrame
+    ) -> pd.DataFrame:
+        return self.common_ratings_features(
+            features=user_features, ratings=ratings, kind="user"
+        )
+
+    def merge_item_ratings_features(
+        self, item_features: pd.DataFrame, ratings: pd.DataFrame
+    ) -> pd.DataFrame:
+        return self.common_ratings_features(
+            features=item_features, ratings=ratings, kind="item"
+        )
+
+    @staticmethod
+    def user_item_timestamps(ratings: pd.DataFrame) -> pd.DataFrame:
+        user_item_features = ratings.rename(
+            {"user_id": "user_ids", "item_id": "item_ids"}, axis="columns"
+        )[["user_ids", "item_ids", "timestamp"]]
+        return user_item_features
+
+
+class CatboostMovieLens100kFeatureRecommender(
+    CatboostFeatureRecommenderBase, CatboostMovieLensFeatureRecommenderMixin
+):
     def __init__(self, *, movielens_directory, **kwargs):
         super().__init__(**kwargs)
-        self.movielens_directory = movielens_directory
+        self.movielens = MovieLens100k(movielens_directory)
 
     @property
-    def movielens(self):
-        return MovieLens100k(self.movielens_directory)
-
-    def pool(self, dataframe, **kwargs) -> catboost.Pool:
-        user_ids = dataframe["user_ids"].values
-        dataframe = dataframe.drop(["user_ids", "item_ids"], axis="columns")
-        user_cat_features = ["gender", "occupation", "zip code"]
-        item_cat_features = list(self.item_features.columns.drop(["release date"]))
-        return super().pool(
-            dataframe=dataframe,
-            cat_features=user_cat_features + item_cat_features,
-            group_id=user_ids,
-            **kwargs
-        )
-
-    def merge_features(self, dataframe):
-        dataframe = pd.merge(
-            dataframe,
-            self.user_features,
-            how="left",
-            left_on="user_ids",
-            right_index=True,
-        )
-        dataframe = pd.merge(
-            dataframe,
-            self.item_features,
-            how="left",
-            left_on="item_ids",
-            right_index=True,
-        )
-        return dataframe
-
-    @property
+    @functools.lru_cache()
     def user_features(self):
         user_features = self.movielens["u.user"]
-        user_features.index -= 1
-        assert list(user_features) == ["age", "gender", "occupation", "zip code"]
-        assert all(user_features.index.values == np.arange(len(user_features)))
+        user_features = self.merge_user_ratings_features(
+            user_features=user_features, ratings=self.movielens["u.data"]
+        )
+        user_features = user_features.reset_index(names="user_ids")
+        user_features["user_ids"] = self.movielens.movielens_user_ids_to_model_user_ids(
+            movielens_user_ids=user_features["user_ids"].values
+        )
         return user_features
 
     @property
+    @functools.lru_cache()
     def item_features(self):
         item_features = self.movielens["u.item"]
-        item_features.index -= 1
+
         item_features = item_features.drop(
             ["movie title", "video release date", "IMDb URL"], axis="columns"
         )
         item_features["release date"] = pd.to_datetime(
             item_features["release date"]
         ).astype(int)
-        assert list(item_features) == [
-            "release date",
-            "unknown",
-            "Action",
-            "Adventure",
-            "Animation",
-            "Children's",
-            "Comedy",
-            "Crime",
-            "Documentary",
-            "Drama",
-            "Fantasy",
-            "Film-Noir",
-            "Horror",
-            "Musical",
-            "Mystery",
-            "Romance",
-            "Sci-Fi",
-            "Thriller",
-            "War",
-            "Western",
-        ]
-        assert all(item_features.index.values == np.arange(len(item_features)))
+        item_features = self.merge_item_ratings_features(
+            item_features=item_features, ratings=self.movielens["u.data"]
+        )
+        item_features = item_features.reset_index(names="item_ids")
+        item_features["item_ids"] = self.movielens.movielens_movie_to_model_item_ids(
+            movielens_movie_ids=item_features["item_ids"].values
+        )
         return item_features
 
-    def train_pool_kwargs(self, explicit):
-        dataframe, explicit_data = self.dataframe_and_explicit_data(explicit=explicit)
-        dataframe = self.merge_features(dataframe=dataframe)
-        return dict(dataframe=dataframe, label=explicit_data)
+    @property
+    @functools.lru_cache()
+    def user_item_features(self):
+        return self.user_item_timestamps(ratings=self.movielens["u.data"])
 
-    def predict_pool_kwargs(self, user_ids, n_recommendations, users_explicit=None):
-        dataframe = pd.DataFrame(
-            dict(
-                user_ids=np.repeat(user_ids.numpy(), self.n_items),
-                item_ids=np.tile(np.arange(self.n_items), len(user_ids)),
+    def pool(self, dataframe, **kwargs) -> catboost.Pool:
+        user_cat_features = ["user_ids", "gender", "occupation", "zip code"]
+        item_cat_features = list(
+            self.item_features.columns.drop(
+                ["release date", "mean_item_ratings", "item_n_ratings"]
             )
         )
-        dataframe = self.merge_features(dataframe=dataframe)
-        return dict(dataframe=dataframe)
+        cat_features = user_cat_features + item_cat_features
+        return super().pool(dataframe=dataframe, cat_features=cat_features, **kwargs)
 
 
-# # TODO: use as features number of ratings, genres, timestamps
+# TODO: if catboost ooms on gpu, try batches or look up settings
+class CatboostMovieLens25mFeatureRecommender(
+    CatboostFeatureRecommenderBase, CatboostMovieLensFeatureRecommenderMixin
+):
+    def __init__(self, *, movielens_directory, **kwargs):
+        super().__init__(**kwargs)
+        self.movielens = MovieLens25m(movielens_directory)
+
+    @property
+    @functools.lru_cache()
+    def item_features(self):
+        item_features = self.movielens["movies"].reset_index(names="item_ids")
+        item_features["item_ids"] = self.movielens.movielens_movie_to_model_item_ids(
+            item_features["item_ids"].values
+        )
+        genres = item_features["genres"].str.get_dummies()
+        item_features = pd.concat(
+            [item_features.drop(["title", "genres"], axis="columns"), genres],
+            axis="columns",
+        )
+        return item_features
+
+    @property
+    @functools.lru_cache()
+    def user_item_features(self):
+        user_item_timestamps = self.user_item_timestamps(
+            ratings=self.movielens["ratings"]
+        )
+        user_item_tags = self.movielens["tags"].rename(
+            {"userId": "user_ids", "movieId": "item_ids"}, axis="columns"
+        )
+        user_item_tags = (
+            user_item_tags.groupby(["user_ids", "item_ids"])["tag"]
+            .apply(", ".join)
+            .reset_index()
+        )
+        user_item_features = pd.merge(
+            left=user_item_timestamps, right=user_item_tags, on=["user_ids", "item_ids"]
+        )
+        return user_item_features
+
+    def pool(self, dataframe, **kwargs) -> catboost.Pool:
+        user_cat_features = ["user_ids"]
+        item_cat_features = list(
+            self.item_features.columns.drop(
+                ["release date", "mean_item_ratings", "item_n_ratings"]
+            )
+        )
+        return super().pool(
+            dataframe=dataframe,
+            cat_features=user_cat_features + item_cat_features,
+            text_features=["tag"],
+            **kwargs,
+        )
+
+
 # class CatboostMovieLensFeatureAggregatorRecommender(CatboostAggregatorRecommender):
 #     def __init__(self, *, movielens_directory=None, **kwargs):
 #         super().__init__(**kwargs)

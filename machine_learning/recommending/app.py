@@ -12,7 +12,10 @@ import scipy
 import torch
 import wandb
 
-from machine_learning.recommending.movielens.data import read_csv_imdb_ratings
+from machine_learning.recommending.movielens.data import (
+    read_csv_imdb_ratings,
+    explicit_from_imdb_ratings,
+)
 from machine_learning.recommending.utils import wandb_timeit
 
 
@@ -185,19 +188,16 @@ class Session:
     def upload(self, file_object) -> str:
         filename = file_object.name
         try:
-            dataframe = read_csv_imdb_ratings(filename)
+            imdb_ratings = read_csv_imdb_ratings(filename)
         except Exception as e:
             wandb.log(dict(upload_error=str(e)))
             return f"Couldn't read imdb ratings file: \n{str(e)}"
 
-        known_imdb_ids = self.movielens["links"]["imdbId"]
-        dataframe = dataframe.query("imdbId in @known_imdb_ids")
-        imdb_ids = dataframe.index.values
-        item_ids = self.movielens.imdb_movie_to_model_item_ids(imdb_ids)
-        ratings = dataframe["your rating"].values / 2
-        explicit = np.zeros(self.recommender.n_items)
-        explicit[item_ids] = ratings
-        explicit = scipy.sparse.coo_matrix(explicit)
+        explicit = explicit_from_imdb_ratings(
+            imdb_ratings=imdb_ratings,
+            movielens_25m=self.movielens,
+            movielens_the_model_trained_on=self.movielens,
+        )
         with torch.no_grad(), wandb_timeit("online_recommend"):
             recommendations = self.recommender.online_recommend(
                 explicit, n_recommendations=self.n_recommendations

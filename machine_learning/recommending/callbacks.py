@@ -238,8 +238,6 @@ class RecommendingMetricsCallback(pl.callbacks.Callback):
         self.log_dict = wandb.log
 
     def setup(self, trainer, pl_module, stage=None):
-        if self.train_metrics is not None:
-            return
         if isinstance(trainer.datamodule, SparseDataModuleInterface):
             module = trainer.datamodule
         elif isinstance(pl_module, SparseDataModuleInterface):
@@ -247,7 +245,7 @@ class RecommendingMetricsCallback(pl.callbacks.Callback):
         else:
             raise ValueError(
                 f"One of lightning_module, datamodule must implement "
-                f"the {SparseDataModuleInterface.__name__} interface"
+                f"the {SparseDataModuleInterface.__name__} interface."
             )
         self.log_dict = pl_module.log_dict
         if (explicit := module.train_explicit()) is not None:

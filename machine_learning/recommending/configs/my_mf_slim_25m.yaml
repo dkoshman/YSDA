@@ -13,7 +13,7 @@ datamodule:
   val_batch_size: 1000
   test_batch_size: 1000
 lightning_module:
-  class_name: MovieLens25mMFRecommender
+  class_name: MovieLensMFRecommender
 trainer:
   max_epochs: -1
   accelerator: gpu

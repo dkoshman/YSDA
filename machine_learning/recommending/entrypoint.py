@@ -6,6 +6,7 @@ from my_tools.entrypoints import LightningConfigBuilder, ConfigDispenser
 
 from . import callbacks, metrics, models
 from .movielens import lit as movielens_lit
+from .movielens import callbacks as movielens_callbacks
 from .utils import wandb_context_manager
 
 
@@ -16,6 +17,7 @@ class RecommendingBuilder(LightningConfigBuilder):
             callbacks,
             metrics,
             models,
+            movielens_callbacks,
             movielens_lit,
         ]
 

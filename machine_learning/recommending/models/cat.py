@@ -1,4 +1,5 @@
 import abc
+import functools
 import re
 from collections import Counter
 from typing import TYPE_CHECKING
@@ -25,12 +26,7 @@ if TYPE_CHECKING:
     from scipy.sparse import spmatrix
     from my_tools.utils import SparseTensor
 
-# TODO:
-#  split ml25m into 3 splits, add features, train svd, mf, add explanations to app(maybe),
-#  Why it isn't recommending top from each? –– probably hard overfit, reduce model complexity?
-#  not as cat features?
-#  implement catboost ndcg for gpu?
-#  https://catboost.ai/en/docs/concepts/python-usages-examples#custom-loss-function-eval-metric
+# TODO: train svd, mf, add explanations to app(maybe)
 
 
 class CatboostInterface(
@@ -51,6 +47,11 @@ class CatboostInterface(
         text_features=(),
         label=None,
     ) -> catboost.Pool:
+        """
+        Only minor preprocessing is done in this method to
+        ensure that dataframe received is structurally
+        the same as one passed into pool.
+        """
         dataframe = dataframe.copy()
         for column in dataframe:
             if column in list(cat_features) + list(text_features):
@@ -216,17 +217,58 @@ class CatboostInterface(
         self.model.load_model("tmp")
 
 
-class CatboostExplicitRecommender(CatboostInterface):
-    def pool(self, dataframe: pd.DataFrame, **kwargs):
+class CatboostFeatureRecommenderBase(CatboostInterface):
+    @property
+    @functools.lru_cache()
+    def user_features(self) -> pd.DataFrame or None:
+        """Returns dataframe with user features, with "user_ids" column."""
+        return
+
+    @property
+    @functools.lru_cache()
+    def item_features(self) -> pd.DataFrame or None:
+        """Returns dataframe with item features, with "item_ids" column."""
+        return
+
+    @property
+    @functools.lru_cache()
+    def user_item_features(self) -> pd.DataFrame or None:
+        """Returns dataframe with user-item pair features, with "user_ids" and "item_ids" columns."""
+        return
+
+    def merge_features(self, dataframe):
+        if (user_features := self.user_features) is not None:
+            dataframe = pd.merge(
+                left=dataframe, right=user_features, how="left", on="user_ids"
+            )
+        if (item_features := self.item_features) is not None:
+            dataframe = pd.merge(
+                left=dataframe, right=item_features, how="left", on="item_ids"
+            )
+        if (user_item_features := self.user_item_features) is not None:
+            dataframe = pd.merge(
+                left=dataframe,
+                right=user_item_features,
+                how="left",
+                on=["user_ids", "item_ids"],
+            )
+        return dataframe
+
+    def pool(self, dataframe: pd.DataFrame, cat_features=None, group_id=None, **kwargs):
+        if cat_features is None:
+            cat_features = ["user_ids", "item_ids"]
+        if group_id is None:
+            group_id = dataframe["user_ids"].values
         return super().pool(
             dataframe=dataframe,
-            cat_features=["user_ids", "item_ids"],
-            group_id=dataframe["user_ids"].values,
+            cat_features=cat_features,
+            group_id=group_id,
             **kwargs,
         )
 
     def train_pool_kwargs(self, explicit):
         dataframe, explicit_data = self.dataframe_and_explicit_data(explicit=explicit)
+        dataframe = self.merge_features(dataframe=dataframe)
         return dict(dataframe=dataframe, label=explicit_data)
 
     def predict_pool_kwargs(self, user_ids, n_recommendations, users_explicit=None):
@@ -236,6 +278,7 @@ class CatboostExplicitRecommender(CatboostInterface):
                 item_ids=np.tile(np.arange(self.n_items), len(user_ids)),
             )
         )
+        dataframe = self.merge_features(dataframe=dataframe)
         return dict(dataframe=dataframe)
 
 

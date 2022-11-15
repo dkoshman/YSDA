@@ -2,17 +2,25 @@ import abc
 import functools
 import os
 from argparse import ArgumentParser
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+import torch
 import wandb
 
 from scipy.sparse import coo_matrix
+from tqdm.auto import tqdm
 
 
-class MovieLensBase:
-    def __init__(self, path_to_movielens_folder):
-        self.path_to_movielens_folder = path_to_movielens_folder
+if TYPE_CHECKING:
+    from machine_learning.recommending.lit import LitRecommenderBase
+    from my_tools.utils import SparseTensor
+
+
+class MovieLensInterface(abc.ABC):
+    def __init__(self, directory):
+        self.directory = directory
 
     @property
     @abc.abstractmethod
@@ -24,13 +32,33 @@ class MovieLensBase:
     def ratings_columns(self):
         return "user_id", "item_id", "rating", "timestamp"
 
+    @staticmethod
+    def movielens_user_ids_to_model_user_ids(movielens_user_ids: np.array):
+        return movielens_user_ids - 1
+
+    @property
+    @abc.abstractmethod
+    @functools.lru_cache()
+    def unique_movielens_movie_ids(self) -> np.array:
+        ...
+
+    def model_item_to_movielens_movie_ids(self, item_ids: np.array):
+        return self.unique_movielens_movie_ids[item_ids]
+
+    def movielens_movie_to_model_item_ids(self, movielens_movie_ids: np.array):
+        movielens_to_model = pd.Series(
+            index=self.unique_movielens_movie_ids,
+            data=np.arange(len(self.unique_movielens_movie_ids)),
+        )
+        return movielens_to_model.loc[movielens_movie_ids].values
+
     @abc.abstractmethod
     @functools.lru_cache()
     def __getitem__(self, filename):
         return self.read(filename=filename)
 
     def read(self, filename, **kwargs):
-        path = os.path.join(self.path_to_movielens_folder, filename)
+        path = os.path.join(self.directory, filename)
         dataframe = pd.read_csv(path, **kwargs)
         return dataframe.squeeze()
 
@@ -39,16 +67,20 @@ class MovieLensBase:
 
     def ratings_dataframe_to_scipy_csr(self, ratings_dataframe):
         data = ratings_dataframe["rating"].to_numpy()
-        # Stored ids start with 1.
-        row_ids = ratings_dataframe["user_id"].to_numpy() - 1
-        col_ids = ratings_dataframe["item_id"].to_numpy() - 1
+
+        user_ids = ratings_dataframe["user_id"].to_numpy()
+        row_ids = self.movielens_user_ids_to_model_user_ids(user_ids)
+
+        item_ids = ratings_dataframe["item_id"].to_numpy()
+        col_ids = self.movielens_movie_to_model_item_ids(item_ids)
+
         explicit_feedback = coo_matrix((data, (row_ids, col_ids)), shape=self.shape)
         return explicit_feedback.tocsr()
 
 
-class MovieLens100k(MovieLensBase):
-    def __init__(self, path_to_movielens_folder="local/ml-100k"):
-        super().__init__(path_to_movielens_folder)
+class MovieLens100k(MovieLensInterface):
+    def __init__(self, directory="local/ml-100k"):
+        super().__init__(directory)
 
     def __getitem__(self, filename):
         if filename == "u.info":
@@ -122,10 +154,15 @@ class MovieLens100k(MovieLensBase):
         info = self["u.info"]
         return info["users"], info["items"]
 
+    @property
+    @functools.lru_cache()
+    def unique_movielens_movie_ids(self):
+        return np.unique(self["u.item"].index)
 
-class MovieLens25m(MovieLensBase):
-    def __init__(self, path_to_movielens_folder="local/ml-25m"):
-        super().__init__(path_to_movielens_folder)
+
+class MovieLens25m(MovieLensInterface):
+    def __init__(self, directory="local/ml-25m"):
+        super().__init__(directory)
 
     @functools.lru_cache(maxsize=20)
     def __getitem__(self, filename):
@@ -145,6 +182,8 @@ class MovieLens25m(MovieLensBase):
             return self.read(filename=filename).rename(
                 dict(movieId="movielensId"), axis="columns"
             )
+        elif filename == "movies.csv":
+            return self.read(filename=filename, index_col="movieId")
         else:
             return self.read(filename=filename)
 
@@ -161,39 +200,13 @@ class MovieLens25m(MovieLensBase):
     def unique_movielens_movie_ids(self):
         return self["ratings"]["item_id"].unique()
 
-    def train_test_split(self, train_quantile: float):
-        ratings = self["ratings"]
-        threshold = ratings["timestamp"].quantile(train_quantile)
-        train_ratings = ratings.query(f"timestamp <= {threshold}")
-        test_ratings = ratings.query(f"timestamp > {threshold}")
-        return train_ratings, test_ratings
-
-    def abs_path(self, filename):
-        return os.path.join(os.getcwd(), self.path_to_movielens_folder, filename)
-
-    def save_ratings_split(self, ratings: pd.DataFrame, filename) -> str:
-        path = self.abs_path(filename=filename)
-        ratings.to_csv(path, index=False)
-        return path
-
-    def model_item_to_movielens_movie_ids(self, item_ids: np.array):
-        return self.unique_movielens_movie_ids[item_ids]
-
-    def movielens_movie_to_model_item_ids(self, movielens_movie_ids: np.array):
-        movielens_to_model = pd.Series(
-            index=self.unique_movielens_movie_ids,
-            data=np.arange(len(self.unique_movielens_movie_ids)),
-        )
-        return movielens_to_model.loc[movielens_movie_ids].values
+    @property
+    def unique_imdb_ids(self) -> np.array:
+        return self["links"]["imdbId"].values
 
     def movielens_movie_to_imdb_movie_ids(self, movielens_movie_ids: np.array):
         movielens_to_imdb = self["links"].set_index("movielensId")["imdbId"]
         return movielens_to_imdb.loc[movielens_movie_ids].values
-
-    def model_item_to_imdb_movie_ids(self, item_ids: np.array):
-        return self.movielens_movie_to_imdb_movie_ids(
-            self.model_item_to_movielens_movie_ids(item_ids)
-        )
 
     def imdb_movie_to_movielens_movie_id(self, imdb_movie_ids: np.array):
         imdb_to_movielens = self["links"].set_index("imdbId")["movielensId"]
@@ -204,55 +217,149 @@ class MovieLens25m(MovieLensBase):
             self.imdb_movie_to_movielens_movie_id(imdb_movie_ids)
         )
 
-    @staticmethod
-    def movielens_user_ids_to_model_user_ids(movielens_user_ids: np.array):
-        return movielens_user_ids - 1
+    def model_item_to_imdb_movie_ids(self, item_ids: np.array):
+        return self.movielens_movie_to_imdb_movie_ids(
+            self.model_item_to_movielens_movie_ids(item_ids)
+        )
 
-    def ratings_dataframe_to_scipy_csr(self, ratings_dataframe):
-        data = ratings_dataframe["rating"].to_numpy()
+    def quantiles_split(self, quantiles: "list[float]") -> "list[pd.DataFrame]":
+        if sum(quantiles) != 1:
+            raise ValueError(f"Quantiles must sum up to one, received {quantiles}.")
+        ratings = self["ratings"]
+        quantile_thresholds = np.cumsum(quantiles)
+        thresholds = ratings["timestamp"].quantile(quantile_thresholds)
+        thresholds = [ratings["timestamp"].min() - 1] + list(thresholds)
+        splits = []
+        for begin, end in zip(thresholds, thresholds[1:]):
+            splits.append(ratings.query(f"{begin} < timestamp <= {end}"))
+        return splits
 
-        user_ids = ratings_dataframe["user_id"].to_numpy()
-        row_ids = self.movielens_user_ids_to_model_user_ids(user_ids)
+    def abs_path(self, filename):
+        return os.path.join(os.getcwd(), self.directory, filename)
 
-        item_ids = ratings_dataframe["item_id"].to_numpy()
-        col_ids = self.movielens_movie_to_model_item_ids(item_ids)
+    def save_ratings_split(self, ratings: pd.DataFrame, filename) -> str:
+        path = self.abs_path(filename=filename)
+        ratings.to_csv(path, index=False)
+        return path
 
-        explicit_feedback = coo_matrix((data, (row_ids, col_ids)), shape=self.shape)
-        return explicit_feedback.tocsr()
+
+class MovieLensMixin:
+    @property
+    def movielens(self: "LitRecommenderBase"):
+        return self.build_class(**self.hparams["datamodule"]["movielens"])
+
+    @property
+    def class_candidates(self):
+        return super().class_candidates + [MovieLens100k, MovieLens25m]
+
+    def common_explicit(self: "LitRecommenderBase", filename):
+        return self.movielens.explicit_feedback_scipy_csr(
+            self.hparams["datamodule"][filename]
+        )
+        # if file := self.hparams["datamodule"].get(filename):
+        #     try:
+        #         return self.movielens.explicit_feedback_scipy_csr(file)
+        #     except FileNotFoundError:
+        #         return
+
+    def train_explicit(self):
+        return self.common_explicit(filename="train_explicit_file")
+
+    def val_explicit(self):
+        return self.common_explicit(filename="val_explicit_file")
+
+    def test_explicit(self):
+        return self.common_explicit(filename="test_explicit_file")
 
 
-def read_csv_imdb_ratings(path_to_imdb_ratings_csv: str) -> pd.DataFrame:
-    dataframe = pd.read_csv(path_to_imdb_ratings_csv).rename(str.lower, axis="columns")
-    dataframe["imdbId"] = dataframe["const"].str.removeprefix("tt").astype(int)
-    dataframe = dataframe.set_index("imdbId")
+def read_csv_imdb_ratings(
+    path_to_imdb_ratings_csv: str, ratings_scale_max_to_convert_to: float = 5
+) -> pd.DataFrame:
+    dataframe = pd.read_csv(path_to_imdb_ratings_csv)
+    dataframe = dataframe.rename(lambda c: c.lower().replace(" ", "_"), axis="columns")
+    dataframe = dataframe.rename({"const": "imdb_id"}, axis="columns")
+    dataframe["imdb_id"] = dataframe["imdb_id"].str.removeprefix("tt").astype(int)
+    dataframe["your_rating"] *= ratings_scale_max_to_convert_to / 10
+    assert list(dataframe) == [
+        "imdb_id",
+        "your_rating",
+        "date_rated",
+        "title",
+        "url",
+        "title_type",
+        "imdb_rating",
+        "runtime_(mins)",
+        "year",
+        "genres",
+        "num_votes",
+        "release_date",
+        "directors",
+    ]
     return dataframe
+
+
+def explicit_from_imdb_ratings(
+    imdb_ratings: pd.DataFrame,
+    movielens_the_model_trained_on: MovieLensInterface,
+    movielens_25m: MovieLens25m,
+) -> "SparseTensor":
+    movielens = movielens_the_model_trained_on
+    imdb_ids = imdb_ratings["imdb_id"].values
+
+    imdb_ids = np.intersect1d(movielens_25m.unique_imdb_ids, imdb_ids)
+    movielens_ids = movielens_25m.imdb_movie_to_movielens_movie_id(imdb_ids)
+
+    movielens_ids = np.intersect1d(movielens.unique_movielens_movie_ids, movielens_ids)
+    item_ids = movielens.movielens_movie_to_model_item_ids(movielens_ids)
+
+    imdb_ids = movielens_25m.movielens_movie_to_imdb_movie_ids(movielens_ids)
+    ratings = imdb_ratings.set_index("imdb_id").loc[imdb_ids]["your_rating"].values
+
+    n_items = movielens.shape[1]
+    explicit = np.zeros([1, n_items])
+    explicit[0, item_ids] = ratings
+    return torch.from_numpy(explicit).to_sparse()
 
 
 def main():
     parser = ArgumentParser(
-        description="Split and save movielens 25m dataset by timestamps into train and test in provided proportion."
+        description="Split and save movielens 25m dataset by timestamps in provided quantiles."
     )
     parser.add_argument("directory", default="local/ml-25m", type=str, nargs="?")
-    # TODO: multiple quantiles
-    parser.add_argument("quantiles", default=0.8, type=float, nargs="*")
+    parser.add_argument("--quantiles", "-q", type=float, nargs="+")
+    parser.add_argument("--names", "-n", type=str, nargs="*", help="names for splits")
     args = parser.parse_args()
+    if len(args.quantiles) < 2:
+        raise ValueError(
+            f"Number of quantiles to split into must be more than 1, received {args.quantiles}."
+        )
+    elif args.names is not None and len(args.names) != len(args.quantiles):
+        raise ValueError(
+            f"If provided, number of names for splits must match number of quantiles, "
+            f"received n_quantiles: {len(args.quantiles)}, n_names: {len(args.names)}."
+        )
 
     with wandb.init(
         entity="dkoshman", project="Recommending", job_type="data", config=vars(args)
     ):
-        movielens = MovieLens25m(path_to_movielens_folder=args.directory)
+        movielens = MovieLens25m(directory=args.directory)
         metadata = dict(
             directory=args.directory,
-            quantile=args.quantile,
-            files={
-                i.split(".")[0]: dict(rel_path=i, abs_path=movielens.abs_path(i))
+            quantiles=args.quantiles,
+            local_abs_paths={
+                i: movielens.abs_path(i)
                 for i in ["tags.csv", "links.csv", "movies.csv"]
             },
         )
-        train, test = movielens.train_test_split(train_quantile=args.quantile)
-        for dataframe, stage in zip([train, test], ["train", "test"]):
+        splits = movielens.quantiles_split(quantiles=args.quantiles)
+        names = args.names or [
+            f"ratings_split{i}_q{q}" for i, q in enumerate(args.quantiles)
+        ]
+
+        for dataframe, name in (tqdm_progress_bar := tqdm(zip(splits, names))):
+            tqdm_progress_bar.set_description(f"Preparing split {name}")
             df_describe = dataframe.describe().reset_index()
-            wandb.log({f"{stage}_describe": wandb.Table(dataframe=df_describe)})
+            wandb.log({f"{name}_describe": wandb.Table(dataframe=df_describe)})
             user_describe = (
                 dataframe.groupby("user_id")
                 .size()
@@ -260,7 +367,7 @@ def main():
                 .rename("user_groupby_size")
                 .reset_index()
             )
-            wandb.log({f"{stage}_user_describe": wandb.Table(dataframe=user_describe)})
+            wandb.log({f"{name}_user_describe": wandb.Table(dataframe=user_describe)})
             item_describe = (
                 dataframe.groupby("item_id")
                 .size()
@@ -268,20 +375,20 @@ def main():
                 .rename("item_groupby_size")
                 .reset_index()
             )
-            wandb.log({f"{stage}_item_describe": wandb.Table(dataframe=item_describe)})
+            wandb.log({f"{name}_item_describe": wandb.Table(dataframe=item_describe)})
 
-            filename = f"{stage}_ratings.csv"
+            filename = f"{name}.csv"
             path = movielens.save_ratings_split(ratings=dataframe, filename=filename)
-            metadata["files"][stage] = dict(rel_path=filename, abs_path=path)
+            metadata["local_abs_paths"][filename] = path
 
         artifact = wandb.Artifact(
             name="movielens25m",
             type="data",
-            description=f"Time split quantile {args.quantile}",
+            description=f"Time split by quantiles {args.quantiles}",
             metadata=metadata,
         )
-        for name, paths_dict in metadata["files"].items():
-            artifact.add_file(local_path=paths_dict["abs_path"], name=name)
+        for local_abs_path in metadata["local_abs_paths"].values():
+            artifact.add_file(local_path=local_abs_path)
 
         wandb.log_artifact(artifact, name=filename, type="data")
 
