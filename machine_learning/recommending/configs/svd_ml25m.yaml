@@ -6,12 +6,9 @@ datamodule:
   movielens:
     class_name: MovieLens25m
     directory: local/ml-25m
-#  train_explicit_file: ratings_split0_q0.001.csv
-#  val_explicit_file: ratings_split1_q0.001.csv
-#  test_explicit_file: ratings_split2_q0.001.csv
-  train_explicit_file: ratings_split0_q0.6.csv
-  val_explicit_file: ratings_split1_q0.2.csv
-  test_explicit_file: ratings_split2_q0.2.csv
+  train_explicit_file: ratings_split0_q0.8.csv
+  val_explicit_file: ratings_split1_q0.1.csv
+  test_explicit_file: ratings_split2_q0.1.csv
   batch_size: 1000
 lightning_module:
   class_name: MovieLensNonGradientRecommender
@@ -25,6 +22,4 @@ callbacks:
     artifact_name: svd_movielens_25m
   RecommendingMetricsCallback:
     k: 10
-  RecommendingExplanationIMDBCallback:
-    movielens_model_trains_on_directory: local/ml-25m
-    movielens_model_trains_on_class_name: MovieLens25m
+  RecommendingExplanationIMDBCallback: {}

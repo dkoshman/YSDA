@@ -24,4 +24,6 @@ callbacks:
   ParameterStatsLoggerCallback: {}
   RecommendingMetricsCallback:
     k: 10
-  RecommendingExplanationIMDBCallback: {}
+  RecommendingExplanationIMDBCallback:
+    movielens_model_trains_on_directory: local/ml-100k
+    movielens_model_trains_on_class_name: MovieLens100k

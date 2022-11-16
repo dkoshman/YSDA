@@ -30,7 +30,7 @@ class MovieLensInterface(abc.ABC):
 
     @property
     def ratings_columns(self):
-        return "user_id", "item_id", "rating", "timestamp"
+        return "user_id", "item_ids", "rating", "timestamp"
 
     @staticmethod
     def movielens_user_ids_to_model_user_ids(movielens_user_ids: np.array):
@@ -68,10 +68,10 @@ class MovieLensInterface(abc.ABC):
     def ratings_dataframe_to_scipy_csr(self, ratings_dataframe):
         data = ratings_dataframe["rating"].to_numpy()
 
-        user_ids = ratings_dataframe["user_id"].to_numpy()
+        user_ids = ratings_dataframe["user_ids"].to_numpy()
         row_ids = self.movielens_user_ids_to_model_user_ids(user_ids)
 
-        item_ids = ratings_dataframe["item_id"].to_numpy()
+        item_ids = ratings_dataframe["item_ids"].to_numpy()
         col_ids = self.movielens_movie_to_model_item_ids(item_ids)
 
         explicit_feedback = coo_matrix((data, (row_ids, col_ids)), shape=self.shape)
@@ -191,14 +191,14 @@ class MovieLens25m(MovieLensInterface):
     @functools.lru_cache()
     def shape(self):
         ratings = self["ratings"]
-        n_users = ratings["user_id"].nunique()
-        n_items = ratings["item_id"].nunique()
+        n_users = ratings["user_ids"].nunique()
+        n_items = ratings["item_ids"].nunique()
         return n_users, n_items
 
     @property
     @functools.lru_cache()
     def unique_movielens_movie_ids(self):
-        return self["ratings"]["item_id"].unique()
+        return self["ratings"]["item_ids"].unique()
 
     @property
     def unique_imdb_ids(self) -> np.array:
@@ -361,7 +361,7 @@ def main():
             df_describe = dataframe.describe().reset_index()
             wandb.log({f"{name}_describe": wandb.Table(dataframe=df_describe)})
             user_describe = (
-                dataframe.groupby("user_id")
+                dataframe.groupby("user_ids")
                 .size()
                 .describe()
                 .rename("user_groupby_size")
@@ -369,7 +369,7 @@ def main():
             )
             wandb.log({f"{name}_user_describe": wandb.Table(dataframe=user_describe)})
             item_describe = (
-                dataframe.groupby("item_id")
+                dataframe.groupby("item_ids")
                 .size()
                 .describe()
                 .rename("item_groupby_size")

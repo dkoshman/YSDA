@@ -23,13 +23,20 @@ class RecommendingExplanationIMDBCallback(
 ):
     def __init__(
         self,
-        movielens_model_trains_on_directory="local/ml-100k",
-        movielens_model_trains_on_class_name="MovieLens100k",
         path_to_imdb_ratings_csv="local/my_imdb_ratings.csv",
         movielens25m_directory="local/ml-25m",
+        movielens_model_trains_on_directory=None,
+        movielens_model_trains_on_class_name=None,
         n_recommendations=10,
         ratings_scale_max_to_convert_to=5,
     ):
+        """If movielens_model_trains is not passed, it is assumed to be MovieLens25m."""
+        movielens_model_trains_on_directory = (
+            movielens_model_trains_on_directory or movielens25m_directory
+        )
+        movielens_model_trains_on_class_name = (
+            movielens_model_trains_on_class_name or "MovieLens25m"
+        )
         self.imdb_ratings = read_csv_imdb_ratings(
             path_to_imdb_ratings_csv=path_to_imdb_ratings_csv,
             ratings_scale_max_to_convert_to=ratings_scale_max_to_convert_to,
