@@ -1,7 +1,8 @@
 import abc
 import re
-from collections import Counter, defaultdict
-from typing import TYPE_CHECKING, Literal, Union
+from collections import Counter
+from enum import Enum
+from typing import TYPE_CHECKING
 
 import catboost
 import einops
@@ -14,8 +15,7 @@ import wandb
 from scipy.sparse import csr_array, coo_array
 from tqdm.auto import tqdm
 
-from my_tools.models import WandbLoggerMixin
-from my_tools.utils import BuilderMixin, torch_sparse_slice
+from my_tools.utils import torch_sparse_slice
 
 from ..interface import FitExplicitInterfaceMixin, RecommenderModuleBase
 from ..movielens import lit as movielens_lit
@@ -26,18 +26,46 @@ if TYPE_CHECKING:
     from my_tools.utils import SparseTensor
 
 
-# TODO: add explanations to imdb, train svd(10, 100, 1000 ?), mf, add explanations to app(maybe),
+# TODO: train 100k feature_aggregator, try to add explanations to imdb callback,
+#  train svd(10, 100, 1000 ?), mf, add explanations to app(maybe),
 
 
-class CatboostInterface(
-    RecommenderModuleBase, FitExplicitInterfaceMixin, WandbLoggerMixin, abc.ABC
-):
-    def __init__(self, cb_params=None, **kwargs):
+class CatboostInterface(RecommenderModuleBase, FitExplicitInterfaceMixin, abc.ABC):
+    class FeatureKind(Enum):
+        user = "user"
+        item = "item"
+        user_item = "user_item"
+
+        @property
+        def merge_on(self):
+            return {
+                self.user: "user_ids",
+                self.item: "item_ids",
+                self.user_item: ["user_ids", "item_ids"],
+            }[self]
+
+    def __init__(self, cb_params=None, unknown_category_token="__NA__", **kwargs):
         super().__init__(**kwargs)
         self.model = catboost.CatBoostRanker(**(cb_params or {}))
+        self.cat_features: "dict[CatboostInterface.FeatureKind: set[str]]" = {
+            i: set() for i in self.FeatureKind
+        }
+        self.text_features: "dict[CatboostInterface.FeatureKind: set[str]]" = {
+            i: set() for i in self.FeatureKind
+        }
         self._full_train_dataframe_label = None
-        self.cat_features: "defaultdict[str, set[str]]" = defaultdict(set)
-        self.text_features: "defaultdict[str, set[str]]" = defaultdict(set)
+        self.unknown_category_token = unknown_category_token
+
+    def update_features(
+        self,
+        kind: FeatureKind,
+        cat_features: set = None,
+        text_features: set = None,
+    ):
+        if cat_features is not None:
+            self.cat_features[kind] |= cat_features
+        if text_features is not None:
+            self.text_features[kind] |= text_features
 
     @abc.abstractmethod
     def train_user_item_dataframe_label(
@@ -72,47 +100,58 @@ class CatboostInterface(
         :param users_explicit: explicit feedback passed to online_recommend
         """
 
-    def user_features(self) -> pd.DataFrame or None:
-        """
-        Returns user features dataframe with "user_ids" column, also
-        updates self.cat_features, self.text_features with user features names.
-        """
-
-    def item_features(self) -> pd.DataFrame or None:
-        """
-        Returns item features dataframe with "item_ids" column, also
-        updates self.cat_features, self.text_features with item feature names.
-        """
-
-    def user_item_features(self) -> pd.DataFrame or None:
-        """
-        Returns user-item pair features dataframe with "user_ids" and "item_ids" columns,
-        also updates self.cat_features, self.text_features with user-item feature names.
-        """
-
     @staticmethod
-    def maybe_none_merge(left, right, on) -> pd.DataFrame or None:
+    def maybe_none_left_merge(left, right, on) -> pd.DataFrame or None:
         if left is None:
             return right
         if right is None:
             return left
         return pd.merge(left=left, right=right, how="left", on=on)
 
+    def user_features(self) -> pd.DataFrame or None:
+        """Constructs user features dataframe with "user_ids" column."""
+
+    def item_features(self) -> pd.DataFrame or None:
+        """Constructs item features dataframe with "item_ids" column."""
+
+    def user_item_features(self) -> pd.DataFrame or None:
+        """Constructs user-item pair features dataframe with "user_ids" and "item_ids" columns."""
+
+    def features(self, kind: FeatureKind):
+        return getattr(self, f"{kind.value}_features")()
+
     def merge_features(self, dataframe):
         """Merge all extra features train/predict user-items dataframe."""
-        dataframe = self.maybe_none_merge(
-            left=dataframe, right=self.user_features(), on="user_ids"
-        )
-        dataframe = self.maybe_none_merge(
-            left=dataframe, right=self.item_features(), on="item_ids"
-        )
-        dataframe = self.maybe_none_merge(
-            left=dataframe, right=self.user_item_features(), on=["user_ids", "item_ids"]
-        )
+        for kind in self.FeatureKind:
+            dataframe = self.maybe_none_left_merge(
+                left=dataframe, right=self.features(kind=kind), on=kind.merge_on
+            )
         return dataframe
 
-    @staticmethod
+    def build_pool_kwargs(
+        self,
+        *,
+        user_item_dataframe,
+        label=None,
+        drop_user_ids=False,
+        drop_item_ids=False,
+    ) -> dict:
+        group_id = user_item_dataframe["user_ids"].values
+        dataframe = self.merge_features(user_item_dataframe)
+        if drop_user_ids:
+            dataframe = dataframe.drop("user_ids", axis="columns")
+        if drop_item_ids:
+            dataframe = dataframe.drop("item_ids", axis="columns")
+        return dict(
+            dataframe=dataframe,
+            group_id=group_id,
+            label=label,
+            cat_features=list(set().union(*self.cat_features.values())),
+            text_features=list(set().union(*self.text_features.values())),
+        )
+
     def pool(
+        self,
         dataframe: pd.DataFrame,
         group_id,
         label=None,
@@ -128,7 +167,11 @@ class CatboostInterface(
         dataframe = dataframe.copy()
         for column in dataframe:
             if column in list(cat_features) + list(text_features):
-                dataframe[column] = dataframe[column].astype("string")
+                dataframe[column] = (
+                    dataframe[column]
+                    .fillna(self.unknown_category_token)
+                    .astype("string")
+                )
             else:
                 dataframe[column] = pd.to_numeric(dataframe[column])
         with filter_warnings(action="ignore", category=FutureWarning):
@@ -141,48 +184,14 @@ class CatboostInterface(
             )
         return pool
 
-    def build_pool(self, dataframe, label=None, group_id=None) -> catboost.Pool:
-        """Method to override for custom pool creation."""
-        return self.pool(
-            dataframe=self.merge_features(dataframe),
-            group_id=dataframe["user_ids"].values if group_id is None else group_id,
-            label=label,
-            cat_features=set.union(*self.cat_features.values()),
-            text_features=set.union(*self.text_features.values()),
-        )
-
     def fit(self):
         dataframe, label = self.full_train_dataframe_label()
-        self.log_user_features_dataframe(dataframe=dataframe, label=label, stage="fit")
-        pool = self.build_pool(dataframe=dataframe, label=label)
+        pool_kwargs = self.build_pool_kwargs(user_item_dataframe=dataframe, label=label)
+        pool = self.pool(**pool_kwargs)
         self.model.fit(pool, verbose=100)
 
-    def log_user_features_dataframe(self, dataframe, stage, label=None, ratings=None):
-        """Logs features dataframe slice corresponding to single random user."""
-        user_id = dataframe["user_ids"].sample(1).values[0]
-        indices = dataframe.query(f"user_ids == @user_id").index.values
-        user_dataframe = dataframe.iloc[indices].copy()
-        user_dataframe = self.merge_features(dataframe=user_dataframe)
-        if stage == "fit":
-            self.log(
-                dict(cat_features=self.cat_features, text_features=self.text_features)
-            )
-        if label is not None:
-            with filter_warnings(
-                action="ignore", category=pd.errors.SettingWithCopyWarning
-            ):
-                user_dataframe["explicit"] = label[indices]
-        if ratings is not None:
-            user_dataframe["ratings"] = ratings[indices]
-        self.log(
-            {
-                f"{stage} user dataframe": wandb.Table(dataframe=user_dataframe),
-                f"{stage} dataframe size": float(len(dataframe)),
-            }
-        )
-
     def forward(self, user_ids, item_ids):
-        raise RuntimeError(
+        raise NotImplementedError(
             "Catboost works well when recommending small number of items, "
             "and is not meant to generate ratings for all items."
         )
@@ -191,18 +200,16 @@ class CatboostInterface(
         self, user_ids, users_explicit: "SparseTensor" = None, n_recommendations=None
     ):
         n_recommendations = n_recommendations or self.n_items
-        dataframe = self.predict_user_item_dataframe(
+        user_item_dataframe = self.predict_user_item_dataframe(
             user_ids=user_ids,
             n_recommendations=n_recommendations,
             users_explicit=users_explicit,
         )
-        row_ids = dataframe["user_ids"].values.astype(np.int32)
-        col_ids = dataframe["item_ids"].values.astype(np.int32)
-        pool = self.build_pool(dataframe=dataframe)
+        row_ids = user_item_dataframe["user_ids"].values.astype(np.int32)
+        col_ids = user_item_dataframe["item_ids"].values.astype(np.int32)
+        pool_kwargs = self.build_pool_kwargs(user_item_dataframe=user_item_dataframe)
+        pool = self.pool(**pool_kwargs)
         ratings = self.model.predict(pool)
-        self.log_user_features_dataframe(
-            dataframe=dataframe, stage="recommend", ratings=ratings
-        )
 
         ratings = coo_array(
             (ratings, (row_ids, col_ids)), shape=[row_ids.max() + 1, self.n_items]
@@ -239,14 +246,9 @@ class CatboostInterface(
             n_recommendations=n_recommendations,
         )
 
-    def feature_importance(self, pool: catboost.Pool) -> pd.Series:
-        """
-        Returns series with feature names in index and
-        their importance in values, sorted by decreasing importance.
-        """
-        return self.model.get_feature_importance(pool, prettified=True)
-
-    def shap(self, dataframe, label) -> "tuple[np.ndarray, float, pd.DataFrame]":
+    def shap(
+        self, user_item_dataframe, label
+    ) -> "tuple[np.ndarray, float, pd.DataFrame]":
         """
         :return shap_values, expected_value, features: everything necessary to draw shap plots
         shap_values – matrix of shape [explicit.numel(), n_features] with
@@ -255,10 +257,13 @@ class CatboostInterface(
         features – dataframe with same shape as shap_values with
             feature values and names
         """
-        explainer = shap.TreeExplainer(self.model)
-        pool = self.build_pool(dataframe=dataframe, label=label)
+        explainer = shap.TreeExplainer(model=self.model)
+        pool_kwargs = self.build_pool_kwargs(
+            user_item_dataframe=user_item_dataframe, label=label
+        )
+        pool = self.pool(**pool_kwargs)
         shap_values = explainer.shap_values(pool)
-        features = dataframe[pool.get_feature_names()]
+        features = pool_kwargs["dataframe"]
         return shap_values, explainer.expected_value, features
 
     def get_extra_state(self):
@@ -277,11 +282,13 @@ class CatboostRecommenderBase(CatboostInterface):
     """This recommender uses only user and item ids as features."""
 
     def user_features(self):
-        self.cat_features["user"] |= {"user_ids"}
+        kind = self.FeatureKind.user
+        self.update_features(kind=kind, cat_features={"user_ids"})
         return super().user_features()
 
     def item_features(self):
-        self.cat_features["item"] = {"item_ids"}
+        kind = self.FeatureKind.item
+        self.update_features(kind=kind, cat_features={"item_ids"})
         return super().item_features()
 
     def train_user_item_dataframe_label(self, explicit):
@@ -336,13 +343,16 @@ class CatboostAggregatorRecommender(CatboostInterface):
         return names
 
     def user_item_features(self):
-        self.cat_features["user_item"] |= set(self.recommender_names)
+        kind = self.FeatureKind.user_item
+        self.update_features(kind=kind, cat_features=set(self.recommender_names))
         return super().user_item_features()
 
-    def build_pool(self, dataframe, label=None, group_id=None):
-        group_id = dataframe["user_ids"].values
-        dataframe = dataframe.drop(["user_ids", "item_ids"], axis="columns")
-        return super().build_pool(dataframe=dataframe, group_id=group_id, label=label)
+    def build_pool_kwargs(self, drop_user_ids=None, drop_item_ids=None, **kwargs):
+        return super().build_pool_kwargs(
+            drop_user_ids=True if drop_user_ids is None else drop_user_ids,
+            drop_item_ids=True if drop_item_ids is None else drop_item_ids,
+            **kwargs,
+        )
 
     def ranks_dataframe(self, user_ids, item_ids, ranks):
         """

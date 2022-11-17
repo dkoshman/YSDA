@@ -24,28 +24,43 @@ class MovieLensInterface(abc.ABC):
 
     @property
     @abc.abstractmethod
-    @functools.lru_cache()
     def shape(self) -> "tuple[int, int]":
         """Return [n_users, n_items]"""
 
     @property
     def ratings_columns(self):
-        return "user_id", "item_ids", "rating", "timestamp"
+        return "user_ids", "item_ids", "rating", "timestamp"
 
-    @staticmethod
-    def movielens_user_ids_to_model_user_ids(movielens_user_ids: np.array):
-        return movielens_user_ids - 1
+    @property
+    @abc.abstractmethod
+    @functools.lru_cache()
+    def unique_movielens_user_ids(self) -> np.array:
+        """Returns cached unique sorted movielens user ids that the model can encounter during training."""
+        all_movielens_user_ids = ...
+        return np.unique(all_movielens_user_ids)
 
     @property
     @abc.abstractmethod
     @functools.lru_cache()
     def unique_movielens_movie_ids(self) -> np.array:
-        ...
+        """Returns cached unique sorted movielens movie ids that the model can encounter during training."""
+        all_movielens_movie_ids = ...
+        return np.unique(all_movielens_movie_ids)
 
-    def model_item_to_movielens_movie_ids(self, item_ids: np.array):
+    def dense_to_movielens_user_ids(self, user_ids: np.array):
+        return self.unique_movielens_user_ids[user_ids]
+
+    def movielens_to_dense_user_ids(self, movielens_user_ids: np.array):
+        movielens_to_model = pd.Series(
+            index=self.unique_movielens_user_ids,
+            data=np.arange(len(self.unique_movielens_user_ids)),
+        )
+        return movielens_to_model.loc[movielens_user_ids].values
+
+    def dense_item_to_movielens_movie_ids(self, item_ids: np.array):
         return self.unique_movielens_movie_ids[item_ids]
 
-    def movielens_movie_to_model_item_ids(self, movielens_movie_ids: np.array):
+    def movielens_movie_to_dense_item_ids(self, movielens_movie_ids: np.array):
         movielens_to_model = pd.Series(
             index=self.unique_movielens_movie_ids,
             data=np.arange(len(self.unique_movielens_movie_ids)),
@@ -60,20 +75,26 @@ class MovieLensInterface(abc.ABC):
     def read(self, filename, **kwargs):
         path = os.path.join(self.directory, filename)
         dataframe = pd.read_csv(path, **kwargs)
+        dataframe = dataframe.rename(
+            {"user_id": "user_ids", "item_id": "item_ids"}, axis="columns"
+        )
         return dataframe.squeeze()
 
     def explicit_feedback_scipy_csr(self, name):
         return self.ratings_dataframe_to_scipy_csr(self[name])
 
     def ratings_dataframe_to_scipy_csr(self, ratings_dataframe):
-        data = ratings_dataframe["rating"].to_numpy()
+        movielens_ratings = ratings_dataframe["rating"].to_numpy()
 
-        user_ids = ratings_dataframe["user_ids"].to_numpy()
-        row_ids = self.movielens_user_ids_to_model_user_ids(user_ids)
+        movielens_user_ids = ratings_dataframe["user_ids"].to_numpy()
+        user_ids = self.movielens_to_dense_user_ids(movielens_user_ids)
 
-        item_ids = ratings_dataframe["item_ids"].to_numpy()
-        col_ids = self.movielens_movie_to_model_item_ids(item_ids)
+        movielens_movie_ids = ratings_dataframe["item_ids"].to_numpy()
+        item_ids = self.movielens_movie_to_dense_item_ids(movielens_movie_ids)
 
+        data = movielens_ratings
+        row_ids = user_ids
+        col_ids = item_ids
         explicit_feedback = coo_matrix((data, (row_ids, col_ids)), shape=self.shape)
         return explicit_feedback.tocsr()
 
@@ -156,6 +177,11 @@ class MovieLens100k(MovieLensInterface):
 
     @property
     @functools.lru_cache()
+    def unique_movielens_user_ids(self) -> np.array:
+        return np.unique(self["u.user"].index)
+
+    @property
+    @functools.lru_cache()
     def unique_movielens_movie_ids(self):
         return np.unique(self["u.item"].index)
 
@@ -197,12 +223,18 @@ class MovieLens25m(MovieLensInterface):
 
     @property
     @functools.lru_cache()
-    def unique_movielens_movie_ids(self):
-        return self["ratings"]["item_ids"].unique()
+    def unique_movielens_user_ids(self) -> np.array:
+        return np.unique(self["ratings"]["user_ids"])
 
     @property
+    @functools.lru_cache()
+    def unique_movielens_movie_ids(self):
+        return np.unique(self["ratings"]["item_ids"])
+
+    @property
+    @functools.lru_cache()
     def unique_imdb_ids(self) -> np.array:
-        return self["links"]["imdbId"].values
+        return np.unique(self["links"]["imdbId"])
 
     def movielens_movie_to_imdb_movie_ids(self, movielens_movie_ids: np.array):
         movielens_to_imdb = self["links"].set_index("movielensId")["imdbId"]
@@ -212,14 +244,14 @@ class MovieLens25m(MovieLensInterface):
         imdb_to_movielens = self["links"].set_index("imdbId")["movielensId"]
         return imdb_to_movielens.loc[imdb_movie_ids].values
 
-    def imdb_movie_to_model_item_ids(self, imdb_movie_ids: np.array):
-        return self.movielens_movie_to_model_item_ids(
+    def imdb_movie_to_dense_item_ids(self, imdb_movie_ids: np.array):
+        return self.movielens_movie_to_dense_item_ids(
             self.imdb_movie_to_movielens_movie_id(imdb_movie_ids)
         )
 
-    def model_item_to_imdb_movie_ids(self, item_ids: np.array):
+    def dense_item_to_imdb_movie_ids(self, item_ids: np.array):
         return self.movielens_movie_to_imdb_movie_ids(
-            self.model_item_to_movielens_movie_ids(item_ids)
+            self.dense_item_to_movielens_movie_ids(item_ids)
         )
 
     def quantiles_split(self, quantiles: "list[float]") -> "list[pd.DataFrame]":
@@ -256,11 +288,6 @@ class MovieLensMixin:
         return self.movielens.explicit_feedback_scipy_csr(
             self.hparams["datamodule"][filename]
         )
-        # if file := self.hparams["datamodule"].get(filename):
-        #     try:
-        #         return self.movielens.explicit_feedback_scipy_csr(file)
-        #     except FileNotFoundError:
-        #         return
 
     def train_explicit(self):
         return self.common_explicit(filename="train_explicit_file")
@@ -305,14 +332,19 @@ def explicit_from_imdb_ratings(
 ) -> "SparseTensor":
     movielens = movielens_the_model_trained_on
     imdb_ids = imdb_ratings["imdb_id"].values
-
     imdb_ids = np.intersect1d(movielens_25m.unique_imdb_ids, imdb_ids)
     movielens_ids = movielens_25m.imdb_movie_to_movielens_movie_id(imdb_ids)
-
+    assert all(
+        imdb_ids == movielens_25m.movielens_movie_to_imdb_movie_ids(movielens_ids)
+    )
     movielens_ids = np.intersect1d(movielens.unique_movielens_movie_ids, movielens_ids)
-    item_ids = movielens.movielens_movie_to_model_item_ids(movielens_ids)
 
+    item_ids = movielens.movielens_movie_to_dense_item_ids(movielens_ids)
+    assert all(movielens_ids == movielens.dense_item_to_movielens_movie_ids(item_ids))
     imdb_ids = movielens_25m.movielens_movie_to_imdb_movie_ids(movielens_ids)
+    assert all(
+        movielens_ids == movielens_25m.imdb_movie_to_movielens_movie_id(imdb_ids)
+    )
     ratings = imdb_ratings.set_index("imdb_id").loc[imdb_ids]["your_rating"].values
 
     n_items = movielens.shape[1]
@@ -360,22 +392,15 @@ def main():
             tqdm_progress_bar.set_description(f"Preparing split {name}")
             df_describe = dataframe.describe().reset_index()
             wandb.log({f"{name}_describe": wandb.Table(dataframe=df_describe)})
-            user_describe = (
-                dataframe.groupby("user_ids")
-                .size()
-                .describe()
-                .rename("user_groupby_size")
-                .reset_index()
-            )
-            wandb.log({f"{name}_user_describe": wandb.Table(dataframe=user_describe)})
-            item_describe = (
-                dataframe.groupby("item_ids")
-                .size()
-                .describe()
-                .rename("item_groupby_size")
-                .reset_index()
-            )
-            wandb.log({f"{name}_item_describe": wandb.Table(dataframe=item_describe)})
+            for kind in ["user", "item"]:
+                dataframe = (
+                    dataframe.groupby(f"{kind}_ids")
+                    .size()
+                    .describe()
+                    .rename(f"{kind}_groupby_size")
+                    .reset_index()
+                )
+                wandb.log({f"{name}_{kind}_describe": wandb.Table(dataframe=dataframe)})
 
             filename = f"{name}.csv"
             path = movielens.save_ratings_split(ratings=dataframe, filename=filename)

@@ -17,7 +17,7 @@ import matplotlib.patheffects as pe
 from .data import SparseDataModuleInterface
 from .interface import ExplanationMixin
 from .metrics import RecommendingMetrics
-from .utils import wandb_plt_figure
+from .utils import wandb_plt_figure, filter_warnings
 
 if TYPE_CHECKING:
     import catboost
@@ -147,35 +147,108 @@ class CatBoostMetrics(pl.callbacks.Callback):
         super().__init__(*args, **kwargs)
         self.plot_dependence = plot_dependence
 
-    def on_test_epoch_end(self, trainer=None, pl_module: "LitRecommenderBase" = None):
+    def on_train_end(self, trainer, pl_module):
+        self.log_feature_names(model=pl_module.model)
+
+    def on_train_epoch_end(self, trainer, pl_module: "LitRecommenderBase"):
+        self.common_on_epoch_end(pl_module=pl_module, stage="train")
+
+    def on_val_epoch_end(self, trainer, pl_module: "LitRecommenderBase"):
+        self.common_on_epoch_end(pl_module=pl_module, stage="val")
+
+    def on_test_epoch_end(self, trainer, pl_module: "LitRecommenderBase"):
+        self.common_on_epoch_end(pl_module=pl_module, stage="test")
+
+    def common_on_epoch_end(self, pl_module, stage: 'Literal["train", "val", "test"]'):
         model: "CatboostInterface" = pl_module.model
-        for (dataframe, label), stage in zip(
-            [
-                model.full_train_dataframe_label(),
-                model.train_user_item_dataframe_label(
-                    explicit=pl_module.test_explicit()
-                ),
-            ],
-            ["train", "test"],
+        if stage == "train":
+            user_item_dataframe, label = model.full_train_dataframe_label()
+        elif stage == "val":
+            user_item_dataframe, label = model.train_user_item_dataframe_label(
+                explicit=pl_module.val_explicit()
+            )
+        elif stage == "test":
+            user_item_dataframe, label = model.train_user_item_dataframe_label(
+                explicit=pl_module.test_explicit()
+            )
+        else:
+            raise ValueError(f"Unknown stage {stage}")
+
+        wandb.log({f"{stage} dataframe size": float(len(user_item_dataframe))})
+
+        pool_kwargs = model.build_pool_kwargs(
+            user_item_dataframe=user_item_dataframe, label=label
+        )
+        pool = model.pool(**pool_kwargs)
+        self.log_feature_importance(
+            catboost_model=model.model,
+            pool=pool,
+            stage=stage,
+        )
+
+        shap_values, expected_value, features = model.shap(
+            user_item_dataframe=user_item_dataframe, label=label
+        )
+        self.log_shap_plots(
+            shap_values=shap_values,
+            expected_value=expected_value,
+            features=features,
+            stage=stage,
+            plot_dependence=self.plot_dependence,
+        )
+
+        self.log_single_user_features_dataframe_with_ratings_and_explicit(
+            model=model, dataframe=user_item_dataframe, stage=stage, label=label
+        )
+
+    @staticmethod
+    def log_feature_names(model: "CatboostInterface"):
+        cat_features = {k.value: list(v) for k, v in model.cat_features.items()}
+        text_features = {k.value: list(v) for k, v in model.text_features.items()}
+        non_numeric_features = sum(cat_features.values(), start=[]) + sum(
+            text_features.values(), start=[]
+        )
+        numeric_features = {}
+        for kind in model.FeatureKind:
+            features = model.features(kind)
+            numeric_features[kind.value] = list(
+                features.columns.difference(non_numeric_features)
+            )
+        features_description = pd.DataFrame(
+            dict(
+                cat_features=cat_features,
+                text_features=text_features,
+                numeric_features=numeric_features,
+            )
+        ).reset_index()
+        print(features_description)
+        wandb.log(dict(features=wandb.Table(dataframe=features_description)))
+
+    @staticmethod
+    def log_single_user_features_dataframe_with_ratings_and_explicit(
+        model: "CatboostInterface", dataframe: pd.DataFrame, label: np.array, stage: str
+    ):
+        user_id = dataframe["user_ids"].sample(1).values[0]
+        indices = dataframe.query(f"user_ids == @user_id").index.values
+
+        user_dataframe = dataframe.iloc[indices].copy()
+        user_label = label[indices]
+        user_pool_kwargs = model.build_pool_kwargs(
+            user_item_dataframe=user_dataframe, label=user_label
+        )
+        user_pool = model.pool(**user_pool_kwargs)
+        user_dataframe["ratings"] = model.model.predict(user_pool)
+        with filter_warnings(
+            action="ignore", category=pd.errors.SettingWithCopyWarning
         ):
-            self.log_feature_importance(
-                model=model,
-                pool=model.build_pool(dataframe=dataframe, label=label),
-                stage=stage,
-            )
-            self.log_shap_plots(
-                model=model,
-                dataframe=dataframe,
-                label=label,
-                stage=stage,
-                plot_dependence=self.plot_dependence,
-            )
+            user_dataframe["explicit"] = user_label
+        wandb.log({f"{stage} user dataframe": wandb.Table(dataframe=user_dataframe)})
 
     @staticmethod
     def log_feature_importance(
-        model: "CatboostInterface", pool: "catboost.Pool", stage: str
+        catboost_model: "catboost.CatBoost", pool: "catboost.Pool", stage: str
     ):
-        dataframe = model.feature_importance(pool=pool)
+        dataframe = catboost_model.get_feature_importance(pool, prettified=True)
         wandb_table = wandb.Table(dataframe=dataframe)
         wandb.log({f"Catboost {stage} feature importance": wandb_table})
 
@@ -201,19 +274,16 @@ class CatBoostMetrics(pl.callbacks.Callback):
 
     def log_shap_plots(
         self,
-        model: "CatboostInterface",
-        dataframe: pd.DataFrame,
-        label: np.array,
+        shap_values,
+        expected_value: float,
+        features: pd.DataFrame,
         stage: str,
         plot_dependence=False,
     ):
-
-        shap_values, expected_value, features = model.shap(
-            dataframe=dataframe, label=label
-        )
         prefix = f"{stage} shap "
-
-        textio = self.force_plot(shap_values, expected_value, features)
+        textio = self.force_plot(
+            shap_values=shap_values, expected_value=expected_value, features=features
+        )
         wandb.log({prefix + "force plot": wandb.Html(textio)})
 
         with wandb_plt_figure(title=prefix + "summary plot"):
@@ -253,14 +323,18 @@ class RecommendingMetricsCallback(pl.callbacks.Callback):
             )
         self.log_dict = pl_module.log_dict
         for stage in ["val", "test"]:
-            explicit = getattr(module, f"{stage}val_explicit")()
+            explicit = getattr(module, f"{stage}_explicit")()
             if explicit is not None:
-                self.metrics["stage"] = RecommendingMetrics(explicit)
+                self.metrics[stage] = RecommendingMetrics(explicit)
 
-    def on_validation_batch_end(self, *, pl_module, batch, **kwargs):
+    def on_validation_batch_end(
+        self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx
+    ):
         self.common_on_batch_end(pl_module=pl_module, batch=batch, stage="val")
 
-    def on_test_batch_end(self, *, pl_module, batch, **kwargs):
+    def on_test_batch_end(
+        self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx
+    ):
         self.common_on_batch_end(pl_module=pl_module, batch=batch, stage="test")
 
     def common_on_batch_end(self, pl_module, batch, stage):
@@ -283,10 +357,10 @@ class RecommendingMetricsCallback(pl.callbacks.Callback):
             wandb.define_metric(metric_name, summary="mean")
         self.log_dict(metrics_dict)
 
-    def on_validation_epoch_end(self, **kwargs):
+    def on_validation_epoch_end(self, trainer, pl_module):
         self.common_epoch_end(stage="val")
 
-    def on_test_epoch_end(self, **kwargs):
+    def on_test_epoch_end(self, trainer, pl_module):
         self.common_epoch_end(stage="test")
 
     def common_epoch_end(self, stage: Literal["val", "test"]):
@@ -307,10 +381,10 @@ class RecommendingExplanationCallback(pl.callbacks.Callback):
         self.users_explicit = users_explicit
         self.n_recommendations = n_recommendations
 
-    def on_test_epoch_end(self, trainer=None, pl_module=None):
+    def on_test_epoch_end(self, trainer, pl_module):
         self.my_on_epoch_end(model=pl_module.model, stage="test")
 
-    def on_validation_epoch_end(self, trainer=None, pl_module=None):
+    def on_validation_epoch_end(self, trainer, pl_module):
         self.my_on_epoch_end(model=pl_module.model, stage="val")
 
     def my_on_epoch_end(

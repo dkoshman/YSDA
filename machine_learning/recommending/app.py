@@ -73,7 +73,7 @@ class MovieMarkdownGenerator:
         return requests.get(url)
 
     def __call__(self, item_id):
-        movielens_id = self.movielens.model_item_to_movielens_movie_ids([item_id])[0]
+        movielens_id = self.movielens.dense_item_to_movielens_movie_ids([item_id])[0]
         imdb_id = self.movielens.movielens_movie_to_imdb_movie_ids([movielens_id])[0]
         tmdb_request_url = self.tmdb_request_url(
             imdb_id=imdb_id, tmdb_api_token=self.tmdb_api_token

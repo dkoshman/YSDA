@@ -92,5 +92,5 @@ def test_imdb_ratings():
     explicit = imdb_ratings.explicit_feedback_scipy()
     assert isinstance(explicit, coo_matrix)
     item_ids = np.arange(imdb_ratings.movielens25m.shape[1])
-    items_description = imdb_ratings.items_description(item_ids)
+    items_description = imdb_ratings.recommendations_description(item_ids)
     assert isinstance(items_description, pd.DataFrame)

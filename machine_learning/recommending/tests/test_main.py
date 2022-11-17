@@ -20,5 +20,5 @@ def test_fitted_model():
     imdb = ImdbRatings()
     explicit = imdb.explicit_feedback_torch()
     recommendations = model.online_recommend(explicit)
-    items_description = imdb.items_description(recommendations[0])
+    items_description = imdb.recommendations_description(recommendations[0])
     assert items_description is not None

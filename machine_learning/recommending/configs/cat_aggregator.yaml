@@ -3,6 +3,7 @@ model:
   class_name: CatboostMovieLens100kFeatureAggregatorFromArtifacts
   recommender_artifacts: [svd:latest, my_mf_slim:latest]
   lit_modules: [MovieLensNonGradientRecommender, MovieLensMFRecommender]
+  movielens_directory: local/ml-100k
   cb_params:
     task_type: GPU
     devices: [0]

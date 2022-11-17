@@ -21,6 +21,7 @@ callbacks:
   EarlyStopping:
     monitor: val_ndcg@10
     mode: max
+    patience: 1
     check_on_train_epoch_end: False
   WandbCheckpointCallback:
     monitor: val_ndcg@10
