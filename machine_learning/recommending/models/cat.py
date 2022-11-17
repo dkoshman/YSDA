@@ -26,8 +26,8 @@ if TYPE_CHECKING:
     from my_tools.utils import SparseTensor
 
 
-# TODO: train 100k feature_aggregator, try to add explanations to imdb callback,
-#  train svd(10, 100, 1000 ?), mf, add explanations to app(maybe), extra features?
+# TODO: Recall how to interpret shap dependence_plot, try to add explanations to catboost,
+#  train models on ml25m: svd(10, 100, 1000 ?), mf,extra features? add explanations to app, upload
 
 
 class CatboostInterface(RecommenderModuleBase, FitExplicitInterfaceMixin, abc.ABC):
