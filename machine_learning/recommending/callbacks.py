@@ -210,10 +210,10 @@ class CatBoostMetrics(pl.callbacks.Callback):
         )
         numeric_features = {}
         for kind in model.FeatureKind:
-            features = model.features(kind)
-            numeric_features[kind.value] = list(
-                features.columns.difference(non_numeric_features)
-            )
+            if (features := model.features(kind)) is not None:
+                numeric_features[kind.value] = list(
+                    features.columns.difference(non_numeric_features)
+                )
         features_description = pd.DataFrame(
             dict(
                 cat_features=cat_features,
@@ -221,18 +221,16 @@ class CatBoostMetrics(pl.callbacks.Callback):
                 numeric_features=numeric_features,
             )
         ).reset_index()
-        print(features_description)
         wandb.log(dict(features=wandb.Table(dataframe=features_description)))
 
     @staticmethod
     def log_single_user_features_dataframe_with_ratings_and_explicit(
         model: "CatboostInterface", dataframe: pd.DataFrame, label: np.array, stage: str
     ):
+        dataframe = dataframe.reset_index(drop=True)
         user_id = dataframe["user_ids"].sample(1).values[0]
-        indices = dataframe.query(f"user_ids == @user_id").index.values
-
-        user_dataframe = dataframe.iloc[indices].copy()
-        user_label = label[indices]
+        user_dataframe = dataframe.query(f"user_ids == @user_id")
+        user_label = label[user_dataframe.index.values]
         user_pool_kwargs = model.build_pool_kwargs(
             user_item_dataframe=user_dataframe, label=user_label
         )
@@ -280,7 +278,7 @@ class CatBoostMetrics(pl.callbacks.Callback):
         stage: str,
         plot_dependence=False,
     ):
-        prefix = f"{stage} shap "
+        prefix = f"shap/{stage}/"
         textio = self.force_plot(
             shap_values=shap_values, expected_value=expected_value, features=features
         )

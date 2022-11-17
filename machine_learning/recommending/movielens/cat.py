@@ -31,8 +31,8 @@ class CatboostMovieLens100kFeatureRecommender(CatboostRecommenderBase):
         user_features = self.movielens["u.user"].reset_index(names="user_ids")
         user_ratings_stats = ratings_stats(self.movielens["u.data"], kind="user")
         user_features = pd.merge(user_features, user_ratings_stats, on="user_ids")
-        user_features["user_ids"] = self.movielens.dense_to_movielens_user_ids(
-            user_ids=user_features["user_ids"].values
+        user_features["user_ids"] = self.movielens.dataset_to_dense_user_ids(
+            dataset_user_ids=user_features["user_ids"].values
         )
 
         kind = self.FeatureKind.user
@@ -59,8 +59,8 @@ class CatboostMovieLens100kFeatureRecommender(CatboostRecommenderBase):
             kind=kind, cat_features=set(item_features.columns.drop(["release date"]))
         )
         item_features = pd.merge(item_features, item_ratings_stats, on="item_ids")
-        item_features["item_ids"] = self.movielens.movielens_movie_to_dense_item_ids(
-            movielens_movie_ids=item_features["item_ids"].values
+        item_features["item_ids"] = self.movielens.dataset_to_dense_item_ids(
+            dataset_item_ids=item_features["item_ids"].values
         )
         return self.maybe_none_left_merge(
             item_features, super().item_features(), on=kind.merge_on
@@ -78,9 +78,14 @@ class CatboostMovieLens100kFeatureRecommender(CatboostRecommenderBase):
 
 
 class CatboostMovieLens100kFeatureAggregatorFromArtifacts(
-    CatboostMovieLens100kFeatureRecommender, CatboostAggregatorFromArtifacts
+    CatboostAggregatorFromArtifacts, CatboostMovieLens100kFeatureRecommender
 ):
-    pass
+    def build_pool_kwargs(self, drop_user_ids=None, drop_item_ids=None, **kwargs):
+        return super().build_pool_kwargs(
+            drop_user_ids=False if drop_user_ids is None else drop_user_ids,
+            drop_item_ids=False if drop_item_ids is None else drop_item_ids,
+            **kwargs,
+        )
 
 
 # TODO: if catboost ooms on gpu, try batches or look up settings
@@ -109,8 +114,8 @@ class CatboostMovieLens25mFeatureRecommender(CatboostRecommenderBase):
             [item_features.drop(["title", "genres"], axis="columns"), genres],
             axis="columns",
         )
-        item_features["item_ids"] = self.movielens.movielens_movie_to_dense_item_ids(
-            item_features["item_ids"].values
+        item_features["item_ids"] = self.movielens.dataset_to_dense_item_ids(
+            dataset_item_ids=item_features["item_ids"].values
         )
 
         kind = self.FeatureKind.item

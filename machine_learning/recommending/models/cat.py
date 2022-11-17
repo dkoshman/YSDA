@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 
 # TODO: train 100k feature_aggregator, try to add explanations to imdb callback,
-#  train svd(10, 100, 1000 ?), mf, add explanations to app(maybe),
+#  train svd(10, 100, 1000 ?), mf, add explanations to app(maybe), extra features?
 
 
 class CatboostInterface(RecommenderModuleBase, FitExplicitInterfaceMixin, abc.ABC):
@@ -187,6 +187,8 @@ class CatboostInterface(RecommenderModuleBase, FitExplicitInterfaceMixin, abc.AB
     def fit(self):
         dataframe, label = self.full_train_dataframe_label()
         pool_kwargs = self.build_pool_kwargs(user_item_dataframe=dataframe, label=label)
+        print(pool_kwargs)
+        print(list(pool_kwargs["dataframe"]))
         pool = self.pool(**pool_kwargs)
         self.model.fit(pool, verbose=100)
 

@@ -25,5 +25,7 @@ callbacks:
   RecommendingMetricsCallback:
     k: 10
   RecommendingExplanationIMDBCallback:
-    movielens_model_trains_on_directory: local/ml-100k
-    movielens_model_trains_on_class_name: MovieLens100k
+    path_to_imdb_ratings_csv: local/my_imdb_ratings.csv
+    movielens_class_name: MovieLens100k
+    movielens_directory: local/ml-100k
+

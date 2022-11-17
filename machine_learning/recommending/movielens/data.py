@@ -1,6 +1,7 @@
 import abc
 import functools
 import os
+import string
 from argparse import ArgumentParser
 from typing import TYPE_CHECKING
 
@@ -18,54 +19,58 @@ if TYPE_CHECKING:
     from my_tools.utils import SparseTensor
 
 
-class MovieLensInterface(abc.ABC):
+class RecommendingDatasetInterface(abc.ABC):
+    @property
+    @abc.abstractmethod
+    @functools.lru_cache()
+    def unique_dataset_user_ids(self) -> np.array:
+        """Returns cached unique sorted user ids that the model can encounter during training."""
+        all_dataset_user_ids = ...
+        return np.unique(all_dataset_user_ids)
+
+    @property
+    @abc.abstractmethod
+    @functools.lru_cache()
+    def unique_dataset_item_ids(self) -> np.array:
+        """Returns cached unique sorted item ids that the model can encounter during training."""
+        all_dataset_movie_ids = ...
+        return np.unique(all_dataset_movie_ids)
+
+    @property
+    @functools.lru_cache()
+    def shape(self) -> "tuple[int, int]":
+        n_users = len(self.unique_dataset_user_ids)
+        n_items = len(self.unique_dataset_item_ids)
+        return n_users, n_items
+
+    def dense_to_dataset_user_ids(self, dense_user_ids: np.array) -> np.array:
+        return self.unique_dataset_user_ids[dense_user_ids]
+
+    def dataset_to_dense_user_ids(self, dataset_user_ids: np.array) -> np.array:
+        dataset_to_dense = pd.Series(
+            index=self.unique_dataset_user_ids,
+            data=np.arange(len(self.unique_dataset_user_ids)),
+        )
+        return dataset_to_dense.loc[dataset_user_ids].values
+
+    def dense_to_dataset_item_ids(self, dense_item_ids: np.array) -> np.array:
+        return self.unique_dataset_item_ids[dense_item_ids]
+
+    def dataset_to_dense_item_ids(self, dataset_item_ids: np.array) -> np.array:
+        dataset_to_model = pd.Series(
+            index=self.unique_dataset_item_ids,
+            data=np.arange(len(self.unique_dataset_item_ids)),
+        )
+        return dataset_to_model.loc[dataset_item_ids].values
+
+
+class MovieLensInterface(RecommendingDatasetInterface, abc.ABC):
     def __init__(self, directory):
         self.directory = directory
 
     @property
-    @abc.abstractmethod
-    def shape(self) -> "tuple[int, int]":
-        """Return [n_users, n_items]"""
-
-    @property
     def ratings_columns(self):
         return "user_ids", "item_ids", "rating", "timestamp"
-
-    @property
-    @abc.abstractmethod
-    @functools.lru_cache()
-    def unique_movielens_user_ids(self) -> np.array:
-        """Returns cached unique sorted movielens user ids that the model can encounter during training."""
-        all_movielens_user_ids = ...
-        return np.unique(all_movielens_user_ids)
-
-    @property
-    @abc.abstractmethod
-    @functools.lru_cache()
-    def unique_movielens_movie_ids(self) -> np.array:
-        """Returns cached unique sorted movielens movie ids that the model can encounter during training."""
-        all_movielens_movie_ids = ...
-        return np.unique(all_movielens_movie_ids)
-
-    def dense_to_movielens_user_ids(self, user_ids: np.array):
-        return self.unique_movielens_user_ids[user_ids]
-
-    def movielens_to_dense_user_ids(self, movielens_user_ids: np.array):
-        movielens_to_model = pd.Series(
-            index=self.unique_movielens_user_ids,
-            data=np.arange(len(self.unique_movielens_user_ids)),
-        )
-        return movielens_to_model.loc[movielens_user_ids].values
-
-    def dense_item_to_movielens_movie_ids(self, item_ids: np.array):
-        return self.unique_movielens_movie_ids[item_ids]
-
-    def movielens_movie_to_dense_item_ids(self, movielens_movie_ids: np.array):
-        movielens_to_model = pd.Series(
-            index=self.unique_movielens_movie_ids,
-            data=np.arange(len(self.unique_movielens_movie_ids)),
-        )
-        return movielens_to_model.loc[movielens_movie_ids].values
 
     @abc.abstractmethod
     @functools.lru_cache()
@@ -86,11 +91,11 @@ class MovieLensInterface(abc.ABC):
     def ratings_dataframe_to_scipy_csr(self, ratings_dataframe):
         movielens_ratings = ratings_dataframe["rating"].to_numpy()
 
-        movielens_user_ids = ratings_dataframe["user_ids"].to_numpy()
-        user_ids = self.movielens_to_dense_user_ids(movielens_user_ids)
+        dataset_user_ids = ratings_dataframe["user_ids"].to_numpy()
+        user_ids = self.dataset_to_dense_user_ids(dataset_user_ids)
 
-        movielens_movie_ids = ratings_dataframe["item_ids"].to_numpy()
-        item_ids = self.movielens_movie_to_dense_item_ids(movielens_movie_ids)
+        dataset_item_ids = ratings_dataframe["item_ids"].to_numpy()
+        item_ids = self.dataset_to_dense_item_ids(dataset_item_ids)
 
         data = movielens_ratings
         row_ids = user_ids
@@ -171,18 +176,12 @@ class MovieLens100k(MovieLensInterface):
 
     @property
     @functools.lru_cache()
-    def shape(self):
-        info = self["u.info"]
-        return info["users"], info["items"]
-
-    @property
-    @functools.lru_cache()
-    def unique_movielens_user_ids(self) -> np.array:
+    def unique_dataset_user_ids(self) -> np.array:
         return np.unique(self["u.user"].index)
 
     @property
     @functools.lru_cache()
-    def unique_movielens_movie_ids(self):
+    def unique_dataset_item_ids(self):
         return np.unique(self["u.item"].index)
 
 
@@ -215,44 +214,26 @@ class MovieLens25m(MovieLensInterface):
 
     @property
     @functools.lru_cache()
-    def shape(self):
-        ratings = self["ratings"]
-        n_users = ratings["user_ids"].nunique()
-        n_items = ratings["item_ids"].nunique()
-        return n_users, n_items
-
-    @property
-    @functools.lru_cache()
-    def unique_movielens_user_ids(self) -> np.array:
+    def unique_dataset_user_ids(self) -> np.array:
         return np.unique(self["ratings"]["user_ids"])
 
     @property
     @functools.lru_cache()
-    def unique_movielens_movie_ids(self):
+    def unique_dataset_item_ids(self):
         return np.unique(self["ratings"]["item_ids"])
 
     @property
     @functools.lru_cache()
-    def unique_imdb_ids(self) -> np.array:
+    def unique_imdb_ids(self):
         return np.unique(self["links"]["imdbId"])
 
-    def movielens_movie_to_imdb_movie_ids(self, movielens_movie_ids: np.array):
+    def dataset_to_imdb_movie_ids(self, dataset_item_ids: np.array):
         movielens_to_imdb = self["links"].set_index("movielensId")["imdbId"]
-        return movielens_to_imdb.loc[movielens_movie_ids].values
+        return movielens_to_imdb.loc[dataset_item_ids].values
 
-    def imdb_movie_to_movielens_movie_id(self, imdb_movie_ids: np.array):
+    def imdb_to_dataset_item_ids(self, imdb_movie_ids: np.array):
         imdb_to_movielens = self["links"].set_index("imdbId")["movielensId"]
         return imdb_to_movielens.loc[imdb_movie_ids].values
-
-    def imdb_movie_to_dense_item_ids(self, imdb_movie_ids: np.array):
-        return self.movielens_movie_to_dense_item_ids(
-            self.imdb_movie_to_movielens_movie_id(imdb_movie_ids)
-        )
-
-    def dense_item_to_imdb_movie_ids(self, item_ids: np.array):
-        return self.movielens_movie_to_imdb_movie_ids(
-            self.dense_item_to_movielens_movie_ids(item_ids)
-        )
 
     def quantiles_split(self, quantiles: "list[float]") -> "list[pd.DataFrame]":
         if sum(quantiles) != 1:
@@ -299,58 +280,166 @@ class MovieLensMixin:
         return self.common_explicit(filename="test_explicit_file")
 
 
-def read_csv_imdb_ratings(
-    path_to_imdb_ratings_csv: str, ratings_scale_max_to_convert_to: float = 5
-) -> pd.DataFrame:
-    dataframe = pd.read_csv(path_to_imdb_ratings_csv)
-    dataframe = dataframe.rename(lambda c: c.lower().replace(" ", "_"), axis="columns")
-    dataframe = dataframe.rename({"const": "imdb_id"}, axis="columns")
-    dataframe["imdb_id"] = dataframe["imdb_id"].str.removeprefix("tt").astype(int)
-    dataframe["your_rating"] *= ratings_scale_max_to_convert_to / 10
-    assert list(dataframe) == [
-        "imdb_id",
-        "your_rating",
-        "date_rated",
-        "title",
-        "url",
-        "title_type",
-        "imdb_rating",
-        "runtime_(mins)",
-        "year",
-        "genres",
-        "num_votes",
-        "release_date",
-        "directors",
-    ]
-    return dataframe
+class ImdbRatings:
+    """
+    Class to transform ratings downloaded from IMDB user profile
+    web page as csv table into movielens explicit feedback.
+    """
 
+    def __init__(
+        self,
+        path_to_imdb_ratings_csv="local/my_imdb_ratings.csv",
+        ratings_scale_max_to_convert_to=5,
+    ):
+        self.path_to_imdb_ratings_csv = path_to_imdb_ratings_csv
+        self.ratings_scale_max_to_convert_to = ratings_scale_max_to_convert_to
 
-def explicit_from_imdb_ratings(
-    imdb_ratings: pd.DataFrame,
-    movielens_the_model_trained_on: MovieLensInterface,
-    movielens_25m: MovieLens25m,
-) -> "SparseTensor":
-    movielens = movielens_the_model_trained_on
-    imdb_ids = imdb_ratings["imdb_id"].values
-    imdb_ids = np.intersect1d(movielens_25m.unique_imdb_ids, imdb_ids)
-    movielens_ids = movielens_25m.imdb_movie_to_movielens_movie_id(imdb_ids)
-    assert all(
-        imdb_ids == movielens_25m.movielens_movie_to_imdb_movie_ids(movielens_ids)
-    )
-    movielens_ids = np.intersect1d(movielens.unique_movielens_movie_ids, movielens_ids)
+    @staticmethod
+    def read_csv_imdb_ratings(
+        path_to_imdb_ratings_csv: str, ratings_scale_max_to_convert_to: float = 5
+    ) -> pd.DataFrame:
+        dataframe = pd.read_csv(path_to_imdb_ratings_csv)
+        dataframe = dataframe.rename(
+            lambda c: c.lower().replace(" ", "_"), axis="columns"
+        )
+        dataframe = dataframe.rename({"const": "imdb_id"}, axis="columns")
+        dataframe["imdb_id"] = dataframe["imdb_id"].str.removeprefix("tt").astype(int)
+        dataframe["your_rating"] *= ratings_scale_max_to_convert_to / 10
+        assert list(dataframe) == [
+            "imdb_id",
+            "your_rating",
+            "date_rated",
+            "title",
+            "url",
+            "title_type",
+            "imdb_rating",
+            "runtime_(mins)",
+            "year",
+            "genres",
+            "num_votes",
+            "release_date",
+            "directors",
+        ]
+        return dataframe
 
-    item_ids = movielens.movielens_movie_to_dense_item_ids(movielens_ids)
-    assert all(movielens_ids == movielens.dense_item_to_movielens_movie_ids(item_ids))
-    imdb_ids = movielens_25m.movielens_movie_to_imdb_movie_ids(movielens_ids)
-    assert all(
-        movielens_ids == movielens_25m.imdb_movie_to_movielens_movie_id(imdb_ids)
-    )
-    ratings = imdb_ratings.set_index("imdb_id").loc[imdb_ids]["your_rating"].values
+    @property
+    def dataframe(self):
+        return self.read_csv_imdb_ratings(
+            path_to_imdb_ratings_csv=self.path_to_imdb_ratings_csv,
+            ratings_scale_max_to_convert_to=self.ratings_scale_max_to_convert_to,
+        )
 
-    n_items = movielens.shape[1]
-    explicit = np.zeros([1, n_items])
-    explicit[0, item_ids] = ratings
-    return torch.from_numpy(explicit).to_sparse()
+    @staticmethod
+    def explicit(item_ids: np.array, ratings: np.array, n_items) -> "SparseTensor":
+        explicit = np.zeros([1, n_items])
+        explicit[0, item_ids] = ratings
+        explicit = torch.from_numpy(explicit).to_sparse()
+        return explicit
+
+    def explicit_movielens(self, movielens: MovieLensInterface) -> "SparseTensor":
+        if isinstance(movielens, MovieLens25m):
+            return self.explicit_movielens25m(movielens)
+        elif isinstance(movielens, MovieLens100k):
+            return self.explicit_movielens100k(movielens)
+        else:
+            raise NotImplementedError(
+                f"Explicit matrix construction not implemented for "
+                f"models trained on {movielens.__class__.__name__} dataset."
+            )
+
+    def explicit_movielens25m(self, movielens_25m: MovieLens25m) -> "SparseTensor":
+        imdb_ratings = self.dataframe
+        imdb_ids = imdb_ratings["imdb_id"].values
+        imdb_ids = np.intersect1d(movielens_25m.unique_imdb_ids, imdb_ids)
+        dataset_ids = movielens_25m.imdb_to_dataset_item_ids(imdb_ids)
+        item_ids = movielens_25m.dataset_to_dense_item_ids(dataset_ids)
+        ratings = imdb_ratings.set_index("imdb_id").loc[imdb_ids]["your_rating"].values
+        return self.explicit(
+            item_ids=item_ids, ratings=ratings, n_items=movielens_25m.shape[1]
+        )
+
+    @staticmethod
+    def normalize_titles(titles):
+        titles = (
+            titles.str.lower()
+            .str.normalize("NFC")
+            .str.replace(f"[{string.punctuation}]", "", regex=True)
+            .str.replace("the", "")
+            .str.replace(r"\s+", " ", regex=True)
+            .str.strip()
+        )
+        return titles
+
+    def explicit_movielens100k(self, movielens_100k: MovieLens100k):
+        imdb_ratings = self.dataframe
+        imdb_ratings["title"] = self.normalize_titles(imdb_ratings["title"])
+
+        movielens_titles = movielens_100k["u.item"]["movie title"]
+        movielens_titles = self.normalize_titles(movielens_titles.str.split("(").str[0])
+
+        movielens_movie_ids = []
+        ratings = []
+        for imdb_title, rating in zip(
+            imdb_ratings["title"], imdb_ratings["your_rating"]
+        ):
+            for movielens_movie_id, movielens_title in movielens_titles.items():
+                if imdb_title == movielens_title:
+                    movielens_movie_ids.append(movielens_movie_id)
+                    ratings.append(rating)
+
+        ratings = np.array(ratings)
+        movielens_movie_ids = np.array(movielens_movie_ids)
+        item_ids = movielens_100k.dataset_to_dense_item_ids(movielens_movie_ids)
+
+        return self.explicit(
+            item_ids=item_ids, ratings=ratings, n_items=movielens_100k.shape[1]
+        )
+
+    def items_description_movielens(
+        self, dense_item_ids, movielens: MovieLensInterface
+    ) -> pd.DataFrame:
+        if isinstance(movielens, MovieLens25m):
+            return self.items_description_movielens25m(dense_item_ids, movielens)
+        elif isinstance(movielens, MovieLens100k):
+            return self.items_description_movielens100k(dense_item_ids, movielens)
+        else:
+            raise NotImplementedError(
+                f"Item descriptions not implemented for {movielens}."
+            )
+
+    @staticmethod
+    def items_description_movielens25m(
+        dense_item_ids: np.array, movielens25m: MovieLens25m
+    ) -> pd.DataFrame:
+        assert dense_item_ids.ndim == 1
+        dataset_item_ids = movielens25m.dense_to_dataset_item_ids(dense_item_ids)
+        description = (
+            movielens25m["movies"]
+            .loc[dataset_item_ids]
+            .reset_index(names="movielens_movie_ids")
+        )
+        description["dense_item_ids"] = dense_item_ids
+        description = pd.merge(
+            description,
+            movielens25m["links"],
+            how="left",
+            left_on="movielens_movie_ids",
+            right_on="movielensId",
+        )
+        return description
+
+    @staticmethod
+    def items_description_movielens100k(
+        dense_item_ids: np.array, movielens100k: MovieLens100k
+    ) -> pd.DataFrame:
+        dataset_item_ids = movielens100k.dense_to_dataset_item_ids(dense_item_ids)
+        description = (
+            movielens100k["u.item"]
+            .loc[dataset_item_ids]
+            .reset_index(names="movielens_100k_dataset_ids")
+        )
+        description["dense_item_ids"] = dense_item_ids
+        return description
 
 
 def main():
