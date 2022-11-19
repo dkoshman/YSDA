@@ -112,7 +112,7 @@ class SLIM(RecommenderModuleBase, WandbLoggerMixin, ExplanationMixin):
         ratings = ratings.to_dense() + self.item_bias
         return ratings
 
-    def explain_recommendations(
+    def explain_recommendations_for_user(
         self,
         user_id=None,
         user_explicit=None,

@@ -26,6 +26,7 @@ callbacks:
     k: 10
   RecommendingExplanationIMDBCallback:
     path_to_imdb_ratings_csv: local/my_imdb_ratings.csv
+    n_recommendations: 10
     movielens_class_name: MovieLens100k
     movielens_directory: local/ml-100k
 

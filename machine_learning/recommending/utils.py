@@ -1,8 +1,11 @@
 import contextlib
+import io
 import os
 import time
 import warnings
+from typing import TextIO
 
+import shap
 import torch
 import wandb
 import yaml
@@ -65,8 +68,10 @@ def wandb_context_manager(config):
 
 
 @contextlib.contextmanager
-def plt_figure(*args, **kwargs):
+def plt_figure(*args, title=None, **kwargs):
     figure = plt.figure(*args, **kwargs)
+    if title is not None:
+        plt.title(title)
     try:
         yield figure
     finally:
@@ -75,8 +80,7 @@ def plt_figure(*args, **kwargs):
 
 @contextlib.contextmanager
 def wandb_plt_figure(title, *args, **kwargs):
-    with plt_figure(*args, **kwargs) as figure:
-        plt.title(title)
+    with plt_figure(*args, title=title, **kwargs) as figure:
         yield figure
         wandb.log({title: wandb.Image(figure)})
 
@@ -106,3 +110,10 @@ def filter_warnings(action: str, category=None):
     with warnings.catch_warnings():
         warnings.simplefilter(action=action, category=category)
         yield
+
+
+def save_shap_force_plot(shap_plot: shap.plots._force.BaseVisualizer) -> TextIO:
+    textio = io.TextIOWrapper(io.BytesIO())
+    shap.save_html(textio, shap_plot)
+    textio.seek(0)
+    return textio

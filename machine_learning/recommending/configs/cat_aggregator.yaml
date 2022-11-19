@@ -5,9 +5,10 @@ model:
   recommender_artifacts: [svd:latest, my_mf_slim:latest]
   lit_modules: [MovieLensNonGradientRecommender, MovieLensMFRecommender]
   movielens_directory: local/ml-100k
-  cb_params:
-    task_type: GPU
-    devices: [0]
+#  cb_params:
+#    task_type: GPU
+#    devices: [1, 2]
+#    gpu_ram_part: 0.8
 lightning_module:
   class_name: MovieLensNonGradientRecommender
 trainer:

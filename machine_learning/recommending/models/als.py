@@ -162,7 +162,7 @@ class ALS(
         ratings = self.user_factors[user_ids] @ self.item_factors[item_ids].T
         return ratings
 
-    def explain_recommendations(
+    def explain_recommendations_for_user(
         self,
         user_id=None,
         user_explicit=None,
@@ -445,5 +445,5 @@ class ALSjitBiased(ALSjit):
 
         X[:, X_constant_latent_index] = 1
 
-    def explain_recommendations(self, *args, **kwargs):
+    def explain_recommendations_for_user(self, *args, **kwargs):
         raise NotImplementedError("Need to add bias to existing implementation")

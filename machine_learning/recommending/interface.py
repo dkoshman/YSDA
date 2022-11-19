@@ -3,6 +3,7 @@ from abc import ABC
 from typing import TYPE_CHECKING, Any
 
 import torch
+import wandb
 
 from machine_learning.recommending.maths import (
     Distance,
@@ -47,6 +48,10 @@ class RecommenderModuleInterface(torch.nn.Module, abc.ABC):
         """Generate recommendations for new users defined by their explicit feedback."""
 
 
+class CannotGenerateEnoughRecommendationsError(RuntimeError):
+    pass
+
+
 class RecommenderModuleBase(RecommenderModuleInterface, ABC):
     def __init__(
         self,
@@ -54,6 +59,8 @@ class RecommenderModuleBase(RecommenderModuleInterface, ABC):
         n_items,
         explicit: "SparseTensor" or "spmatrix" or None = None,
         persistent_explicit=False,
+        invalid_recommendation_mark: int = -1,
+        error_if_cannot_generate_enough_recommendations=True,
     ):
         super().__init__()
         self.n_users = n_users
@@ -62,6 +69,10 @@ class RecommenderModuleBase(RecommenderModuleInterface, ABC):
             explicit = to_torch_coo(explicit)
         self.register_buffer(
             name="explicit", tensor=explicit, persistent=persistent_explicit
+        )
+        self.invalid_recommendation_mark = invalid_recommendation_mark
+        self.error_if_cannot_generate_enough_recommendations = (
+            error_if_cannot_generate_enough_recommendations
         )
         self.to_torch_coo = to_torch_coo
         self.to_scipy_coo = to_scipy_coo
@@ -73,25 +84,47 @@ class RecommenderModuleBase(RecommenderModuleInterface, ABC):
         for parameter in self.parameters():
             return parameter.device
 
-    @staticmethod
-    def filter_already_liked_items(explicit, ratings):
-        return torch.where(explicit.to_dense() > 0, -torch.inf, ratings)
-
-    @staticmethod
-    def ratings_to_recommendations(ratings, n_recommendations):
+    def ratings_to_filtered_recommendations(
+        self, explicit, ratings, n_recommendations=None
+    ):
+        n_recommendations = n_recommendations or self.n_items
+        ratings = torch.where(explicit.to_dense() > 0, -torch.inf, ratings)
         item_ratings, item_ids = torch.topk(input=ratings, k=n_recommendations)
-        item_ids[item_ratings == -torch.inf] = -1
+        item_ids[item_ratings == -torch.inf] = self.invalid_recommendation_mark
+        self.check_invalid_recommendations(recommendations=item_ids)
         return item_ids
 
+    def check_invalid_recommendations(self, recommendations):
+        invalid_items_mask = recommendations == self.invalid_recommendation_mark
+        n_invalid_recommendations = invalid_items_mask.sum().cpu().item()
+        if n_invalid_recommendations:
+            if wandb.run is not None:
+                wandb.log(
+                    dict(
+                        n_invalid_recommendations=float(n_invalid_recommendations),
+                        invalid_recommendations_proportion=n_invalid_recommendations
+                        / recommendations.numel(),
+                    )
+                )
+            if self.error_if_cannot_generate_enough_recommendations:
+                raise CannotGenerateEnoughRecommendationsError(
+                    f"Model generated {n_invalid_recommendations} invalid recommendations out of total "
+                    f"{recommendations.numel()}. You can disable errors on invalid recommendations by"
+                    f"setting {f'{self.error_if_cannot_generate_enough_recommendations=}'.split('=')[0]} "
+                    f"attribute of {self.__class__.__name__} to False."
+                )
+
     def recommend(self, user_ids, n_recommendations=None):
-        n_recommendations = n_recommendations or self.n_items
         with torch.inference_mode():
             ratings = self(user_ids=user_ids, item_ids=torch.arange(self.n_items))
         users_explicit = torch_sparse_slice(self.explicit, row_ids=user_ids).to(
             self.device
         )
-        ratings = self.filter_already_liked_items(users_explicit, ratings)
-        recommendations = self.ratings_to_recommendations(ratings, n_recommendations)
+        recommendations = self.ratings_to_filtered_recommendations(
+            explicit=users_explicit,
+            ratings=ratings,
+            n_recommendations=n_recommendations,
+        )
         return recommendations
 
     def online_nn_ratings(
@@ -135,10 +168,12 @@ class RecommenderModuleBase(RecommenderModuleInterface, ABC):
 
     def online_recommend(self, users_explicit, n_recommendations=None):
         users_explicit = self.to_torch_coo(users_explicit).to(self.device)
-        n_recommendations = n_recommendations or self.n_items
         ratings = self.online_ratings(users_explicit)
-        ratings = self.filter_already_liked_items(users_explicit, ratings)
-        recommendations = self.ratings_to_recommendations(ratings, n_recommendations)
+        recommendations = self.ratings_to_filtered_recommendations(
+            explicit=users_explicit,
+            ratings=ratings,
+            n_recommendations=n_recommendations,
+        )
         return recommendations
 
     def get_extra_state(self) -> "Pickleable":
@@ -163,13 +198,13 @@ class FitExplicitInterfaceMixin:
 
 class ExplanationMixin:
     @abc.abstractmethod
-    def explain_recommendations(
+    def explain_recommendations_for_user(
         self,
-        user_id: int or torch.IntTensor = None,
+        user_id: int = None,
         user_explicit: "SparseTensor" = None,
         n_recommendations=10,
         log: bool = False,
-        logging_prefix: str = "",
+        logging_prefix: str = "explanation/",
     ) -> Any:
         """
         Return any data that will aid in understanding why

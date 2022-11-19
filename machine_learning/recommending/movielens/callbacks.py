@@ -1,7 +1,5 @@
 from typing import Literal, TYPE_CHECKING
 
-import numpy as np
-import pandas as pd
 import torch
 import wandb
 
@@ -22,7 +20,7 @@ class RecommendingExplanationIMDBCallback(
         path_to_imdb_ratings_csv: str,
         movielens_class_name: str,
         movielens_directory: str,
-        n_recommendations=100,
+        n_recommendations=10,
         ratings_scale_max_to_convert_to=5,
     ):
         """If movielens_model_trains is not passed, it is assumed to be MovieLens25m."""

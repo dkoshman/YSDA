@@ -18,7 +18,7 @@ def test_slim_explain_recommendation():
     with wandb.init(project="Testing"):
         for device in get_available_devices():
             slim = slim.to(device)
-            figures = slim.explain_recommendations(
+            figures = slim.explain_recommendations_for_user(
                 user_id=user_id[0],
                 n_recommendations=np.random.randint(1, 4),
                 feature_names=np.random.choice([None, feature_names]),
@@ -29,7 +29,7 @@ def test_slim_explain_recommendation():
 
             user_explicit = random_explicit_feedback(n_users=1, n_items=slim.n_items)
 
-            figures = slim.explain_recommendations(
+            figures = slim.explain_recommendations_for_user(
                 user_explicit=user_explicit,
                 n_recommendations=np.random.randint(1, 4),
                 feature_names=np.random.choice([None, feature_names]),

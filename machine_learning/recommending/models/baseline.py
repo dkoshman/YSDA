@@ -127,7 +127,9 @@ class ImplicitRecommenderBase(RecommenderModuleBase, FitExplicitInterfaceMixin):
             N=n_recommendations or self.n_items,
             filter_already_liked_items=True,
         )
-        return torch.from_numpy(item_ids).to(torch.int64)
+        item_ids = torch.from_numpy(item_ids).to(torch.int64)
+        self.check_invalid_recommendations(recommendations=item_ids)
+        return item_ids
 
     def get_extra_state(self):
         bytesio = io.BytesIO()
@@ -165,7 +167,9 @@ class ImplicitNearestNeighborsRecommender(ImplicitRecommenderBase):
             N=n_recommendations or self.n_items,
             **kwargs,
         )
-        return torch.from_numpy(item_ids).to(torch.int64)
+        item_ids = torch.from_numpy(item_ids).to(torch.int64)
+        self.check_invalid_recommendations(recommendations=item_ids)
+        return item_ids
 
 
 class ImplicitMatrixFactorizationRecommender(ImplicitRecommenderBase):

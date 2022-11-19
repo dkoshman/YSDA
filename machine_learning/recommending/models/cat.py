@@ -1,5 +1,7 @@
 import abc
+import pickle
 import re
+import warnings
 from collections import Counter
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -17,20 +19,26 @@ from tqdm.auto import tqdm
 
 from my_tools.utils import torch_sparse_slice
 
-from ..interface import FitExplicitInterfaceMixin, RecommenderModuleBase
+from ..interface import (
+    FitExplicitInterfaceMixin,
+    RecommenderModuleBase,
+    ExplanationMixin,
+)
 from ..movielens import lit as movielens_lit
-from ..utils import filter_warnings, wandb_timeit
+from ..utils import wandb_timeit, save_shap_force_plot, wandb_plt_figure, plt_figure
 
 if TYPE_CHECKING:
     from scipy.sparse import spmatrix
     from my_tools.utils import SparseTensor
 
 
-# TODO: Recall how to interpret shap dependence_plot, try to add explanations to catboost,
+# TODO: add batched pool fit for gpu
 #  train models on ml25m: svd(10, 100, 1000 ?), mf,extra features? add explanations to app, upload
 
 
-class CatboostInterface(RecommenderModuleBase, FitExplicitInterfaceMixin, abc.ABC):
+class CatboostInterface(
+    RecommenderModuleBase, FitExplicitInterfaceMixin, ExplanationMixin, abc.ABC
+):
     class FeatureKind(Enum):
         user = "user"
         item = "item"
@@ -44,7 +52,13 @@ class CatboostInterface(RecommenderModuleBase, FitExplicitInterfaceMixin, abc.AB
                 self.user_item: ["user_ids", "item_ids"],
             }[self]
 
-    def __init__(self, cb_params=None, unknown_category_token="__NA__", **kwargs):
+    def __init__(
+        self,
+        cb_params=None,
+        unknown_category_token="__NA__",
+        feature_perturbation="interventional",
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.model = catboost.CatBoostRanker(**(cb_params or {}))
         self.cat_features: "dict[CatboostInterface.FeatureKind: set[str]]" = {
@@ -55,6 +69,17 @@ class CatboostInterface(RecommenderModuleBase, FitExplicitInterfaceMixin, abc.AB
         }
         self._full_train_dataframe_label = None
         self.unknown_category_token = unknown_category_token
+        self.feature_perturbation = feature_perturbation
+        self._shap_explainer = None
+        warnings.simplefilter(action="ignore", category=FutureWarning)
+
+    @property
+    def shap_explainer(self):
+        if self._shap_explainer is None and self.model.is_fitted():
+            self._shap_explainer = shap.TreeExplainer(
+                self.model, feature_perturbation=self.feature_perturbation
+            )
+        return self._shap_explainer
 
     def update_features(
         self,
@@ -150,20 +175,14 @@ class CatboostInterface(RecommenderModuleBase, FitExplicitInterfaceMixin, abc.AB
             text_features=list(set().union(*self.text_features.values())),
         )
 
-    def pool(
+    def postprocess_pool_kwargs(
         self,
         dataframe: pd.DataFrame,
         group_id,
         label=None,
         cat_features=(),
         text_features=(),
-    ) -> catboost.Pool:
-        """
-        Only minor preprocessing is done in this method to
-        ensure that dataframe received is structurally
-        the same as one passed into pool. This method is not
-        meant to be overridden by child classes.
-        """
+    ) -> dict:
         dataframe = dataframe.copy()
         for column in dataframe:
             if column in list(cat_features) + list(text_features):
@@ -174,22 +193,18 @@ class CatboostInterface(RecommenderModuleBase, FitExplicitInterfaceMixin, abc.AB
                 )
             else:
                 dataframe[column] = pd.to_numeric(dataframe[column])
-        with filter_warnings(action="ignore", category=FutureWarning):
-            pool = catboost.Pool(
-                data=dataframe,
-                cat_features=cat_features,
-                text_features=text_features,
-                label=label,
-                group_id=group_id,
-            )
-        return pool
+        return dict(
+            data=dataframe,
+            cat_features=cat_features,
+            text_features=text_features,
+            label=label,
+            group_id=group_id,
+        )
 
     def fit(self):
         dataframe, label = self.full_train_dataframe_label()
         pool_kwargs = self.build_pool_kwargs(user_item_dataframe=dataframe, label=label)
-        print(pool_kwargs)
-        print(list(pool_kwargs["dataframe"]))
-        pool = self.pool(**pool_kwargs)
+        pool = catboost.Pool(**self.postprocess_pool_kwargs(**pool_kwargs))
         self.model.fit(pool, verbose=100)
 
     def forward(self, user_ids, item_ids):
@@ -210,7 +225,7 @@ class CatboostInterface(RecommenderModuleBase, FitExplicitInterfaceMixin, abc.AB
         row_ids = user_item_dataframe["user_ids"].values.astype(np.int32)
         col_ids = user_item_dataframe["item_ids"].values.astype(np.int32)
         pool_kwargs = self.build_pool_kwargs(user_item_dataframe=user_item_dataframe)
-        pool = self.pool(**pool_kwargs)
+        pool = catboost.Pool(**self.postprocess_pool_kwargs(**pool_kwargs))
         ratings = self.model.predict(pool)
 
         ratings = coo_array(
@@ -223,10 +238,11 @@ class CatboostInterface(RecommenderModuleBase, FitExplicitInterfaceMixin, abc.AB
 
         if users_explicit is None:
             users_explicit = torch_sparse_slice(self.explicit, row_ids=user_ids)
-        ratings = self.filter_already_liked_items(
-            explicit=users_explicit, ratings=ratings
+        recommendations = self.ratings_to_filtered_recommendations(
+            explicit=users_explicit,
+            ratings=ratings,
+            n_recommendations=n_recommendations,
         )
-        recommendations = self.ratings_to_recommendations(ratings, n_recommendations)
         return recommendations
 
     def recommend(self, user_ids, n_recommendations=None):
@@ -248,36 +264,112 @@ class CatboostInterface(RecommenderModuleBase, FitExplicitInterfaceMixin, abc.AB
             n_recommendations=n_recommendations,
         )
 
-    def shap(
-        self, user_item_dataframe, label
-    ) -> "tuple[np.ndarray, float, pd.DataFrame]":
-        """
-        :return shap_values, expected_value, features: everything necessary to draw shap plots
-        shap_values – matrix of shape [explicit.numel(), n_features] with
-            shap values for each feature of each sample
-        expected_value – average prediction value on the dataset
-        features – dataframe with same shape as shap_values with
-            feature values and names
-        """
-        explainer = shap.TreeExplainer(model=self.model)
+    @staticmethod
+    def user_item_dataframe_clip_to_size(dataframe, size) -> pd.DataFrame:
+        if len(dataframe) <= size:
+            return dataframe
+        return dataframe.reset_index(drop=True).sample(size).sort_values("user_ids")
+
+    def shap_kwargs(self, user_item_dataframe, label=None):
+        """For accurate shap values, pass target dataframe concatenated with background samples."""
         pool_kwargs = self.build_pool_kwargs(
             user_item_dataframe=user_item_dataframe, label=label
         )
-        pool = self.pool(**pool_kwargs)
-        shap_values = explainer.shap_values(pool)
-        features = pool_kwargs["dataframe"]
-        return shap_values, explainer.expected_value, features
+        pool = catboost.Pool(**self.postprocess_pool_kwargs(**pool_kwargs))
+        shap_values = self.shap_explainer.shap_values(pool)
+        return dict(
+            base_value=self.shap_explainer.expected_value,
+            shap_values=shap_values,
+            features=pool_kwargs["dataframe"],
+        )
+
+    def explain_recommendations_for_user(
+        self,
+        user_id=None,
+        user_explicit=None,
+        n_recommendations=10,
+        log=False,
+        logging_prefix="explanation/",
+    ) -> dict:
+        # TODO: add more plots, review background dataframe
+        if user_id is not None:
+            recommendations = self.recommend(
+                user_ids=torch.IntTensor([user_id]), n_recommendations=n_recommendations
+            )
+            dataframe, _ = self.full_train_dataframe_label()
+            dataframe = dataframe.query("user_ids == @user_id")
+        else:
+            recommendations = self.online_recommend(
+                users_explicit=user_explicit, n_recommendations=n_recommendations
+            )
+            dataframe = self.predict_user_item_dataframe(
+                user_ids=self.fictive_user_ids(n_users=1),
+                users_explicit=user_explicit,
+                n_recommendations=self.n_items,
+            )
+
+        recommendations = recommendations[0].cpu().numpy()
+        recommendations_index = (
+            dataframe.reset_index(drop=True)
+            .query("item_ids in @recommendations")
+            .index.values
+        )
+        assert len(recommendations_index) == len(recommendations)
+        shap_kwargs = self.shap_kwargs(user_item_dataframe=dataframe)
+        features = shap_kwargs["features"].iloc[recommendations_index]
+        shap_values = shap_kwargs["shap_values"][recommendations_index]
+
+        shap_plot = shap.force_plot(
+            base_value=shap_kwargs["base_value"],
+            shap_values=shap_values,
+            features=features,
+            out_names="Predicted relevance of items for users",
+            text_rotation=0,
+        )
+        force_plot_textio = save_shap_force_plot(shap_plot=shap_plot)
+
+        pool_kwargs = self.postprocess_pool_kwargs(
+            **self.build_pool_kwargs(
+                user_item_dataframe=dataframe.iloc[recommendations_index]
+            )
+        )
+        waterfall_figures = {}
+        shap_explanation = self.shap_explainer(X=pool_kwargs["data"])
+        for item_id, item_explanation in zip(recommendations, shap_explanation):
+            figure_kwargs = dict(
+                title=logging_prefix + f"waterfall plot for item {item_id}",
+                figsize=[8, 5],
+            )
+            with wandb_plt_figure(**figure_kwargs) if log else plt_figure(
+                **figure_kwargs
+            ) as figure:
+                shap.waterfall_plot(item_explanation)
+            waterfall_figures[item_id] = figure
+
+        if log:
+            title = logging_prefix + "features"
+            wandb.log({title: wandb.Table(dataframe=features)})
+            title = logging_prefix + "force plot"
+            wandb.log({title: wandb.Html(force_plot_textio)})
+        return {
+            **dict(features=features, force_plot_textio=force_plot_textio),
+            **waterfall_figures,
+        }
 
     def get_extra_state(self):
         self.model.save_model("tmp")
         with open("tmp", "rb") as f:
-            binary_bytes = f.read()
-        return binary_bytes
+            catboost_bytes = f.read()
+        shap_explainer_bytes = pickle.dumps(self._shap_explainer)
+        return dict(
+            catboost_bytes=catboost_bytes, shap_explainer_bytes=shap_explainer_bytes
+        )
 
-    def set_extra_state(self, binary_bytes):
+    def set_extra_state(self, bytes_dict):
         with open("tmp", "wb") as f:
-            f.write(binary_bytes)
+            f.write(bytes_dict["catboost_bytes"])
         self.model.load_model("tmp")
+        self._shap_explainer = pickle.loads(bytes_dict["shap_explainer_bytes"])
 
 
 class CatboostRecommenderBase(CatboostInterface):
@@ -327,7 +419,9 @@ class CatboostAggregatorRecommender(CatboostInterface):
         ):
             raise ValueError("Recommenders and their names must be of equal length.")
         super().__init__(**kwargs)
-        self.fit_recommenders = torch.nn.ModuleList(fit_recommenders)
+        self.fit_recommenders: "torch.nn.ModuleList[RecommenderModuleBase]" = (
+            torch.nn.ModuleList(fit_recommenders)
+        )
         self.recommender_names = recommender_names or self.generate_model_names(
             self.fit_recommenders
         )
@@ -382,26 +476,42 @@ class CatboostAggregatorRecommender(CatboostInterface):
         about user-item pairs present in train_explicit will be added to resulting dataframe,
         if they are not already present in it.
         """
-        ranks = 1 + torch.arange(self.n_items).repeat(len(user_ids), 1)
-        reciprocal_ranks_sum = torch.zeros(len(user_ids), self.n_items)
+        extended_reciprocal_ranks = 1 / (
+            1 + torch.arange(self.n_items + 1).repeat(len(user_ids), 1)
+        )
+        extended_reciprocal_ranks[:, -1] = 0
+        items_reciprocal_ranks_sum = torch.zeros(len(user_ids), self.n_items)
         recommenders_ranks = []
         for recommender, name in zip(self.fit_recommenders, self.recommender_names):
+            recommender.error_if_cannot_generate_enough_recommendations = False
             if users_explicit is not None:
                 with wandb_timeit(name=f"{name} online_recommend"):
                     item_ids = recommender.online_recommend(users_explicit)
             else:
                 with wandb_timeit(name=f"{name} recommend"):
                     item_ids = recommender.recommend(user_ids)
-            recommender_ranks = torch.scatter(
-                input=ranks, dim=1, index=item_ids, src=ranks
+
+            item_ids = torch.where(
+                item_ids == recommender.invalid_recommendation_mark,
+                self.n_items,
+                item_ids,
             )
-            reciprocal_ranks_sum += 1 / recommender_ranks
+            recommender_reciprocal_ranks = torch.scatter(
+                input=torch.zeros_like(extended_reciprocal_ranks),
+                dim=1,
+                index=item_ids,
+                src=extended_reciprocal_ranks,
+            )[:, :-1]
+            items_reciprocal_ranks_sum += recommender_reciprocal_ranks
+            recommender_ranks = torch.where(
+                recommender_reciprocal_ranks == 0, 0, 1 / recommender_reciprocal_ranks
+            ).int()
             recommenders_ranks.append(recommender_ranks)
 
-        _, topk_item_ids = reciprocal_ranks_sum.topk(k=n_recommendations, dim=1)
+        _, topk_item_ids = items_reciprocal_ranks_sum.topk(k=n_recommendations, dim=1)
         topk_ranks = [
-            torch.take_along_dim(input=recommender_ranks, indices=topk_item_ids, dim=1)
-            for recommender_ranks in recommenders_ranks
+            torch.take_along_dim(input=recommender_rank, indices=topk_item_ids, dim=1)
+            for recommender_rank in recommenders_ranks
         ]
 
         repeated_user_ids = einops.repeat(user_ids, f"u -> u {n_recommendations}")
@@ -498,32 +608,6 @@ class CatboostAggregatorRecommender(CatboostInterface):
             n_recommendations=n_recommendations,
             users_explicit=users_explicit,
         )
-
-    # def explain_recommendations(
-    #     self,
-    #     user_id=None,
-    #     user_explicit=None,
-    #     n_recommendations=10,
-    #     log=False,
-    #     logging_prefix="",
-    # ):
-    #     if user_id is not None:
-    #         user_id = self.n_users
-    #         recommendations = self.recommend(
-    #             user_ids=torch.tensor([user_id]), n_recommendations=n_recommendations
-    #         )
-    #     dataframe = self.dataframe_from_batches(
-    #         user_ids=torch.tensor([user_id]),
-    #         users_explicit=user_explicit,
-    #         n_recommendations=n_recommendations,
-    #         filter_already_liked_items=True,
-    #     )
-    #     train_dataframe = self.train_dataframe(self.explicit)
-    #     shap_values, expected_value, features = self.shap(dataframe=dataframe)
-    #     figures = []
-    #     # figure_context_manager = wandb_plt_figure if log else plt_figure
-    #     for item_id in recommendations.squeeze(0).cpu().numpy():
-    #         shap_index = dataframe["use"]
 
 
 class CatboostAggregatorFromArtifacts(CatboostAggregatorRecommender):

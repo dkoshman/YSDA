@@ -105,14 +105,14 @@ def _test_recommender_module(module, test_reload=True):
             user_explicit = random_explicit_feedback(n_users=1, n_items=module.n_items)
 
             with wandb.init(project="Testing"):
-                module.explain_recommendations(
+                module.explain_recommendations_for_user(
                     user_id=user_id,
                     n_recommendations=np.random.randint(1, 3),
                     log=True,
                     logging_prefix="testing",
                 )
                 try:
-                    module.explain_recommendations(
+                    module.explain_recommendations_for_user(
                         user_explicit=user_explicit,
                         n_recommendations=np.random.randint(1, 3),
                         log=True,
@@ -176,7 +176,7 @@ def test_als():
                 user_ids=torch.tensor([user_id]),
                 n_recommendations=np.random.randint(1, 10),
             )[0]
-            explanations = module.explain_recommendations(
+            explanations = module.explain_recommendations_for_user(
                 user_id=user_id, recommendations=recommended_item_ids
             )
             assert isinstance(explanations["dataframe"], pd.DataFrame)

@@ -1,8 +1,8 @@
-import io
 import os.path
 import re
-from typing import Literal, TYPE_CHECKING, TextIO
+from typing import Literal, TYPE_CHECKING
 
+import catboost
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
@@ -17,10 +17,9 @@ import matplotlib.patheffects as pe
 from .data import SparseDataModuleInterface
 from .interface import ExplanationMixin
 from .metrics import RecommendingMetrics
-from .utils import wandb_plt_figure, filter_warnings
+from .utils import wandb_plt_figure, filter_warnings, save_shap_force_plot
 
 if TYPE_CHECKING:
-    import catboost
     from scipy.sparse import spmatrix
     from .interface import RecommenderModuleBase
     from .lit import LitRecommenderBase
@@ -143,23 +142,28 @@ class WandbCheckpointCallback(pl.callbacks.ModelCheckpoint):
 class CatBoostMetrics(pl.callbacks.Callback):
     """Log some metrics specific to catboost."""
 
-    def __init__(self, *args, plot_dependence=False, **kwargs):
+    def __init__(
+        self,
+        *args,
+        plot_dependence=False,
+        max_dataset_size_for_shap_force_plot=1000,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.plot_dependence = plot_dependence
+        self.max_dataset_size_for_shap_force_plot = max_dataset_size_for_shap_force_plot
 
-    def on_train_end(self, trainer, pl_module):
+    def on_train_end(self, trainer, pl_module: "LitRecommenderBase"):
         self.log_feature_names(model=pl_module.model)
+        self.common_on_end(pl_module=pl_module, stage="train")
 
-    def on_train_epoch_end(self, trainer, pl_module: "LitRecommenderBase"):
-        self.common_on_epoch_end(pl_module=pl_module, stage="train")
+    def on_validation_end(self, trainer, pl_module: "LitRecommenderBase"):
+        self.common_on_end(pl_module=pl_module, stage="val")
 
-    def on_val_epoch_end(self, trainer, pl_module: "LitRecommenderBase"):
-        self.common_on_epoch_end(pl_module=pl_module, stage="val")
+    def on_test_end(self, trainer, pl_module: "LitRecommenderBase"):
+        self.common_on_end(pl_module=pl_module, stage="test")
 
-    def on_test_epoch_end(self, trainer, pl_module: "LitRecommenderBase"):
-        self.common_on_epoch_end(pl_module=pl_module, stage="test")
-
-    def common_on_epoch_end(self, pl_module, stage: 'Literal["train", "val", "test"]'):
+    def common_on_end(self, pl_module, stage: 'Literal["train", "val", "test"]'):
         model: "CatboostInterface" = pl_module.model
         if stage == "train":
             user_item_dataframe, label = model.full_train_dataframe_label()
@@ -174,32 +178,40 @@ class CatBoostMetrics(pl.callbacks.Callback):
         else:
             raise ValueError(f"Unknown stage {stage}")
 
-        wandb.log({f"{stage} dataframe size": float(len(user_item_dataframe))})
-
-        pool_kwargs = model.build_pool_kwargs(
-            user_item_dataframe=user_item_dataframe, label=label
-        )
-        pool = model.pool(**pool_kwargs)
-        self.log_feature_importance(
-            catboost_model=model.model,
-            pool=pool,
-            stage=stage,
-        )
-
-        shap_values, expected_value, features = model.shap(
-            user_item_dataframe=user_item_dataframe, label=label
-        )
-        self.log_shap_plots(
-            shap_values=shap_values,
-            expected_value=expected_value,
-            features=features,
-            stage=stage,
-            plot_dependence=self.plot_dependence,
+        wandb.log(
+            {
+                f"{stage} dataframe size": float(len(user_item_dataframe)),
+                f"shap expected value": model.shap_explainer.expected_value,
+            }
         )
 
         self.log_single_user_features_dataframe_with_ratings_and_explicit(
             model=model, dataframe=user_item_dataframe, stage=stage, label=label
         )
+
+        pool_kwargs = model.build_pool_kwargs(
+            user_item_dataframe=user_item_dataframe, label=label
+        )
+        pool = catboost.Pool(**model.postprocess_pool_kwargs(**pool_kwargs))
+        self.log_feature_importance(catboost_model=model.model, pool=pool, stage=stage)
+
+        shap_kwargs = model.shap_kwargs(
+            user_item_dataframe=user_item_dataframe, label=label
+        )
+        self.log_shap_summary_plot(**shap_kwargs, stage=stage)
+        if self.plot_dependence:
+            self.log_shap_dependence_plots(**shap_kwargs, stage=stage)
+
+        if len(user_item_dataframe) > self.max_dataset_size_for_shap_force_plot:
+            user_item_dataframe = model.user_item_dataframe_clip_to_size(
+                dataframe=user_item_dataframe,
+                size=self.max_dataset_size_for_shap_force_plot,
+            )
+            label = label[user_item_dataframe.index.values]
+            shap_kwargs = model.shap_kwargs(
+                user_item_dataframe=user_item_dataframe, label=label
+            )
+        self.log_shap_force_plot(**shap_kwargs, stage=stage)
 
     @staticmethod
     def log_feature_names(model: "CatboostInterface"):
@@ -234,11 +246,11 @@ class CatBoostMetrics(pl.callbacks.Callback):
         user_pool_kwargs = model.build_pool_kwargs(
             user_item_dataframe=user_dataframe, label=user_label
         )
-        user_pool = model.pool(**user_pool_kwargs)
-        user_dataframe["ratings"] = model.model.predict(user_pool)
+        user_pool = catboost.Pool(**model.postprocess_pool_kwargs(**user_pool_kwargs))
         with filter_warnings(
             action="ignore", category=pd.errors.SettingWithCopyWarning
         ):
+            user_dataframe["ratings"] = model.model.predict(user_pool)
             user_dataframe["explicit"] = user_label
         wandb.log({f"{stage} user dataframe": wandb.Table(dataframe=user_dataframe)})
 
@@ -251,50 +263,40 @@ class CatBoostMetrics(pl.callbacks.Callback):
         wandb.log({f"Catboost {stage} feature importance": wandb_table})
 
     @staticmethod
-    def force_plot(
-        shap_values, expected_value, features, subsample_size=1000, **shap_kwargs
-    ) -> TextIO:
-        subsample = np.random.choice(
-            np.arange(shap_values.shape[0]),
-            replace=False,
-            size=min(subsample_size, shap_values.shape[0]),
-        )
-        shap_plot = shap.force_plot(
-            base_value=expected_value,
-            shap_values=shap_values[subsample],
-            features=features.iloc[subsample],
-            **shap_kwargs,
-        )
-        textio = io.TextIOWrapper(io.BytesIO())
-        shap.save_html(textio, shap_plot)
-        textio.seek(0)
-        return textio
-
-    def log_shap_plots(
-        self,
-        shap_values,
-        expected_value: float,
-        features: pd.DataFrame,
-        stage: str,
-        plot_dependence=False,
+    def log_shap_force_plot(
+        base_value: float, shap_values: np.array, features: pd.DataFrame, stage: str
     ):
-        prefix = f"shap/{stage}/"
-        textio = self.force_plot(
-            shap_values=shap_values, expected_value=expected_value, features=features
+        shap_plot = shap.force_plot(
+            base_value=base_value,
+            shap_values=shap_values,
+            features=features,
+            out_names="Predicted relevance of items for users",
+            text_rotation=0,
         )
-        wandb.log({prefix + "force plot": wandb.Html(textio)})
+        textio = save_shap_force_plot(shap_plot=shap_plot)
+        wandb.log({f"shap/{stage}/force plot/": wandb.Html(textio)})
 
-        with wandb_plt_figure(title=prefix + "summary plot"):
-            shap.summary_plot(shap_values, features)
+    @staticmethod
+    def log_shap_dependence_plots(
+        base_value: float, shap_values: np.array, features: pd.DataFrame, stage: str
+    ):
+        for feature_name in list(features):
+            with wandb_plt_figure(
+                title=f"shap/{stage}/dependence plot/" + feature_name
+            ) as figure:
+                shap.dependence_plot(
+                    feature_name,
+                    shap_values=shap_values,
+                    features=features,
+                    ax=figure.gca(),
+                )
 
-        if plot_dependence:
-            for feature_name in features:
-                with wandb_plt_figure(
-                    title=prefix + "dependence plot for " + feature_name
-                ) as figure:
-                    shap.dependence_plot(
-                        feature_name, shap_values, features, ax=figure.gca()
-                    )
+    @staticmethod
+    def log_shap_summary_plot(
+        base_value: float, shap_values: np.array, features: pd.DataFrame, stage: str
+    ):
+        with wandb_plt_figure(title=f"shap/{stage}/summary plot"):
+            shap.summary_plot(shap_values=shap_values, features=features)
 
 
 class RecommendingMetricsCallback(pl.callbacks.Callback):
@@ -394,21 +396,20 @@ class RecommendingExplanationCallback(pl.callbacks.Callback):
             return
         if self.user_ids is not None:
             for user_id in self.user_ids:
-                model.explain_recommendations(
+                model.explain_recommendations_for_user(
                     user_id=user_id,
                     n_recommendations=self.n_recommendations,
                     log=True,
-                    logging_prefix=stage,
+                    logging_prefix=f"explanation/{stage}/",
                 )
-
         if self.users_explicit is not None:
             try:
                 for user_explicit in self.users_explicit.detach().clone():
-                    model.explain_recommendations(
+                    model.explain_recommendations_for_user(
                         user_explicit=user_explicit[None],
                         n_recommendations=self.n_recommendations,
                         log=True,
-                        logging_prefix=stage,
+                        logging_prefix=f"explanation/{stage}/",
                     )
             except NotImplementedError:
                 pass
