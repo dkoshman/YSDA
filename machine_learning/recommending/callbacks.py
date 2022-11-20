@@ -17,7 +17,7 @@ import matplotlib.patheffects as pe
 from .data import SparseDataModuleInterface
 from .interface import ExplanationMixin
 from .metrics import RecommendingMetrics
-from .utils import wandb_plt_figure, filter_warnings, save_shap_force_plot
+from .utils import wandb_plt_figure, filter_warnings, save_shap_force_plot, wandb_timeit
 
 if TYPE_CHECKING:
     from scipy.sparse import spmatrix
@@ -146,12 +146,12 @@ class CatBoostMetrics(pl.callbacks.Callback):
         self,
         *args,
         plot_dependence=False,
-        max_dataset_size_for_shap_force_plot=1000,
+        max_dataset_size_for_complex_shap=1000,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.plot_dependence = plot_dependence
-        self.max_dataset_size_for_shap_force_plot = max_dataset_size_for_shap_force_plot
+        self.max_dataset_size_for_complex_shap = max_dataset_size_for_complex_shap
 
     def on_train_end(self, trainer, pl_module: "LitRecommenderBase"):
         self.log_feature_names(model=pl_module.model)
@@ -163,6 +163,7 @@ class CatBoostMetrics(pl.callbacks.Callback):
     def on_test_end(self, trainer, pl_module: "LitRecommenderBase"):
         self.common_on_end(pl_module=pl_module, stage="test")
 
+    @wandb_timeit(name="CatBoostMetrics.common_on_end")
     def common_on_end(self, pl_module, stage: 'Literal["train", "val", "test"]'):
         model: "CatboostInterface" = pl_module.model
         if stage == "train":
@@ -198,20 +199,30 @@ class CatBoostMetrics(pl.callbacks.Callback):
         shap_kwargs = model.shap_kwargs(
             user_item_dataframe=user_item_dataframe, label=label
         )
+
         self.log_shap_summary_plot(**shap_kwargs, stage=stage)
+
         if self.plot_dependence:
             self.log_shap_dependence_plots(**shap_kwargs, stage=stage)
 
-        if len(user_item_dataframe) > self.max_dataset_size_for_shap_force_plot:
+        if len(user_item_dataframe) > self.max_dataset_size_for_complex_shap:
             user_item_dataframe = model.user_item_dataframe_clip_to_size(
                 dataframe=user_item_dataframe,
-                size=self.max_dataset_size_for_shap_force_plot,
+                size=self.max_dataset_size_for_complex_shap,
             )
             label = label[user_item_dataframe.index.values]
+            pool_kwargs = model.build_pool_kwargs(
+                user_item_dataframe=user_item_dataframe, label=label
+            )
             shap_kwargs = model.shap_kwargs(
                 user_item_dataframe=user_item_dataframe, label=label
             )
+
         self.log_shap_force_plot(**shap_kwargs, stage=stage)
+
+        postprocessed_pool_kwargs = model.postprocess_pool_kwargs(**pool_kwargs)
+        shap_explanation = model.shap_explainer(X=postprocessed_pool_kwargs["data"])
+        self.log_shap_heatmap_plot(shap_explanation=shap_explanation, stage=stage)
 
     @staticmethod
     def log_feature_names(model: "CatboostInterface"):
@@ -274,7 +285,7 @@ class CatBoostMetrics(pl.callbacks.Callback):
             text_rotation=0,
         )
         textio = save_shap_force_plot(shap_plot=shap_plot)
-        wandb.log({f"shap/{stage}/force plot/": wandb.Html(textio)})
+        wandb.log({f"shap/{stage} force plot": wandb.Html(textio)})
 
     @staticmethod
     def log_shap_dependence_plots(
@@ -282,7 +293,7 @@ class CatBoostMetrics(pl.callbacks.Callback):
     ):
         for feature_name in list(features):
             with wandb_plt_figure(
-                title=f"shap/{stage}/dependence plot/" + feature_name
+                title=f"shap/dependence plot/{stage} " + feature_name
             ) as figure:
                 shap.dependence_plot(
                     feature_name,
@@ -295,8 +306,13 @@ class CatBoostMetrics(pl.callbacks.Callback):
     def log_shap_summary_plot(
         base_value: float, shap_values: np.array, features: pd.DataFrame, stage: str
     ):
-        with wandb_plt_figure(title=f"shap/{stage}/summary plot"):
+        with wandb_plt_figure(title=f"shap/{stage} summary plot"):
             shap.summary_plot(shap_values=shap_values, features=features)
+
+    @staticmethod
+    def log_shap_heatmap_plot(shap_explanation: shap.Explanation, stage: str):
+        with wandb_plt_figure(title=f"shap/{stage} heatmap plot"):
+            shap.plots.heatmap(shap_values=shap_explanation)
 
 
 class RecommendingMetricsCallback(pl.callbacks.Callback):
@@ -337,6 +353,7 @@ class RecommendingMetricsCallback(pl.callbacks.Callback):
     ):
         self.common_on_batch_end(pl_module=pl_module, batch=batch, stage="test")
 
+    @wandb_timeit(name="RecommendingMetricsCallback.common_on_batch_end")
     def common_on_batch_end(self, pl_module, batch, stage):
         every_epoch = self.every_epoch[stage]
         if every_epoch == 0 or pl_module.current_epoch % every_epoch:
@@ -400,7 +417,7 @@ class RecommendingExplanationCallback(pl.callbacks.Callback):
                     user_id=user_id,
                     n_recommendations=self.n_recommendations,
                     log=True,
-                    logging_prefix=f"explanation/{stage}/",
+                    logging_prefix=f"explanation/{stage} ",
                 )
         if self.users_explicit is not None:
             try:
@@ -409,7 +426,7 @@ class RecommendingExplanationCallback(pl.callbacks.Callback):
                         user_explicit=user_explicit[None],
                         n_recommendations=self.n_recommendations,
                         log=True,
-                        logging_prefix=f"explanation/{stage}/",
+                        logging_prefix=f"explanation/{stage} ",
                     )
             except NotImplementedError:
                 pass

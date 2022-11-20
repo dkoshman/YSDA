@@ -7,7 +7,7 @@ from my_tools.entrypoints import LightningConfigBuilder, ConfigDispenser
 from . import callbacks, metrics, models
 from .movielens import lit as movielens_lit
 from .movielens import callbacks as movielens_callbacks
-from .utils import wandb_context_manager
+from .utils import wandb_context_manager, wandb_timeit
 
 
 class RecommendingBuilder(LightningConfigBuilder):
@@ -46,6 +46,7 @@ class RecommendingConfigDispenser(ConfigDispenser):
         self.__init__(**cli_args)
 
 
+@wandb_timeit(name="entrypoint.fit")
 def fit(config):
     with wandb_context_manager(config):
         if torch.cuda.is_available():

@@ -100,11 +100,13 @@ class RecommenderModuleBase(RecommenderModuleInterface, ABC):
         if n_invalid_recommendations:
             if wandb.run is not None:
                 wandb.log(
-                    dict(
-                        n_invalid_recommendations=float(n_invalid_recommendations),
-                        invalid_recommendations_proportion=n_invalid_recommendations
+                    {
+                        "sanity_check/n_invalid_recommendations": float(
+                            n_invalid_recommendations
+                        ),
+                        "sanity_check/invalid_recommendations_proportion": n_invalid_recommendations
                         / recommendations.numel(),
-                    )
+                    }
                 )
             if self.error_if_cannot_generate_enough_recommendations:
                 raise CannotGenerateEnoughRecommendationsError(

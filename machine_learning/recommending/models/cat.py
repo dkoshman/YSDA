@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
 
 # TODO: add batched pool fit for gpu
-#  train models on ml25m: svd(10, 100, 1000 ?), mf,extra features? add explanations to app, upload
+#  train models on ml25m: svd(10, 100, 1000 ?), mf, extra features? add explanations to app, upload
 
 
 class CatboostInterface(
@@ -60,7 +60,8 @@ class CatboostInterface(
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.model = catboost.CatBoostRanker(**(cb_params or {}))
+        self.cb_params = cb_params or {}
+        self.model = catboost.CatBoostRanker(**self.cb_params)
         self.cat_features: "dict[CatboostInterface.FeatureKind: set[str]]" = {
             i: set() for i in self.FeatureKind
         }
@@ -72,6 +73,21 @@ class CatboostInterface(
         self.feature_perturbation = feature_perturbation
         self._shap_explainer = None
         warnings.simplefilter(action="ignore", category=FutureWarning)
+
+    def get_extra_state(self):
+        self.model.save_model("tmp")
+        with open("tmp", "rb") as f:
+            catboost_bytes = f.read()
+        shap_explainer_bytes = pickle.dumps(self._shap_explainer)
+        return dict(
+            catboost_bytes=catboost_bytes, shap_explainer_bytes=shap_explainer_bytes
+        )
+
+    def set_extra_state(self, bytes_dict):
+        with open("tmp", "wb") as f:
+            f.write(bytes_dict["catboost_bytes"])
+        self.model.load_model("tmp")
+        self._shap_explainer = pickle.loads(bytes_dict["shap_explainer_bytes"])
 
     @property
     def shap_explainer(self):
@@ -201,6 +217,7 @@ class CatboostInterface(
             group_id=group_id,
         )
 
+    @wandb_timeit(name="fit")
     def fit(self):
         dataframe, label = self.full_train_dataframe_label()
         pool_kwargs = self.build_pool_kwargs(user_item_dataframe=dataframe, label=label)
@@ -271,7 +288,6 @@ class CatboostInterface(
         return dataframe.reset_index(drop=True).sample(size).sort_values("user_ids")
 
     def shap_kwargs(self, user_item_dataframe, label=None):
-        """For accurate shap values, pass target dataframe concatenated with background samples."""
         pool_kwargs = self.build_pool_kwargs(
             user_item_dataframe=user_item_dataframe, label=label
         )
@@ -290,8 +306,9 @@ class CatboostInterface(
         n_recommendations=10,
         log=False,
         logging_prefix="explanation/",
+        plot_waterfalls=False,
     ) -> dict:
-        # TODO: add more plots, review background dataframe
+        return_explanations_dict = {}
         if user_id is not None:
             recommendations = self.recommend(
                 user_ids=torch.IntTensor([user_id]), n_recommendations=n_recommendations
@@ -316,60 +333,55 @@ class CatboostInterface(
         )
         assert len(recommendations_index) == len(recommendations)
         shap_kwargs = self.shap_kwargs(user_item_dataframe=dataframe)
-        features = shap_kwargs["features"].iloc[recommendations_index]
-        shap_values = shap_kwargs["shap_values"][recommendations_index]
+        shap_kwargs["features"] = shap_kwargs["features"].iloc[recommendations_index]
+        shap_kwargs["shap_values"] = shap_kwargs["shap_values"][recommendations_index]
+        return_explanations_dict["features"] = shap_kwargs["features"]
+        if log:
+            title = logging_prefix + "features"
+            wandb.log({title: wandb.Table(dataframe=shap_kwargs["features"])})
 
         shap_plot = shap.force_plot(
-            base_value=shap_kwargs["base_value"],
-            shap_values=shap_values,
-            features=features,
+            **shap_kwargs,
             out_names="Predicted relevance of items for users",
             text_rotation=0,
         )
         force_plot_textio = save_shap_force_plot(shap_plot=shap_plot)
-
-        pool_kwargs = self.postprocess_pool_kwargs(
-            **self.build_pool_kwargs(
-                user_item_dataframe=dataframe.iloc[recommendations_index]
-            )
-        )
-        waterfall_figures = {}
-        shap_explanation = self.shap_explainer(X=pool_kwargs["data"])
-        for item_id, item_explanation in zip(recommendations, shap_explanation):
-            figure_kwargs = dict(
-                title=logging_prefix + f"waterfall plot for item {item_id}",
-                figsize=[8, 5],
-            )
-            with wandb_plt_figure(**figure_kwargs) if log else plt_figure(
-                **figure_kwargs
-            ) as figure:
-                shap.waterfall_plot(item_explanation)
-            waterfall_figures[item_id] = figure
-
+        return_explanations_dict["force_plot_textio"] = force_plot_textio
         if log:
-            title = logging_prefix + "features"
-            wandb.log({title: wandb.Table(dataframe=features)})
             title = logging_prefix + "force plot"
             wandb.log({title: wandb.Html(force_plot_textio)})
-        return {
-            **dict(features=features, force_plot_textio=force_plot_textio),
-            **waterfall_figures,
-        }
 
-    def get_extra_state(self):
-        self.model.save_model("tmp")
-        with open("tmp", "rb") as f:
-            catboost_bytes = f.read()
-        shap_explainer_bytes = pickle.dumps(self._shap_explainer)
-        return dict(
-            catboost_bytes=catboost_bytes, shap_explainer_bytes=shap_explainer_bytes
-        )
+        title = logging_prefix + "decision plot"
+        with wandb_plt_figure(title=title) if log else plt_figure(
+            title=title
+        ) as decision_plot_figure:
+            shap.decision_plot(
+                **shap_kwargs, legend_labels=[f"item {i}" for i in recommendations]
+            )
+        return_explanations_dict["decision_plot_figure"] = decision_plot_figure
 
-    def set_extra_state(self, bytes_dict):
-        with open("tmp", "wb") as f:
-            f.write(bytes_dict["catboost_bytes"])
-        self.model.load_model("tmp")
-        self._shap_explainer = pickle.loads(bytes_dict["shap_explainer_bytes"])
+        if plot_waterfalls:
+            return_explanations_dict["waterfall_figures"] = {}
+            postprocessed_pool_kwargs = self.postprocess_pool_kwargs(
+                **self.build_pool_kwargs(
+                    user_item_dataframe=dataframe.iloc[recommendations_index]
+                )
+            )
+            shap_explanation: shap.Explanation = self.shap_explainer(
+                X=postprocessed_pool_kwargs["data"]
+            )
+            for item_id, item_explanation in zip(recommendations, shap_explanation):
+                figure_kwargs = dict(
+                    title=logging_prefix + f"waterfall plot for item {item_id}",
+                    figsize=[8, 5],
+                )
+                with wandb_plt_figure(**figure_kwargs) if log else plt_figure(
+                    **figure_kwargs
+                ) as figure:
+                    shap.waterfall_plot(item_explanation)
+                return_explanations_dict["waterfall_figures"][item_id] = figure
+
+        return return_explanations_dict
 
 
 class CatboostRecommenderBase(CatboostInterface):

@@ -90,7 +90,8 @@ def wandb_timeit(name, **kwargs):
     start = time.time()
     yield
     end = time.time()
-    wandb.log({f"time/{name}": end - start, **kwargs})
+    if wandb.run is not None:
+        wandb.log({f"time/{name}": end - start, **kwargs})
 
 
 def tensor_size_in_bytes(tensor):
