@@ -55,12 +55,19 @@ class CatboostInterface(
     def __init__(
         self,
         cb_params=None,
+        cb_fit_n_users_per_batch=500,
+        cb_fit_verbose=100,
         unknown_category_token="__NA__",
         feature_perturbation="interventional",
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.cb_params = cb_params or {}
+        self.cb_fit_n_users_per_batch = cb_fit_n_users_per_batch
+        self.cb_fit_verbose = cb_fit_verbose
+        self.unknown_category_token = unknown_category_token
+        self.feature_perturbation = feature_perturbation
+
         self.model = catboost.CatBoostRanker(**self.cb_params)
         self.cat_features: "dict[CatboostInterface.FeatureKind: set[str]]" = {
             i: set() for i in self.FeatureKind
@@ -69,8 +76,6 @@ class CatboostInterface(
             i: set() for i in self.FeatureKind
         }
         self._full_train_dataframe_label = None
-        self.unknown_category_token = unknown_category_token
-        self.feature_perturbation = feature_perturbation
         self._shap_explainer = None
         warnings.simplefilter(action="ignore", category=FutureWarning)
 
@@ -217,12 +222,32 @@ class CatboostInterface(
             group_id=group_id,
         )
 
-    @wandb_timeit(name="fit")
+    @wandb_timeit(name="CatboostInterface.fit")
     def fit(self):
         dataframe, label = self.full_train_dataframe_label()
-        pool_kwargs = self.build_pool_kwargs(user_item_dataframe=dataframe, label=label)
-        pool = catboost.Pool(**self.postprocess_pool_kwargs(**pool_kwargs))
-        self.model.fit(pool, verbose=100)
+        _, user_indices = np.unique(dataframe["user_ids"], return_index=True)
+        assert all(user_indices[:-1] <= user_indices[1:])
+
+        for begin in tqdm(
+            range(0, len(user_indices), self.cb_fit_n_users_per_batch),
+            desc="Fitting batches",
+        ):
+            batch_indices = range(
+                user_indices[begin],
+                user_indices[end]
+                if (end := begin + self.cb_fit_n_users_per_batch) < len(user_indices)
+                else len(dataframe),
+            )
+            pool_kwargs = self.build_pool_kwargs(
+                user_item_dataframe=dataframe.iloc[batch_indices],
+                label=label[batch_indices],
+            )
+            pool = catboost.Pool(**self.postprocess_pool_kwargs(**pool_kwargs))
+            if self.model.is_fitted():
+                pool.set_baseline(baseline=self.model.predict(pool))
+            batch_model = catboost.CatBoostRanker(**self.cb_params)
+            batch_model.fit(pool, verbose=self.cb_fit_verbose)
+            self.model = catboost.sum_models([self.model, batch_model])
 
     def forward(self, user_ids, item_ids):
         raise NotImplementedError(
