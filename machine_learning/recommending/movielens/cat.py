@@ -80,15 +80,15 @@ class CatboostMovieLens100kFeatureRecommender(CatboostRecommenderBase):
 class CatboostMovieLens100kFeatureAggregatorFromArtifacts(
     CatboostAggregatorFromArtifacts, CatboostMovieLens100kFeatureRecommender
 ):
-    def build_pool_kwargs(self, drop_user_ids=None, drop_item_ids=None, **kwargs):
-        return super().build_pool_kwargs(
-            drop_user_ids=False if drop_user_ids is None else drop_user_ids,
-            drop_item_ids=False if drop_item_ids is None else drop_item_ids,
-            **kwargs,
-        )
+    @property
+    def use_user_ids_as_features(self):
+        return True
+
+    @property
+    def use_item_ids_as_features(self):
+        return True
 
 
-# TODO: if catboost ooms on gpu, try batches or look up settings
 class CatboostMovieLens25mFeatureRecommender(CatboostRecommenderBase):
     def __init__(self, *, movielens_directory, **kwargs):
         super().__init__(**kwargs)
@@ -144,3 +144,15 @@ class CatboostMovieLens25mFeatureRecommender(CatboostRecommenderBase):
         return self.maybe_none_left_merge(
             user_item_features, super().user_item_features(), on=kind.merge_on
         )
+
+
+class CatboostMovieLens25mFeatureAggregatorFromArtifacts(
+    CatboostAggregatorFromArtifacts, CatboostMovieLens25mFeatureRecommender
+):
+    @property
+    def use_user_ids_as_features(self):
+        return True
+
+    @property
+    def use_item_ids_as_features(self):
+        return True

@@ -5,10 +5,15 @@ model:
   recommender_artifacts: [svd:latest, my_mf_slim:latest]
   lit_modules: [MovieLensNonGradientRecommender, MovieLensMFRecommender]
   movielens_directory: local/ml-100k
-#  cb_params:
-#    task_type: GPU
-#    devices: [1, 2]
-#    gpu_ram_part: 0.8
+  cb_fit_n_users_per_batch: 1000
+  cb_params:
+    task_type: GPU
+    devices: [0, 1] # CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0,1
+#    gpu_ram_part: 0.2
+#    loss_function: QueryCrossEntropy
+#    iterations: 10
+#    depth: 3
+#    gpu_cat_features_storage: CpuPinnedMemory
 lightning_module:
   class_name: MovieLensNonGradientRecommender
 trainer:

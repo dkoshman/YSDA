@@ -1,7 +1,13 @@
-name: "SVD run"
+name: "Catboost aggregator 25m"
 model:
-  class_name: SVDRecommender
-  n_components: 100
+  class_name: CatboostMovieLens25mFeatureAggregatorFromArtifacts
+  recommender_artifacts: [svd:latest] #, my_mf_slim:latest]
+  lit_modules: [MovieLensNonGradientRecommender] #, MovieLensMFRecommender]
+  movielens_directory: local/ml-25m
+  cb_fit_n_users_per_batch: 1000
+  cb_params:
+    task_type: GPU
+    devices: [0, 1] # CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0,1
 datamodule:
   movielens:
     class_name: MovieLens25m
@@ -9,19 +15,16 @@ datamodule:
   train_explicit_file: ratings_split0_q0.8.csv
   val_explicit_file: ratings_split1_q0.1.csv
   test_explicit_file: ratings_split2_q0.1.csv
-  batch_size: 1000
 lightning_module:
   class_name: MovieLensNonGradientRecommender
 trainer:
   num_sanity_val_steps: 0
+  max_epochs: -1
 callbacks:
+  CatBoostMetrics:
+    plot_dependence: true
   WandbCheckpointCallback:
-    monitor: val_ndcg@10
-    mode: max
-    save_on_train_epoch_end: False
-    artifact_name: svd_movielens_25m
-  RecommendingMetricsCallback:
-    k: 10
+    artifact_name: catboost_aggregator_25m
   RecommendingExplanationIMDBCallback:
     path_to_imdb_ratings_csv: local/my_imdb_ratings.csv
     n_recommendations: 10

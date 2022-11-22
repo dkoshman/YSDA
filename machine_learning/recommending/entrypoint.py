@@ -46,9 +46,8 @@ class RecommendingConfigDispenser(ConfigDispenser):
         self.__init__(**cli_args)
 
 
-@wandb_timeit(name="entrypoint.fit")
 def fit(config):
-    with wandb_context_manager(config):
+    with wandb_context_manager(config), wandb_timeit(name="entrypoint.fit"):
         if torch.cuda.is_available():
             os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
             torch.cuda.init()
@@ -57,4 +56,4 @@ def fit(config):
         trainer = constructor.build_trainer()
         trainer.fit(lightning_module)
         trainer.test(lightning_module)
-        return lightning_module
+    return lightning_module

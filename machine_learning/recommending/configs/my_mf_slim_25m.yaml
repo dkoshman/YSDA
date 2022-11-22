@@ -1,13 +1,18 @@
 name: "My MF SLIM 25m"
 model:
-  class_name: MFSlimUnpopularRecommender
+  class_name: MFSlimRecommender
   latent_dimension: 200
   l2_regularization: 0.0
   l1_regularization: 1.0e-6
 loss:
   class_name: MSELoss
 datamodule:
-  directory: local/ml-25m
+  movielens:
+    class_name: MovieLens25m
+    directory: local/ml-25m
+  train_explicit_file: ratings_split0_q0.8.csv
+  val_explicit_file: ratings_split1_q0.1.csv
+  test_explicit_file: ratings_split2_q0.1.csv
   num_workers: 4
   batch_size: 4000
   val_batch_size: 1000
@@ -17,7 +22,7 @@ lightning_module:
 trainer:
   max_epochs: -1
   accelerator: gpu
-  devices: [2]
+  devices: [4]
   log_every_n_steps: 1
   val_check_interval: 500
   accumulate_grad_batches: 10
@@ -36,3 +41,8 @@ callbacks:
     artifact_name: my_mf_slim_movielens_25m
   RecommendingMetricsCallback:
     k: 10
+  RecommendingExplanationIMDBCallback:
+    path_to_imdb_ratings_csv: local/my_imdb_ratings.csv
+    n_recommendations: 10
+    movielens_class_name: MovieLens25m
+    movielens_directory: local/ml-25m

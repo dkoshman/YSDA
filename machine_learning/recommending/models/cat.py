@@ -1,4 +1,5 @@
 import abc
+import os
 import pickle
 import re
 import warnings
@@ -32,7 +33,7 @@ if TYPE_CHECKING:
     from my_tools.utils import SparseTensor
 
 
-# TODO: add batched pool fit for gpu
+# TODO: move to imladris
 #  train models on ml25m: svd(10, 100, 1000 ?), mf, extra features? add explanations to app, upload
 
 
@@ -57,7 +58,7 @@ class CatboostInterface(
         cb_params=None,
         cb_fit_n_users_per_batch=500,
         cb_fit_verbose=100,
-        unknown_category_token="__NA__",
+        unknown_token="__NA__",
         feature_perturbation="interventional",
         **kwargs,
     ):
@@ -65,9 +66,14 @@ class CatboostInterface(
         self.cb_params = cb_params or {}
         self.cb_fit_n_users_per_batch = cb_fit_n_users_per_batch
         self.cb_fit_verbose = cb_fit_verbose
-        self.unknown_category_token = unknown_category_token
+        self.unknown_token = unknown_token
         self.feature_perturbation = feature_perturbation
 
+        if cb_params.get("task_type") == "GPU" and "devices" in cb_params:
+            os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
+                map(str, cb_params["devices"])
+            )
         self.model = catboost.CatBoostRanker(**self.cb_params)
         self.cat_features: "dict[CatboostInterface.FeatureKind: set[str]]" = {
             i: set() for i in self.FeatureKind
@@ -174,19 +180,22 @@ class CatboostInterface(
             )
         return dataframe
 
-    def build_pool_kwargs(
-        self,
-        *,
-        user_item_dataframe,
-        label=None,
-        drop_user_ids=False,
-        drop_item_ids=False,
-    ) -> dict:
+    @property
+    @abc.abstractmethod
+    def use_user_ids_as_features(self) -> bool:
+        """Whether to keep item ids in dataframe being passed as one of pool_kwargs."""
+
+    @property
+    @abc.abstractmethod
+    def use_item_ids_as_features(self) -> bool:
+        """Whether to keep user ids in dataframe being passed as one of pool_kwargs."""
+
+    def build_pool_kwargs(self, user_item_dataframe, label=None) -> dict:
         group_id = user_item_dataframe["user_ids"].values
         dataframe = self.merge_features(user_item_dataframe)
-        if drop_user_ids:
+        if not self.use_user_ids_as_features:
             dataframe = dataframe.drop("user_ids", axis="columns")
-        if drop_item_ids:
+        if not self.use_item_ids_as_features:
             dataframe = dataframe.drop("item_ids", axis="columns")
         return dict(
             dataframe=dataframe,
@@ -206,11 +215,13 @@ class CatboostInterface(
     ) -> dict:
         dataframe = dataframe.copy()
         for column in dataframe:
-            if column in list(cat_features) + list(text_features):
+            if column in list(cat_features):
                 dataframe[column] = (
-                    dataframe[column]
-                    .fillna(self.unknown_category_token)
-                    .astype("string")
+                    dataframe[column].fillna(self.unknown_token).astype("category")
+                )
+            elif column in list(text_features):
+                dataframe[column] = (
+                    dataframe[column].fillna(self.unknown_token).astype("string")
                 )
             else:
                 dataframe[column] = pd.to_numeric(dataframe[column])
@@ -227,26 +238,24 @@ class CatboostInterface(
         dataframe, label = self.full_train_dataframe_label()
         _, user_indices = np.unique(dataframe["user_ids"], return_index=True)
         assert all(user_indices[:-1] <= user_indices[1:])
+        pool_kwargs = self.build_pool_kwargs(user_item_dataframe=dataframe, label=label)
+        pool = catboost.Pool(**self.postprocess_pool_kwargs(**pool_kwargs))
 
         for begin in tqdm(
             range(0, len(user_indices), self.cb_fit_n_users_per_batch),
             desc="Fitting batches",
         ):
-            batch_indices = range(
+            batch_indices = np.arange(
                 user_indices[begin],
                 user_indices[end]
                 if (end := begin + self.cb_fit_n_users_per_batch) < len(user_indices)
                 else len(dataframe),
             )
-            pool_kwargs = self.build_pool_kwargs(
-                user_item_dataframe=dataframe.iloc[batch_indices],
-                label=label[batch_indices],
-            )
-            pool = catboost.Pool(**self.postprocess_pool_kwargs(**pool_kwargs))
+            batch_pool = pool.slice(batch_indices)
             if self.model.is_fitted():
-                pool.set_baseline(baseline=self.model.predict(pool))
+                batch_pool.set_baseline(baseline=self.model.predict(batch_pool))
             batch_model = catboost.CatBoostRanker(**self.cb_params)
-            batch_model.fit(pool, verbose=self.cb_fit_verbose)
+            batch_model.fit(batch_pool, verbose=self.cb_fit_verbose)
             self.model = catboost.sum_models([self.model, batch_model])
 
     def forward(self, user_ids, item_ids):
@@ -422,6 +431,14 @@ class CatboostRecommenderBase(CatboostInterface):
         self.update_features(kind=kind, cat_features={"item_ids"})
         return super().item_features()
 
+    @property
+    def use_user_ids_as_features(self):
+        return True
+
+    @property
+    def use_item_ids_as_features(self):
+        return True
+
     def train_user_item_dataframe_label(self, explicit):
         explicit = self.to_scipy_coo(explicit)
         dataframe = pd.DataFrame(dict(user_ids=explicit.row, item_ids=explicit.col))
@@ -480,12 +497,13 @@ class CatboostAggregatorRecommender(CatboostInterface):
         self.update_features(kind=kind, cat_features=set(self.recommender_names))
         return super().user_item_features()
 
-    def build_pool_kwargs(self, drop_user_ids=None, drop_item_ids=None, **kwargs):
-        return super().build_pool_kwargs(
-            drop_user_ids=True if drop_user_ids is None else drop_user_ids,
-            drop_item_ids=True if drop_item_ids is None else drop_item_ids,
-            **kwargs,
-        )
+    @property
+    def use_user_ids_as_features(self):
+        return False
+
+    @property
+    def use_item_ids_as_features(self):
+        return False
 
     def ranks_dataframe(self, user_ids, item_ids, ranks):
         """
