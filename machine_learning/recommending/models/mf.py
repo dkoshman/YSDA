@@ -7,7 +7,7 @@ from my_tools.utils import to_torch_coo, torch_sparse_slice
 from ..lit import LitRecommenderBase
 from ..data import SparseDataset, build_recommending_dataloader, GridIterableDataset
 from ..interface import RecommenderModuleBase
-from ..utils import build_bias, build_weight, batch_size_in_bytes, wandb_timeit
+from ..utils import build_bias, build_weight, batch_size_in_bytes, Timer
 
 
 class MatrixFactorization(RecommenderModuleBase):
@@ -111,6 +111,7 @@ class MFSlimRecommender(RecommenderModuleBase):
         ratings = self.online_ratings(users_explicit=users_explicit)
         return ratings[:, item_ids]
 
+    @Timer()
     def online_ratings(self, users_explicit):
         users_explicit = users_explicit.to(self.device, torch.float32)
         encoder = self.encoder.clone()
@@ -188,7 +189,6 @@ class MFRecommender(LitRecommenderBase):
             persistent_workers=config.get("persistent_workers", False),
         )
 
-    @wandb_timeit("training_step")
     def training_step(self, batch, batch_idx):
         self.log("train_batch_size_in_bytes", float(batch_size_in_bytes(batch)))
         explicit = torch_sparse_slice(
@@ -200,7 +200,6 @@ class MFRecommender(LitRecommenderBase):
         self.log("train_loss", loss)
         return loss
 
-    @wandb_timeit("validation_step")
     def validation_step(self, batch, batch_idx):
         self.log("val_batch_size_in_bytes", float(batch_size_in_bytes(batch)))
         loss = self.loss(model=self.model, **batch)

@@ -97,13 +97,14 @@ class GridSampler:
 
     def __init__(self, dataset_shape, approximate_batch_size, shuffle=True):
         self.dataset_shape = dataset_shape
-        self.chunks_per_dim = (
+        self.chunks_per_dim = max(
+            1,
             (
                 (torch.tensor(dataset_shape).prod() / approximate_batch_size)
                 ** (1 / len(dataset_shape))
             )
             .round()
-            .int()
+            .int(),
         )
         self.shuffle = shuffle
 
@@ -162,7 +163,7 @@ def build_recommending_dataloader(
     dataset,
     sampler_type: Literal["grid", "user", "item"] = "user",
     batch_size=100,
-    num_workers=0,
+    num_workers=4,
     persistent_workers=False,
     shuffle=False,
 ):

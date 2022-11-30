@@ -5,6 +5,7 @@ import numpy as np
 import pytorch_lightning as pl
 import scipy
 import torch
+from machine_learning.recommending.interface import RecommenderModuleBase
 
 from torch.utils.data import Dataset, DataLoader
 
@@ -16,6 +17,9 @@ from machine_learning.recommending.data import (
 
 
 TEST_CONFIG_PATH = "tests/config_for_testing.yaml"
+IMDB_RATINGS_PATH = "data/imdb_ratings/my_imdb_ratings.csv"
+MOVIELENS100K_DIRECTORY = "local/ml-100k"
+MOVIELENS25M_DIRECTORY = "data/ml-25m"
 
 
 def seed_everything(seed=None):
@@ -45,10 +49,14 @@ def seed_everything(seed=None):
 def random_explicit_feedback(
     n_users=None, n_items=None, density=None, max_rating=None, min_n_ratings_per_user=2
 ):
-    n_users = n_users or np.random.randint(10, 100)
-    n_items = n_items or np.random.randint(10, 100)
-    density = density or np.random.uniform(0.1, 0.5)
-    max_rating = max_rating or np.random.choice(range(1, 11))
+    if n_users is None:
+        n_users = np.random.randint(10, 100)
+    if n_items is None:
+        n_items = np.random.randint(10, 100)
+    if density is None:
+        density = np.random.uniform(0.1, 0.5)
+    if max_rating is None:
+        max_rating = np.random.choice(range(1, 11))
 
     ratings_range = np.arange(max_rating + 1)
     probs = [1 - density] + [density / max_rating] * max_rating
@@ -86,7 +94,7 @@ def is_cuda_error(exception):
     )
 
 
-def cartesian_products_of_dict_values(dictionary: dict[str, Iterable]):
+def cartesian_products_of_dict_values(dictionary: "dict[str, Iterable]"):
     if not dictionary:
         yield {}
         return
@@ -166,11 +174,7 @@ class MockLightningModuleInterface(pl.LightningModule):
 
 
 class MockLinearLightningModule(MockLightningModuleInterface):
-    def __init__(
-        self,
-        n_features=10,
-        batch_size=100,
-    ):
+    def __init__(self, n_features=10, batch_size=100):
         super().__init__()
         self.save_hyperparameters()
         self.register_buffer(name="true_parameter", tensor=torch.randn(n_features))
@@ -194,6 +198,13 @@ class MockLinearLightningModule(MockLightningModuleInterface):
         return loss
 
 
+class MockRecommender(RecommenderModuleBase):
+    def forward(
+        self, user_ids: torch.IntTensor, item_ids: torch.IntTensor
+    ) -> torch.FloatTensor:
+        return user_ids.reshape(-1, 1).to(torch.float32) * item_ids
+
+
 class MockLitRecommender(SparseTensorUnpacker, MockLightningModuleInterface):
     def __init__(self, model):
         super().__init__()
@@ -201,7 +212,7 @@ class MockLitRecommender(SparseTensorUnpacker, MockLightningModuleInterface):
 
     def dataloader(self, stage):
         if stage == "train":
-            explicit = self.model.explicit
+            explicit = self.model.construct_1d_explicit
             shuffle = True
         else:
             explicit = random_explicit_feedback(

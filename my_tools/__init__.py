@@ -1,3 +1,3 @@
-from . import entrypoints
+from . import entrypoint
 from . import models
 from . import utils

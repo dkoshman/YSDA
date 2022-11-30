@@ -16,7 +16,7 @@ from ..interface import (
     FitExplicitInterfaceMixin,
     UnpopularRecommenderMixin,
 )
-from ..utils import wandb_plt_figure
+from ..utils import wandb_plt_figure, Timer
 
 
 class RandomRecommender(RecommenderModuleBase, FitExplicitInterfaceMixin):
@@ -29,6 +29,8 @@ class RandomRecommender(RecommenderModuleBase, FitExplicitInterfaceMixin):
 
 
 class PopularRecommender(RecommenderModuleBase, FitExplicitInterfaceMixin):
+    items_count: torch.Tensor
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.register_buffer(name="items_count", tensor=torch.zeros(self.n_items))
@@ -69,6 +71,7 @@ class SVDRecommender(RecommenderModuleBase, FitExplicitInterfaceMixin):
         ratings = self.online_ratings(users_explicit=users_explicit)
         return ratings[:, item_ids]
 
+    @Timer()
     def online_ratings(self, users_explicit):
         users_explicit = self.to_scipy_coo(users_explicit)
         embedding = self.model.transform(users_explicit)
@@ -128,7 +131,7 @@ class ImplicitRecommenderBase(RecommenderModuleBase, FitExplicitInterfaceMixin):
             filter_already_liked_items=True,
         )
         item_ids = torch.from_numpy(item_ids).to(torch.int64)
-        self.check_invalid_recommendations(recommendations=item_ids)
+        self.check_invalid_recommendations(recommendations=item_ids, warn=False)
         return item_ids
 
     def get_extra_state(self):
@@ -168,7 +171,7 @@ class ImplicitNearestNeighborsRecommender(ImplicitRecommenderBase):
             **kwargs,
         )
         item_ids = torch.from_numpy(item_ids).to(torch.int64)
-        self.check_invalid_recommendations(recommendations=item_ids)
+        self.check_invalid_recommendations(recommendations=item_ids, warn=False)
         return item_ids
 
 

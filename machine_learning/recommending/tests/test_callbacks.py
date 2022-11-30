@@ -3,23 +3,25 @@ import pytorch_lightning as pl
 import torch
 import wandb
 import yaml
+from pytorch_lightning.loggers import WandbLogger
 
 from my_tools.utils import to_torch_coo
-from ..callbacks import (
+from machine_learning.recommending.callbacks import (
     RecommendingDataOverviewCallback,
     WandbCheckpointCallback,
     WandbWatcher,
     RecommendingExplanationCallback,
 )
-from ..entrypoint import RecommendingBuilder
-from ..models import SLIMRecommender, SLIM, ALSjit
+from machine_learning.recommending.entrypoint import RecommendingBuilder
+from machine_learning.recommending.models import SLIM, ALSjit
 
-from ..utils import fetch_artifact, load_path_from_artifact
+from machine_learning.recommending.utils import fetch_artifact, load_path_from_artifact
 from .conftest import (
     random_explicit_feedback,
     MockLinearLightningModule,
     TEST_CONFIG_PATH,
     cartesian_products_of_dict_values,
+    IMDB_RATINGS_PATH,
 )
 
 
@@ -31,7 +33,7 @@ def _test_lightning_module(config):
     trainer.test(lightning_module)
     model = lightning_module.model
 
-    recommendations = model.content(user_ids=torch.arange(100))
+    recommendations = model.recommend(user_ids=torch.arange(100))
     explicit = random_explicit_feedback(n_items=model.n_items)
     explicit = to_torch_coo(explicit)
     online = model.online_recommend(explicit)
@@ -39,7 +41,7 @@ def _test_lightning_module(config):
 
     loaded_model = type(model)()
     loaded_model.load_state_dict(state_dict)
-    loaded_recommendations = loaded_model.content(user_ids=torch.arange(100))
+    loaded_recommendations = loaded_model.recommend(user_ids=torch.arange(100))
     loaded_online = loaded_model.online_recommend(explicit)
     assert (recommendations == loaded_recommendations).all()
     assert (online == loaded_online).all()
@@ -60,13 +62,14 @@ def _test_callback(callback, logger=None, lightning_module=None, **trainer_kwarg
 def test_wandb_artifact_checkpointing():
     artifact_name = "TestingCheckpoint"
     callback = WandbCheckpointCallback(artifact_name=artifact_name)
-    _test_callback(callback)
+    logger = WandbLogger()
+    _test_callback(callback, logger=logger)
     artifact = fetch_artifact(
         entity="dkoshman", project="Testing", artifact_name=artifact_name
     )
     checkpoint_path = load_path_from_artifact(artifact)
     loaded_lit = MockLinearLightningModule.load_from_checkpoint(checkpoint_path)
-    trainer = pl.Trainer()
+    trainer = pl.Trainer(logger=logger)
     trainer.test(loaded_lit)
     trainer.predict(loaded_lit)
 
@@ -74,7 +77,7 @@ def test_wandb_artifact_checkpointing():
 def test_recommending_explanation_callback():
     explicit = random_explicit_feedback()
     users_explicit = random_explicit_feedback(
-        n_users=np.random.randint(explicit.shape[0], size=np.random.randint(1, 3)),
+        n_users=np.random.randint(1, explicit.shape[0]),
         n_items=explicit.shape[1],
     )
     callback = RecommendingExplanationCallback(
@@ -84,7 +87,14 @@ def test_recommending_explanation_callback():
     )
     with wandb.init(project="Testing", dir="local", mode="offline"):
         for cls in [SLIM, ALSjit]:
-            callback.on_epoch_end(model=cls(explicit=explicit), stage="test")
+            callback.on_epoch_end(
+                model=cls(
+                    explicit=explicit,
+                    n_users=explicit.shape[0],
+                    n_items=explicit.shape[1],
+                ),
+                stage="test",
+            )
 
 
 def test_recommending_data_overview_callback():
@@ -97,7 +107,13 @@ def test_recommending_data_overview_callback():
 
 def test_recommending_imdb_callback():
     config = yaml.safe_load(open(TEST_CONFIG_PATH))
-    config.update(callbacks=dict(RecommendingIMDBCallback=dict()))
+    config.update(
+        callbacks=dict(
+            RecommendingExplanationIMDBCallback=dict(
+                path_to_imdb_ratings_csv=IMDB_RATINGS_PATH
+            )
+        )
+    )
     _test_lightning_module(config)
 
 
@@ -111,7 +127,7 @@ def test_catboost_callback():
     config = yaml.safe_load(open(TEST_CONFIG_PATH))
     config.update(
         dict(
-            model=dict(class_name="CatboostExplicitRecommender"),
+            model=dict(class_name="CatboostRecommenderBase"),
             callbacks=dict(CatBoostMetrics=dict()),
         )
     )
@@ -124,4 +140,4 @@ def test_wandb_watcher_callback():
     )
     for kwargs in cartesian_products_of_dict_values(grid_kwargs):
         callback = WandbWatcher(**kwargs)
-        _test_callback(callback, logger=pl.loggers.WandbLogger())
+        _test_callback(callback, logger=WandbLogger())

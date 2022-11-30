@@ -6,16 +6,14 @@ import pandas as pd
 import pytorch_lightning as pl
 import torch
 import wandb
-from recommending.data import SparseDataset
 from scipy.sparse import coo_matrix
 
 from my_tools.utils import to_torch_coo
-from ..data import build_recommending_dataloader
+from ..data import build_recommending_dataloader, SparseDataset
 from ..interface import ExplanationMixin
 from ..lit import NonGradientRecommenderMixin
 
-from ..models import als, baseline, cat, mf, slim
-from ..models.slim import SLIMRecommender
+from ..models import als, baseline, cat, mf
 from ..movielens import cat as movielens_cat, MovieLens100k
 from .conftest import (
     get_available_devices,
@@ -23,8 +21,8 @@ from .conftest import (
     MockLitRecommender,
     MockLightningModuleInterface,
     seed_everything,
+    MOVIELENS100K_DIRECTORY,
 )
-from ..movielens.cat import CatboostMovieLensAggregatorFromArtifacts
 
 seed_everything()
 
@@ -71,7 +69,7 @@ def _test_recommender_module(module, test_reload=True):
         assert torch.is_tensor(online_recommendations)
         assert online_recommendations.dtype == torch.int64
         assert isinstance(module.device, torch.device)
-        assert isinstance(module.to_scipy_coo(module.explicit), coo_matrix)
+        assert isinstance(module.to_scipy_coo(module.construct_1d_explicit), coo_matrix)
 
         if test_reload:
             state_dict = module.state_dict()
@@ -127,7 +125,7 @@ class MockNonGradientRecommender(
 ):
     def dataloader(self, stage: Literal["train", "val", "test", "predict"]):
         return build_recommending_dataloader(
-            dataset=SparseDataset(explicit=self.model.explicit)
+            dataset=SparseDataset(explicit=self.model.construct_1d_explicit)
         )
 
     def forward(self, *args, **kwargs):
@@ -142,10 +140,10 @@ class MockNonGradientRecommender(
 
 
 def test_catboost_aggregator():
-    movielens = MovieLens100k()
+    movielens = MovieLens100k(directory=MOVIELENS100K_DIRECTORY)
     explicit = movielens.explicit_feedback_scipy_csr("u1.base")
     recommender_artifact_names = ["als"]
-    module = CatboostMovieLensAggregatorFromArtifacts(
+    module = cat.CatboostAggregatorFromArtifacts(
         entity="dkoshman",
         project="Recommending",
         recommender_artifacts=recommender_artifact_names,
@@ -195,7 +193,7 @@ def test_baseline():
 
 def test_catboost():
     for cls in [
-        cat.CatboostExplicitRecommender,
+        cat.CatboostRecommenderBase,
         movielens_cat.CatboostMovieLens100kFeatureRecommender,
     ]:
         explicit = random_explicit_feedback(max_rating=np.random.randint(2, 11))
@@ -257,7 +255,7 @@ def test_implicit_matrix_factorization():
 class MockMFRecommender(MockLitRecommender):
     def train_dataloader(self):
         return build_recommending_dataloader(
-            dataset=SparseDataset(explicit=self.model.explicit),
+            dataset=SparseDataset(explicit=self.model.construct_1d_explicit),
             sampler_type="grid",
             batch_size=np.random.randint(10, 100),
             num_workers=np.random.randint(0, 4),
@@ -279,53 +277,3 @@ def test_mf():
             torch.cuda.init()
         trainer.fit(lightning_module)
         _test_recommender_module(module)
-
-
-class MockSLIMRecommender(SLIMRecommender):
-    def train_explicit(self):
-        n_users = self.hparams["datamodule_config"]["n_users"]
-        n_items = self.hparams["datamodule_config"]["n_items"]
-        return random_explicit_feedback(n_users=n_users, n_items=n_items)
-
-    def val_explicit(self):
-        n_users = self.hparams["datamodule_config"]["n_users"]
-        n_items = self.hparams["datamodule_config"]["n_items"]
-        return random_explicit_feedback(n_users=n_users, n_items=n_items)
-
-    @property
-    def class_candidates(self):
-        return super().class_candidates + [slim.SLIM]
-
-
-def train_mock_slim():
-    model_config = dict(
-        class_name="SLIM",
-        l1_coefficient=10 ** np.random.uniform(-5, -2),
-        l2_coefficient=10 ** np.random.uniform(-5, -2),
-    )
-    datamodule_config = dict(
-        n_users=np.random.randint(10, 20),
-        n_items=np.random.randint(10, 20),
-    )
-    lightning_module = MockSLIMRecommender(
-        patience=np.random.randint(0, 3),
-        min_delta=np.random.uniform(0.01, 1),
-        check_val_every_n_epoch=np.random.randint(1, 5),
-        datamodule_config=datamodule_config,
-        model_config=model_config,
-    )
-    trainer = pl.Trainer(
-        num_sanity_val_steps=0,
-        reload_dataloaders_every_n_epochs=1,
-        limit_val_batches=0,
-        max_epochs=-1,
-    )
-    if torch.cuda.is_available():
-        torch.cuda.init()
-    trainer.fit(lightning_module)
-    return lightning_module
-
-
-def test_slim():
-    lightning_module = train_mock_slim()
-    _test_recommender_module(lightning_module.model)

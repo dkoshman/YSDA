@@ -7,7 +7,7 @@ import pytorch_lightning as pl
 import wandb
 import yaml
 
-from pytorch_lightning import loggers, profiler
+from pytorch_lightning import loggers as pl_loggers, profiler as pl_profiler
 
 from my_tools.utils import full_traceback, BuilderMixin
 
@@ -210,11 +210,11 @@ class LightningConfigBuilder(BuilderMixin):
 
     @property
     def module_candidates(self):
-        return super().module_candidates + [pl.callbacks, loggers, profiler]
+        return super().module_candidates + [pl.callbacks, pl_loggers, pl_profiler]
 
     @property
     def class_candidates(self):
-        return super().class_candidates + [pl.Trainer, loggers.WandbLogger]
+        return super().class_candidates + [pl.Trainer, pl_loggers.WandbLogger]
 
     def build_lightning_module(self) -> pl.LightningModule:
         lightning_config = self.config["lightning_module"]
@@ -228,7 +228,7 @@ class LightningConfigBuilder(BuilderMixin):
         model_config = self.config["model"]
         return self.build_class(**model_config)
 
-    def build_logger(self) -> "pl_loggers.logger.Logger":
+    def build_logger(self) -> "pl_loggers.LightningLoggerBase":
         logger_config = self.config["logger"]
         if logger_config:
             if "class_name" not in logger_config:
@@ -247,7 +247,7 @@ class LightningConfigBuilder(BuilderMixin):
                 )
         return callbacks
 
-    def build_profiler(self) -> "profiler.Profiler" or None:
+    def build_profiler(self) -> "pl_profiler.Profiler" or None:
         if profiler_config := self.config.get("profiler"):
             profiler = self.build_class(**profiler_config)
             return profiler

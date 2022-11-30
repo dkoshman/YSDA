@@ -1,4 +1,9 @@
+entity: dkoshman
 project: Recommending
+data:
+  - artifact: dkoshman/Recommending/imdb_ratings:latest
+    directory: data/imdb_ratings
+    create_artifact_if_doesnt_exist: True
 datamodule:
   movielens:
     class_name: MovieLens100k
@@ -18,15 +23,12 @@ logger:
 trainer:
   default_root_dir: local
   amp_backend: native
+#  amp_backend: apex
+#  strategy: ddp
 callbacks:
   WandbSaveCodeOnceCallback: {}
   LearningRateMonitor: {}
   ParameterStatsLoggerCallback: {}
-  RecommendingMetricsCallback:
-    k: 10
+  RecommendingMetricsCallback: {}
   RecommendingExplanationIMDBCallback:
-    path_to_imdb_ratings_csv: local/my_imdb_ratings.csv
-    n_recommendations: 10
-    movielens_class_name: MovieLens100k
-    movielens_directory: local/ml-100k
-
+    path_to_imdb_ratings_csv: data/imdb_ratings/my_imdb_ratings.csv

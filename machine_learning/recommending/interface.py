@@ -1,9 +1,11 @@
 import abc
+import warnings
 from abc import ABC
 from typing import TYPE_CHECKING, Any
 
 import torch
 import wandb
+from machine_learning.recommending.utils import Timer
 
 from machine_learning.recommending.maths import (
     Distance,
@@ -48,19 +50,16 @@ class RecommenderModuleInterface(torch.nn.Module, abc.ABC):
         """Generate recommendations for new users defined by their explicit feedback."""
 
 
-class CannotGenerateEnoughRecommendationsError(RuntimeError):
-    pass
-
-
 class RecommenderModuleBase(RecommenderModuleInterface, ABC):
+    explicit: torch.Tensor
+
     def __init__(
         self,
-        n_users,
-        n_items,
+        n_users: int,
+        n_items: int,
         explicit: "SparseTensor" or "spmatrix" or None = None,
         persistent_explicit=False,
         invalid_recommendation_mark: int = -1,
-        error_if_cannot_generate_enough_recommendations=True,
     ):
         super().__init__()
         self.n_users = n_users
@@ -71,9 +70,6 @@ class RecommenderModuleBase(RecommenderModuleInterface, ABC):
             name="explicit", tensor=explicit, persistent=persistent_explicit
         )
         self.invalid_recommendation_mark = invalid_recommendation_mark
-        self.error_if_cannot_generate_enough_recommendations = (
-            error_if_cannot_generate_enough_recommendations
-        )
         self.to_torch_coo = to_torch_coo
         self.to_scipy_coo = to_scipy_coo
 
@@ -91,30 +87,31 @@ class RecommenderModuleBase(RecommenderModuleInterface, ABC):
         ratings = torch.where(explicit.to_dense() > 0, -torch.inf, ratings)
         item_ratings, item_ids = torch.topk(input=ratings, k=n_recommendations)
         item_ids[item_ratings == -torch.inf] = self.invalid_recommendation_mark
-        self.check_invalid_recommendations(recommendations=item_ids)
+        self.check_invalid_recommendations(recommendations=item_ids, warn=False)
         return item_ids
 
-    def check_invalid_recommendations(self, recommendations):
-        invalid_items_mask = recommendations == self.invalid_recommendation_mark
-        n_invalid_recommendations = invalid_items_mask.sum().cpu().item()
-        if n_invalid_recommendations:
-            if wandb.run is not None:
-                wandb.log(
-                    {
-                        "sanity_check/n_invalid_recommendations": float(
-                            n_invalid_recommendations
-                        ),
-                        "sanity_check/invalid_recommendations_proportion": n_invalid_recommendations
-                        / recommendations.numel(),
-                    }
-                )
-            if self.error_if_cannot_generate_enough_recommendations:
-                raise CannotGenerateEnoughRecommendationsError(
-                    f"Model generated {n_invalid_recommendations} invalid recommendations out of total "
-                    f"{recommendations.numel()}. You can disable errors on invalid recommendations by"
-                    f"setting {f'{self.error_if_cannot_generate_enough_recommendations=}'.split('=')[0]} "
-                    f"attribute of {self.__class__.__name__} to False."
-                )
+    def check_invalid_recommendations(self, recommendations, warn: bool):
+        invalid_items_mask = (recommendations == self.invalid_recommendation_mark).to(
+            torch.float32
+        )
+        users_without_enough_recommendations = invalid_items_mask.any(1).to(
+            torch.float32
+        )
+        if wandb.run is not None:
+            wandb.log(
+                {
+                    "sanity_check/average_n_invalid_recommendations_per_user": invalid_items_mask.mean(),
+                    "sanity_check/not_enough_recommendations_frequency": users_without_enough_recommendations.mean(),
+                }
+            )
+        if warn and any(users_without_enough_recommendations):
+            warning_message = (
+                f"Model failed to generate requested number of recommendations for users.\n"
+                f"Model was asked for {recommendations.shape[1]} recommendations among "
+                f"{self.n_items} items, but {users_without_enough_recommendations.sum()} "
+                f"users out of batch total {recommendations.shape[0]} did not get enough recommendations."
+            )
+            warnings.warn(warning_message, category=RuntimeWarning)
 
     def recommend(self, user_ids, n_recommendations=None):
         with torch.inference_mode():
@@ -129,6 +126,7 @@ class RecommenderModuleBase(RecommenderModuleInterface, ABC):
         )
         return recommendations
 
+    @Timer()
     def online_nn_ratings(
         self,
         explicit: "SparseTensor" or spmatrix,
@@ -224,16 +222,21 @@ class ExplanationMixin:
 class UnpopularRecommenderMixin:
     """
     I want to recommend items which the users haven't previously seen,
-    so given probability p_ui that user has seen item, I want to scale
-    down the expected rating r_ui with that probability:
-    predicted_relevance_ui = r_ui * g(1 - p_ui),
+    so given probability p_ui that user has seen item, I want to decrease
+    the expected rating r_ui by an amount depending on that probability:
+    predicted_relevance_ui = r_ui - g(p_ui),
     where g is a non-decreasing function.
 
-    And p_ui can be factorized as p_u * p_i, and p_u and p_i
-    can be estimated as their sample frequencies.
+    For convenience and without much complexity sacrifice, p_ui can be
+    factorized as p_u * p_i, and p_u and p_i can be
+    estimated as sample frequencies.
 
-    The default for g is g(x) = x.
+    The implementation below uses g(x) = unpopularity_coef * log(p_ui).
     """
+
+    unpopularity_coef: torch.Tensor
+    users_activity: torch.Tensor
+    items_popularity: torch.Tensor
 
     def init_unpopular_recommender_mixin(
         self: RecommenderModuleBase, unpopularity_coef=1e-3
@@ -252,20 +255,21 @@ class UnpopularRecommenderMixin:
             (self.to_scipy_coo(self.explicit) > 0).mean(0).A.squeeze(0)
         )
 
-    @property
-    def mean_user_activity(self):
-        return self.users_activity.mean(dim=0, keepdims=True)
-
     def probability_that_user_has_seen_item(self, users_activity):
         return torch.einsum("u, i -> ui", users_activity, self.items_popularity)
 
     def additive_rating_offset(self, users_activity):
-        return -self.unpopularity_coef * torch.log(
-            1.0e-8
-            + self.probability_that_user_has_seen_item(users_activity=users_activity)
-        )
+        p_ui = self.probability_that_user_has_seen_item(users_activity=users_activity)
+        eps = torch.finfo().eps
+        return -self.unpopularity_coef * torch.log(torch.FloatTensor(eps + p_ui))
+
+    @property
+    def mean_user_activity(self):
+        """Convenience method."""
+        return self.users_activity.mean(dim=0, keepdims=True)
 
 
+# TODO: fix loss interface: as mixin for simple losses and as method for complex ones
 class RecommendingLossInterface:
     def __init__(self, explicit):
         pass
@@ -273,9 +277,10 @@ class RecommendingLossInterface:
     @abc.abstractmethod
     def __call__(
         self,
-        model: "RecommenderModuleBase",
         explicit: "SparseTensor",
-        user_ids: torch.IntTensor,
-        item_ids: torch.IntTensor,
+        model_ratings: torch.FloatTensor = None,
+        model: "RecommenderModuleBase" = None,
+        user_ids: torch.IntTensor = None,
+        item_ids: torch.IntTensor = None,
     ) -> torch.FloatTensor:
         ...

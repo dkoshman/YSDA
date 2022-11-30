@@ -90,9 +90,10 @@ class CatboostMovieLens100kFeatureAggregatorFromArtifacts(
 
 
 class CatboostMovieLens25mFeatureRecommender(CatboostRecommenderBase):
-    def __init__(self, *, movielens_directory, **kwargs):
+    def __init__(self, *, movielens_directory, use_text_features=False, **kwargs):
         super().__init__(**kwargs)
         self.movielens = MovieLens25m(movielens_directory)
+        self.use_text_features = use_text_features
 
     @functools.lru_cache()
     def user_features(self):
@@ -104,7 +105,7 @@ class CatboostMovieLens25mFeatureRecommender(CatboostRecommenderBase):
 
     @functools.lru_cache()
     def item_features(self):
-        item_features = self.movielens["movies"].reset_index(names="item_ids")
+        item_features = self.movielens["movies"].reset_index()
 
         item_ratings_stats = ratings_stats(self.movielens["ratings"], kind="item")
         item_features = pd.merge(item_features, item_ratings_stats, on="item_ids")
@@ -126,21 +127,21 @@ class CatboostMovieLens25mFeatureRecommender(CatboostRecommenderBase):
 
     @functools.lru_cache()
     def user_item_features(self):
-        user_item_timestamps = self.movielens["ratings"][
+        user_item_features = self.movielens["ratings"][
             ["user_ids", "item_ids", "timestamp"]
         ]
-        user_item_tags = (
-            self.movielens["tags"]
-            .rename({"userId": "user_ids", "movieId": "item_ids"}, axis="columns")
-            .groupby(["user_ids", "item_ids"])["tag"]
-            .apply(", ".join)
-            .reset_index()
-        )
         kind = self.FeatureKind.user_item
-        user_item_features = pd.merge(
-            left=user_item_timestamps, right=user_item_tags, on=kind.merge_on
-        )
-        self.update_features(kind=kind, text_features={"tag"})
+        if self.use_text_features:
+            user_item_tags = (
+                self.movielens["tags"]
+                .groupby(["user_ids", "item_ids"])["tag"]
+                .apply(", ".join)
+                .reset_index()
+            )
+            user_item_features = pd.merge(
+                left=user_item_features, right=user_item_tags, on=kind.merge_on
+            )
+            self.update_features(kind=kind, text_features={"tag"})
         return self.maybe_none_left_merge(
             user_item_features, super().user_item_features(), on=kind.merge_on
         )

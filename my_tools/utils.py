@@ -64,51 +64,6 @@ def torch_sparse_slice(sparse_matrix, row_ids=None, col_ids=None):
     return torch_sparse_coo_tensor
 
 
-#
-# def reuse_shelved_object_or_construct(
-#     hashable_attribute, object_constructor, object_name, dir_path="local"
-# ):
-#     import hashlib
-#     import shelve
-#
-#     from pathlib import Path
-#
-#     dir_path = Path(dir_path)
-#     dir_path.mkdir(exist_ok=True)
-#     file_path = dir_path / Path(object_name)
-#     digest = hashlib.new(name="blake2s", data=hashable_attribute).hexdigest()
-#
-#     with shelve.open(file_path.as_posix()) as file_dict:
-#         if file_dict.get("digest") == digest:
-#             print(f"Reusing {file_path}")
-#             return file_dict["object"]
-#
-#         print(f"Constructing {file_path}")
-#         obj = object_constructor()
-#         file_dict["digest"] = digest
-#         file_dict["object"] = obj
-#         return obj
-
-#
-# def timeit(func):
-#     import datetime
-#
-#     from functools import wraps as functools_wraps
-#
-#     @functools_wraps(func)
-#     def _time_it(*args, **kwargs):
-#         start = datetime.datetime.now()
-#         try:
-#             return func(*args, **kwargs)
-#         finally:
-#             end = datetime.datetime.now()
-#             print(
-#                 f'"{func.__name__}" execution time: {(end - start).total_seconds():.3f} sec'
-#             )
-#
-#     return _time_it
-
-
 def get_class(class_name, class_candidates=(), module_candidates=()):
     for cls in class_candidates:
         if cls.__name__ == class_name:

@@ -1,32 +1,36 @@
 name: "Catboost aggregator 25m"
-model:
-  class_name: CatboostMovieLens25mFeatureAggregatorFromArtifacts
-  recommender_artifacts: [svd:latest] #, my_mf_slim:latest]
-  lit_modules: [MovieLensNonGradientRecommender] #, MovieLensMFRecommender]
-  movielens_directory: local/ml-25m
-  cb_fit_n_users_per_batch: 1000
-  cb_params:
-    task_type: GPU
-    devices: [0, 1] # CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0,1
+data:
+  - artifact: dkoshman/Recommending/imdb_ratings:latest
+    directory: data/imdb_ratings
+    create_artifact_if_it_doesnt_exist: True
+    match_directory_exactly: True
+  - artifact: dkoshman/Recommending/movielens25m:latest
+    directory: data/ml-25m
+    create_artifact_if_it_doesnt_exist: True
 datamodule:
   movielens:
     class_name: MovieLens25m
-    directory: local/ml-25m
-  train_explicit_file: ratings_split0_q0.8.csv
-  val_explicit_file: ratings_split1_q0.1.csv
-  test_explicit_file: ratings_split2_q0.1.csv
+    directory: data/ml-25m
+#    time_quantiles: [0.8, 0.1, 0.1]
+  train_explicit_file: ratings_split1_q0.1.csv
+  val_explicit_file: ratings_split2_q0.1.csv
+  test_explicit_file:
+model:
+  class_name: CatboostMovieLens25mFeatureAggregatorFromArtifacts
+  recommender_artifacts: [svd_movielens_25m:latest, my_mf_slim_movielens_25m:latest]
+  lit_modules: [MovieLensNonGradientRecommender, MovieLensMFRecommender]
+  movielens_directory: data/ml-25m
+  cb_gpu_fit_n_users_per_batch: 1000
+  cb_params:
+    task_type: GPU
+# It's easier to control what gpus the model trains on via CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=4
+# as devices=[4] can fail unexpectedly because of catboost cuda library gpus reordering.
 lightning_module:
   class_name: MovieLensNonGradientRecommender
 trainer:
   num_sanity_val_steps: 0
-  max_epochs: -1
 callbacks:
-  CatBoostMetrics:
-    plot_dependence: true
+#  CatBoostMetrics: {} # Too slow as of now
   WandbCheckpointCallback:
     artifact_name: catboost_aggregator_25m
-  RecommendingExplanationIMDBCallback:
-    path_to_imdb_ratings_csv: local/my_imdb_ratings.csv
-    n_recommendations: 10
-    movielens_class_name: MovieLens25m
-    movielens_directory: local/ml-25m
+

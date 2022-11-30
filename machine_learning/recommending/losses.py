@@ -8,10 +8,13 @@ from machine_learning.recommending.maths import kl_divergence, pairwise_differen
 
 
 class MSELoss(RecommendingLossInterface):
-    def __call__(self, model, explicit, user_ids, item_ids):
-        ratings = model(user_ids=user_ids, item_ids=item_ids)
+    def __call__(
+        self, explicit, model_ratings=None, model=None, user_ids=None, item_ids=None
+    ):
+        if model_ratings is None:
+            model_ratings = model(user_ids=user_ids, item_ids=item_ids)
         explicit = explicit.to_dense()
-        loss = ((ratings - explicit) ** 2).mean()
+        loss = ((model_ratings - explicit) ** 2).mean()
         return loss
 
 
@@ -21,12 +24,19 @@ class MSEL1Loss(RecommendingLossInterface):
         self.ratings_variance = ratings_deviation**2
         self.mean_unobserved_rating = mean_unobserved_rating
 
-    def __call__(self, model, explicit, user_ids, item_ids):
+    def __call__(
+        self, explicit, model_ratings=None, model=None, user_ids=None, item_ids=None
+    ):
+        if model_ratings is None:
+            model_ratings = model(user_ids=user_ids, item_ids=item_ids)
         explicit = explicit.to_dense()
         observed_mask = explicit > 0
-        ratings = model(user_ids=user_ids, item_ids=item_ids)
-        loss = observed_mask * (ratings - explicit) ** 2 / (2 * self.ratings_variance)
-        loss += ~observed_mask * (ratings - self.mean_unobserved_rating).abs()
+        loss = (
+            observed_mask
+            * (model_ratings - explicit) ** 2
+            / (2 * self.ratings_variance)
+        )
+        loss += ~observed_mask * (model_ratings - self.mean_unobserved_rating).abs()
         return loss.sum()
 
 

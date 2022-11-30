@@ -7,6 +7,7 @@ from my_tools.utils import BuilderMixin
 
 from . import losses, models
 from .data import build_recommending_dataloader, SparseDataModuleBase
+from .utils import download_data_if_needed
 
 if TYPE_CHECKING:
     from .interface import RecommenderModuleBase, RecommendingLossInterface
@@ -16,6 +17,7 @@ class LitRecommenderBase(SparseDataModuleBase, pl.LightningModule, BuilderMixin)
     def __init__(self, n_users=None, n_items=None, **config):
         super().__init__()
         self.save_hyperparameters()
+        download_data_if_needed(config=config)
         if n_users is None or n_items is None:
             n_users, n_items = self.train_explicit().shape
             self.save_hyperparameters()

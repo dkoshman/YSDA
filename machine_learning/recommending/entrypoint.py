@@ -2,12 +2,12 @@ import os
 
 import torch
 
-from my_tools.entrypoints import LightningConfigBuilder, ConfigDispenser
+from my_tools.entrypoint import LightningConfigBuilder, ConfigDispenser
 
 from . import callbacks, metrics, models
 from .movielens import lit as movielens_lit
 from .movielens import callbacks as movielens_callbacks
-from .utils import wandb_context_manager, wandb_timeit
+from .utils import wandb_context_manager, init_torch
 
 
 class RecommendingBuilder(LightningConfigBuilder):
@@ -47,10 +47,8 @@ class RecommendingConfigDispenser(ConfigDispenser):
 
 
 def fit(config):
-    with wandb_context_manager(config), wandb_timeit(name="entrypoint.fit"):
-        if torch.cuda.is_available():
-            os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-            torch.cuda.init()
+    with wandb_context_manager(config):
+        init_torch(debug=True)
         constructor = RecommendingBuilder(config)
         lightning_module = constructor.build_lightning_module()
         trainer = constructor.build_trainer()

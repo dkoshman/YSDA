@@ -17,7 +17,7 @@ import matplotlib.patheffects as pe
 from .data import SparseDataModuleInterface
 from .interface import ExplanationMixin
 from .metrics import RecommendingMetrics
-from .utils import wandb_plt_figure, filter_warnings, save_shap_force_plot, wandb_timeit
+from .utils import wandb_plt_figure, filter_warnings, save_shap_force_plot, Timer
 
 if TYPE_CHECKING:
     from scipy.sparse import spmatrix
@@ -145,7 +145,7 @@ class CatBoostMetrics(pl.callbacks.Callback):
     def __init__(
         self,
         *args,
-        plot_dependence=False,
+        plot_dependence=True,
         max_dataset_size_for_complex_shap=1000,
         **kwargs,
     ):
@@ -163,7 +163,7 @@ class CatBoostMetrics(pl.callbacks.Callback):
     def on_test_end(self, trainer, pl_module: "LitRecommenderBase"):
         self.common_on_end(pl_module=pl_module, stage="test")
 
-    @wandb_timeit(name="CatBoostMetrics.common_on_end")
+    @Timer()
     def common_on_end(self, pl_module, stage: 'Literal["train", "val", "test"]'):
         model: "CatboostInterface" = pl_module.model
         if stage == "train":
@@ -324,8 +324,14 @@ class RecommendingMetricsCallback(pl.callbacks.Callback):
     ):
         self.k = k
         self.every_epoch = dict(val=every_val_epoch, test=every_test_epoch)
-        self.metrics = dict(val=None, test=None)
+        self.metrics: "Dict[str, RecommendingMetrics] or None" = dict(
+            val=None, test=None
+        )
         self.log_dict = wandb.log
+
+    def skip_epoch(self, current_epoch, stage) -> bool:
+        every_epoch = self.every_epoch[stage]
+        return every_epoch == 0 or current_epoch % every_epoch
 
     def setup(self, trainer, pl_module, stage=None):
         if isinstance(trainer.datamodule, SparseDataModuleInterface):
@@ -353,10 +359,8 @@ class RecommendingMetricsCallback(pl.callbacks.Callback):
     ):
         self.common_on_batch_end(pl_module=pl_module, batch=batch, stage="test")
 
-    @wandb_timeit(name="RecommendingMetricsCallback.common_on_batch_end")
     def common_on_batch_end(self, pl_module, batch, stage):
-        every_epoch = self.every_epoch[stage]
-        if every_epoch == 0 or pl_module.current_epoch % every_epoch:
+        if self.skip_epoch(current_epoch=pl_module.current_epoch, stage=stage):
             return
         user_ids = batch["user_ids"]
         model = pl_module.model
@@ -499,7 +503,9 @@ class ParameterStatsLoggerCallback(pl.callbacks.Callback):
             stats["grad_norm"] = grad.detach().norm()
         return stats
 
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+    def on_train_batch_end(
+        self, trainer, pl_module, outputs, batch, batch_idx, **kwargs
+    ):
         if batch_idx % self.every_train_batch == 0:
             for parameter_name, parameter in pl_module.named_parameters():
                 for stat_name, stat_value in self.parameter_stats(parameter).items():

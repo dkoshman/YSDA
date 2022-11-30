@@ -2,10 +2,11 @@ import abc
 import os
 import pickle
 import re
+import sys
 import warnings
 from collections import Counter
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Tuple
 
 import catboost
 import einops
@@ -18,23 +19,25 @@ import wandb
 from scipy.sparse import csr_array, coo_array
 from tqdm.auto import tqdm
 
-from my_tools.utils import torch_sparse_slice
+from my_tools.utils import torch_sparse_slice, to_scipy_coo
 
 from ..interface import (
+    ExplanationMixin,
     FitExplicitInterfaceMixin,
     RecommenderModuleBase,
-    ExplanationMixin,
 )
 from ..movielens import lit as movielens_lit
-from ..utils import wandb_timeit, save_shap_force_plot, wandb_plt_figure, plt_figure
+from ..utils import save_shap_force_plot, wandb_plt_figure, Timer, profile
 
 if TYPE_CHECKING:
     from scipy.sparse import spmatrix
     from my_tools.utils import SparseTensor
 
 
-# TODO: move to imladris
-#  train models on ml25m: svd(10, 100, 1000 ?), mf, extra features? add explanations to app, upload
+# TODO: train aggregator, upload, find out what is the heaviest function during val, limit val batches or
+# online user features
+# split into 0.8 0.199 0.001? tags as cat features
+# maybe add extra features, more models to aggregator [svd(10, 100, 1000 ?), mf(100, 1000), mf no bias]
 
 
 class CatboostInterface(
@@ -56,23 +59,29 @@ class CatboostInterface(
     def __init__(
         self,
         cb_params=None,
-        cb_fit_n_users_per_batch=500,
+        cb_cpu_fit_n_users_per_batch=10_000,
+        cb_gpu_fit_n_users_per_batch=1000,
         cb_fit_verbose=100,
         unknown_token="__NA__",
         feature_perturbation="interventional",
+        max_gpu_query_size=1023,
         **kwargs,
     ):
+        """There seems to be a bug in catboost code with gpu training that leads to inferior results."""
         super().__init__(**kwargs)
-        self.cb_params = cb_params or {}
-        self.cb_fit_n_users_per_batch = cb_fit_n_users_per_batch
+        self._cb_params = cb_params
+        self.cb_cpu_fit_n_users_per_batch = cb_cpu_fit_n_users_per_batch
+        self.cb_gpu_fit_n_users_per_batch = cb_gpu_fit_n_users_per_batch
         self.cb_fit_verbose = cb_fit_verbose
         self.unknown_token = unknown_token
         self.feature_perturbation = feature_perturbation
+        self.max_gpu_query_size = max_gpu_query_size
 
-        if cb_params.get("task_type") == "GPU" and "devices" in cb_params:
+        self.use_gpu = self.cb_params.get("task_type") == "GPU"
+        if self.use_gpu and "devices" in self.cb_params:
             os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
             os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
-                map(str, cb_params["devices"])
+                map(str, self.cb_params["devices"])
             )
         self.model = catboost.CatBoostRanker(**self.cb_params)
         self.cat_features: "dict[CatboostInterface.FeatureKind: set[str]]" = {
@@ -84,6 +93,10 @@ class CatboostInterface(
         self._full_train_dataframe_label = None
         self._shap_explainer = None
         warnings.simplefilter(action="ignore", category=FutureWarning)
+
+    @property
+    def cb_params(self) -> dict:
+        return self._cb_params.copy() if self._cb_params else {}
 
     def get_extra_state(self):
         self.model.save_model("tmp")
@@ -190,6 +203,8 @@ class CatboostInterface(
     def use_item_ids_as_features(self) -> bool:
         """Whether to keep user ids in dataframe being passed as one of pool_kwargs."""
 
+    @Timer()
+    @profile(log_every=10)
     def build_pool_kwargs(self, user_item_dataframe, label=None) -> dict:
         group_id = user_item_dataframe["user_ids"].values
         dataframe = self.merge_features(user_item_dataframe)
@@ -217,7 +232,10 @@ class CatboostInterface(
         for column in dataframe:
             if column in list(cat_features):
                 dataframe[column] = (
-                    dataframe[column].fillna(self.unknown_token).astype("category")
+                    dataframe[column]
+                    .fillna(self.unknown_token)
+                    .astype("str")
+                    .astype("category")
                 )
             elif column in list(text_features):
                 dataframe[column] = (
@@ -233,32 +251,27 @@ class CatboostInterface(
             group_id=group_id,
         )
 
-    @wandb_timeit(name="CatboostInterface.fit")
     def fit(self):
         dataframe, label = self.full_train_dataframe_label()
-        _, user_indices = np.unique(dataframe["user_ids"], return_index=True)
-        assert all(user_indices[:-1] <= user_indices[1:])
         pool_kwargs = self.build_pool_kwargs(user_item_dataframe=dataframe, label=label)
         pool = catboost.Pool(**self.postprocess_pool_kwargs(**pool_kwargs))
-
-        for begin in tqdm(
-            range(0, len(user_indices), self.cb_fit_n_users_per_batch),
-            desc="Fitting batches",
-        ):
-            batch_indices = np.arange(
-                user_indices[begin],
-                user_indices[end]
-                if (end := begin + self.cb_fit_n_users_per_batch) < len(user_indices)
-                else len(dataframe),
+        if not self.use_gpu:
+            self.model = batch_fit_catboost_ranker(
+                cb_params=self.cb_params,
+                pool=pool,
+                n_groups_per_batch=self.cb_cpu_fit_n_users_per_batch,
             )
-            batch_pool = pool.slice(batch_indices)
-            if self.model.is_fitted():
-                batch_pool.set_baseline(baseline=self.model.predict(batch_pool))
-            batch_model = catboost.CatBoostRanker(**self.cb_params)
-            batch_model.fit(batch_pool, verbose=self.cb_fit_verbose)
-            self.model = catboost.sum_models([self.model, batch_model])
+        else:
+            self.model = fit_catboost_ranker(
+                pool=pool,
+                cb_params=self.cb_params,
+                cpu_n_users_per_batch=self.cb_cpu_fit_n_users_per_batch,
+                gpu_n_users_per_batch=self.cb_gpu_fit_n_users_per_batch,
+                max_gpu_query_size=self.max_gpu_query_size,
+            )
 
     def forward(self, user_ids, item_ids):
+        ...
         raise NotImplementedError(
             "Catboost works well when recommending small number of items, "
             "and is not meant to generate ratings for all items."
@@ -277,7 +290,8 @@ class CatboostInterface(
         col_ids = user_item_dataframe["item_ids"].values.astype(np.int32)
         pool_kwargs = self.build_pool_kwargs(user_item_dataframe=user_item_dataframe)
         pool = catboost.Pool(**self.postprocess_pool_kwargs(**pool_kwargs))
-        ratings = self.model.predict(pool)
+        with Timer(name="catboost.predict"):
+            ratings = self.model.predict(pool)
 
         ratings = coo_array(
             (ratings, (row_ids, col_ids)), shape=[row_ids.max() + 1, self.n_items]
@@ -296,6 +310,7 @@ class CatboostInterface(
         )
         return recommendations
 
+    @Timer()
     def recommend(self, user_ids, n_recommendations=None):
         return self.common_recommend(
             user_ids=user_ids, n_recommendations=n_recommendations
@@ -308,6 +323,7 @@ class CatboostInterface(
         """
         return torch.arange(self.n_users, self.n_users + n_users)
 
+    @Timer()
     def online_recommend(self, users_explicit, n_recommendations=None):
         return self.common_recommend(
             user_ids=self.fictive_user_ids(n_users=users_explicit.shape[0]),
@@ -321,6 +337,14 @@ class CatboostInterface(
             return dataframe
         return dataframe.reset_index(drop=True).sample(size).sort_values("user_ids")
 
+    def get_feature_importance(self, pool) -> pd.DataFrame:
+        less_indices, more_indices = split_by_group_sizes(
+            group_ids=pool.get_group_id_hash(),
+            group_size_threshold=self.max_gpu_query_size,
+        )
+        pool = pool.slice(less_indices)
+        return self.model.get_feature_importance(pool, prettified=True)
+
     def shap_kwargs(self, user_item_dataframe, label=None):
         pool_kwargs = self.build_pool_kwargs(
             user_item_dataframe=user_item_dataframe, label=label
@@ -333,6 +357,7 @@ class CatboostInterface(
             features=pool_kwargs["dataframe"],
         )
 
+    @Timer()
     def explain_recommendations_for_user(
         self,
         user_id=None,
@@ -341,6 +366,7 @@ class CatboostInterface(
         log=False,
         logging_prefix="explanation/",
         plot_waterfalls=False,
+        figsize=(8, 5),
     ) -> dict:
         return_explanations_dict = {}
         if user_id is not None:
@@ -385,9 +411,8 @@ class CatboostInterface(
             title = logging_prefix + "force plot"
             wandb.log({title: wandb.Html(force_plot_textio)})
 
-        title = logging_prefix + "decision plot"
-        with wandb_plt_figure(title=title) if log else plt_figure(
-            title=title
+        with wandb_plt_figure(
+            title=logging_prefix + "decision plot", figsize=figsize, log=log
         ) as decision_plot_figure:
             shap.decision_plot(
                 **shap_kwargs, legend_labels=[f"item {i}" for i in recommendations]
@@ -405,17 +430,118 @@ class CatboostInterface(
                 X=postprocessed_pool_kwargs["data"]
             )
             for item_id, item_explanation in zip(recommendations, shap_explanation):
-                figure_kwargs = dict(
+                with wandb_plt_figure(
                     title=logging_prefix + f"waterfall plot for item {item_id}",
-                    figsize=[8, 5],
-                )
-                with wandb_plt_figure(**figure_kwargs) if log else plt_figure(
-                    **figure_kwargs
+                    figsize=figsize,
+                    log=log,
                 ) as figure:
                     shap.waterfall_plot(item_explanation)
                 return_explanations_dict["waterfall_figures"][item_id] = figure
 
         return return_explanations_dict
+
+
+def batch_fit_catboost_ranker(
+    cb_params: dict,
+    pool: catboost.Pool,
+    n_groups_per_batch: int,
+    cb_fit_verbose: int = 100,
+    disable_tqdm: bool = False,
+) -> catboost.CatBoostRanker:
+
+    catboost_ranker = catboost.CatBoostRanker(**cb_params)
+    if not pool.shape[0]:
+        return catboost_ranker
+    _, group_indices = np.unique(pool.get_group_id_hash(), return_index=True)
+    begins = range(0, len(group_indices), n_groups_per_batch)
+    ends = list(begins)[1:] + [len(group_indices)]
+
+    if n_groups_per_batch == -1 or len(begins) <= n_groups_per_batch:
+        catboost_ranker.fit(pool, verbose=cb_fit_verbose)
+        return catboost_ranker
+
+    if pool.get_text_feature_indices():
+        raise ValueError(
+            "Models summation is not supported for models with text features, "
+            "so either pass n_groups_per_batch=-1, or remove text_features."
+        )
+
+    batch_rankers = []
+    if not disable_tqdm:
+        print(
+            f"Fitting catboost on "
+            f"{'gpu' if cb_params.get('task_type') == 'GPU' else 'cpu'}"
+            f" to pool of shape {pool.shape} ",
+            file=sys.stderr,
+        )
+    for begin, end in tqdm(
+        iterable=zip(begins, ends), total=len(begins), disable=disable_tqdm
+    ):
+        batch_indices = np.arange(group_indices[begin], group_indices[end])
+        batch_pool = pool.slice(batch_indices)
+        if catboost_ranker.is_fitted():
+            batch_pool.set_baseline(baseline=catboost_ranker.predict(batch_pool))
+        batch_ranker = catboost.CatBoostRanker(**cb_params)
+        batch_ranker.fit(batch_pool, verbose=cb_fit_verbose)
+        batch_rankers.append(batch_ranker)
+
+    catboost_ranker = catboost.sum_models(batch_rankers)
+    return catboost_ranker
+
+
+def split_by_group_sizes(
+    group_ids: np.array, group_size_threshold: int
+) -> "Tuple[np.array, np.array]":
+    """
+    Returns an array with indices of items that have
+    group_ids of groups with no more than
+    group_size_threshold members, and the rest indices.
+    """
+    group_ids = pd.DataFrame(dict(group_id=group_ids))
+    less_group_ids = (
+        group_ids.groupby("group_id")
+        .size()
+        .rename("size")
+        .to_frame()
+        .query(f"size <= {group_size_threshold}")
+        .index
+    )
+    less_indices = group_ids.query("group_id in @less_group_ids").index.values
+    more_indices = group_ids.index.difference(less_indices).values
+    return less_indices, more_indices
+
+
+def fit_catboost_ranker(
+    pool: catboost.Pool,
+    cb_params: dict,
+    cpu_n_users_per_batch,
+    gpu_n_users_per_batch,
+    max_gpu_query_size=1023,
+) -> catboost.CatBoostRanker:
+    """
+    While this function is a great candidate for async - gpu and cpu
+    fitting are pretty independent, but creating coroutines in any
+    function requires for it to be async itself, and any function that calls
+    it, and so forth, propagating up to the entry point. This makes async
+    code non-modular, fragile and bug prone.
+    """
+    gpu_indices, cpu_indices = split_by_group_sizes(
+        group_ids=pool.get_group_id_hash(), group_size_threshold=max_gpu_query_size
+    )
+    gpu_ranker = batch_fit_catboost_ranker(
+        cb_params=cb_params,
+        pool=pool.slice(gpu_indices),
+        n_groups_per_batch=gpu_n_users_per_batch,
+    )
+    cpu_ranker = batch_fit_catboost_ranker(
+        cb_params={**cb_params, "task_type": "CPU"},
+        pool=pool.slice(cpu_indices),
+        n_groups_per_batch=cpu_n_users_per_batch,
+    )
+    catboost_ranker = catboost.sum_models(
+        [gpu_ranker, cpu_ranker], weights=[len(gpu_indices), len(cpu_indices)]
+    )
+    return catboost_ranker
 
 
 class CatboostRecommenderBase(CatboostInterface):
@@ -463,7 +589,7 @@ class CatboostAggregatorRecommender(CatboostInterface):
         fit_recommenders: "list[RecommenderModuleBase]" = None,
         recommender_names: "list[str]" = None,
         train_n_recommendations=10,
-        batch_size=100,
+        dataframe_build_batch_size=10_000,
         **kwargs,
     ):
         if (
@@ -480,7 +606,7 @@ class CatboostAggregatorRecommender(CatboostInterface):
             self.fit_recommenders
         )
         self.train_n_recommendations = train_n_recommendations
-        self.batch_size = batch_size
+        self.dataframe_build_batch_size = dataframe_build_batch_size
 
     @staticmethod
     def generate_model_names(models):
@@ -519,6 +645,8 @@ class CatboostAggregatorRecommender(CatboostInterface):
             columns=["user_ids", "item_ids"] + self.recommender_names,
         )
 
+    @Timer()
+    @profile(log_every=10)
     def aggregate_topk_recommendations(
         self, user_ids, n_recommendations, users_explicit=None, train_explicit=None
     ):
@@ -538,16 +666,14 @@ class CatboostAggregatorRecommender(CatboostInterface):
         items_reciprocal_ranks_sum = torch.zeros(len(user_ids), self.n_items)
         recommenders_ranks = []
         for recommender, name in zip(self.fit_recommenders, self.recommender_names):
-            recommender.error_if_cannot_generate_enough_recommendations = False
+            recommender.warn_if_cannot_generate_enough_recommendations = False
             if users_explicit is not None:
-                with wandb_timeit(name=f"{name} online_recommend"):
-                    item_ids = recommender.online_recommend(users_explicit)
+                item_ids = recommender.online_recommend(users_explicit)
             else:
-                with wandb_timeit(name=f"{name} recommend"):
-                    item_ids = recommender.recommend(user_ids)
+                item_ids = recommender.recommend(user_ids)
 
             item_ids = torch.where(
-                item_ids == recommender.invalid_recommendation_mark,
+                torch.BoolTensor(item_ids == recommender.invalid_recommendation_mark),
                 self.n_items,
                 item_ids,
             )
@@ -605,7 +731,9 @@ class CatboostAggregatorRecommender(CatboostInterface):
         self, user_ids, users_explicit=None, train_explicit=None, tqdm_stage=None
     ):
         for batch_indices in tqdm(
-            iterable=torch.arange(len(user_ids)).split(self.batch_size),
+            iterable=torch.arange(len(user_ids)).split(
+                split_size=self.dataframe_build_batch_size
+            ),
             desc=f"Building {tqdm_stage or ''} dataframe for users: {self.tensor_str(user_ids)}",
             disable=not bool(tqdm_stage),
         ):
@@ -644,13 +772,21 @@ class CatboostAggregatorRecommender(CatboostInterface):
         return dataframe
 
     def train_user_item_dataframe_label(self, explicit):
+        if explicit.shape != (
+            expected_shape := torch.Size([self.n_users, self.n_items])
+        ):
+            raise ValueError(
+                "Shape of explicit feedback matrix doesn't "
+                "match the expected shape of [self.n_users, self.n_items]:"
+                f"{explicit.shape} != {expected_shape}"
+            )
         dataframe = self.recommender_ranks_dataframe(
             user_ids=torch.arange(self.n_users),
             n_recommendations=self.train_n_recommendations,
             train_explicit=explicit,
             tqdm_stage="train",
         )
-        explicit_as_column = csr_array(explicit)[
+        explicit_as_column = csr_array(to_scipy_coo(explicit))[
             dataframe["user_ids"].values, dataframe["item_ids"].values
         ]
         return dataframe, explicit_as_column
@@ -680,7 +816,10 @@ class CatboostAggregatorFromArtifacts(CatboostAggregatorRecommender):
     ):
         fit_recommenders = []
         for artifact_name, lit_name in (
-            tqdm_progress_bar := tqdm(zip(recommender_artifacts, lit_modules))
+            tqdm_progress_bar := tqdm(
+                iterable=zip(recommender_artifacts, lit_modules),
+                total=len(recommender_artifacts),
+            )
         ):
             tqdm_progress_bar.set_description(f"Fetching artifact {artifact_name}")
             artifact = wandb.use_artifact(artifact_name)

@@ -1,12 +1,16 @@
 project: Testing
-model:
-  class_name: SVDRecommender
-  n_components: 10
 datamodule:
-  directory: local/ml-100k
+  movielens:
+    class_name: MovieLens100k
+    directory: local/ml-100k
   train_explicit_file: u1.base
   val_explicit_file: u1.test
   test_explicit_file: u1.test
+model:
+  class_name: SVDRecommender
+  n_components: 10
+loss:
+  class_name: MSELoss
 lightning_module:
   class_name: MovieLensNonGradientRecommender
 optimizer:

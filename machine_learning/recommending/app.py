@@ -2,7 +2,7 @@ import asyncio
 import functools
 import os.path
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TextIO
 
 from aenum import Enum, MultiValue, Unique
 import gradio as gr
@@ -12,15 +12,12 @@ import scipy
 import torch
 import wandb
 
-from machine_learning.recommending.movielens.data import (
-    read_csv_imdb_ratings,
-    explicit_from_imdb_ratings,
-)
-from machine_learning.recommending.utils import wandb_timeit
-
+from machine_learning.recommending.movielens.data import csv_imdb_ratings_to_dataframe
+from machine_learning.recommending.utils import Timer
 
 if TYPE_CHECKING:
     from machine_learning.recommending.interface import RecommenderModuleBase
+    from machine_learning.recommending.movielens.data import MovieLensInterface
 
 
 class Feedback(Enum, settings=(MultiValue, Unique), init="str rating"):
@@ -49,7 +46,6 @@ class MovieMarkdownGenerator:
     def __init__(self, movielens, tmdb_api_token):
         self.movielens = movielens
         self.tmdb_api_token = tmdb_api_token
-        self.movies_dataframe = movielens["movies"].set_index("movieId")
 
     @staticmethod
     def imdb_url(imdb_id):
@@ -72,6 +68,7 @@ class MovieMarkdownGenerator:
         """Caching requests saves a lot of time."""
         return requests.get(url)
 
+    @Timer()
     def __call__(self, item_id):
         movielens_id = self.movielens.dense_to_dataset_item_ids([item_id])[0]
         imdb_id = self.movielens.dataset_to_imdb_movie_ids([movielens_id])[0]
@@ -89,7 +86,7 @@ class MovieMarkdownGenerator:
                     )
                 )
             )
-            markdown = self.movies_dataframe.loc[movielens_id]["movie title"]
+            markdown = self.movielens["movies"].loc[movielens_id]["movie title"]
             return markdown, ""
 
         movie_results = request.json()["movie_results"][0]
@@ -111,11 +108,11 @@ class Session:
     ):
         self.recommender = recommender
         self.movie_markdown_generator = movie_markdown_generator
-        self.movielens = self.movie_markdown_generator.movielens
-        self.user_activity = None
-        self.session_length = 0
+        self.movielens: "MovieLensInterface" = self.movie_markdown_generator.movielens
         self.n_recommendations = n_recommendations
+
         wandb.define_metric("session_length", summary="max")
+        self.session_length = 0
         self.session_id = time.time()
         self.explicit = np.full(self.recommender.n_items, fill_value=np.nan)
         self.movie_id, self.initial_markdown, self.initial_poster_url = self.content()
@@ -134,7 +131,7 @@ class Session:
 
     def content(self):
         explicit = scipy.sparse.coo_matrix(np.nan_to_num(self.explicit).reshape(1, -1))
-        with torch.no_grad(), wandb_timeit("online_recommend"):
+        with torch.no_grad():
             user_recommendations = self.recommender.online_recommend(
                 explicit, n_recommendations=self.recommender.n_items
             )[0].numpy()
@@ -146,8 +143,7 @@ class Session:
         # To not recommend same item twice before rating gets saved.
         self.explicit[movie_id] = 0
 
-        with wandb_timeit("tmdb"):
-            markdown, poster_url = self.movie_markdown_generator(item_id=movie_id)
+        markdown, poster_url = self.movie_markdown_generator(item_id=movie_id)
 
         return movie_id, markdown, poster_url
 
@@ -167,12 +163,11 @@ class Session:
                 movie_id=movie_id,
                 rating=rating,
                 session_length=self.session_length,
-                user_activity=self.user_activity,
             )
         )
 
     async def next_content(self, feedback: Feedback):
-        with wandb_timeit("await_content"):
+        with Timer(name="await_content"):
             next_movie_id, markdown, poster_url = await self.content_task
         self.save_rating(rating=feedback.rating, movie_id=self.movie_id)
         wandb.log(
@@ -185,20 +180,19 @@ class Session:
         self.content_task = asyncio.create_task(self.async_content())
         return markdown, poster_url
 
-    def upload(self, file_object) -> str:
+    def upload(self, file_object: TextIO) -> str:
+        """Function for file block upload method."""
         filename = file_object.name
+        imdb_ratings = csv_imdb_ratings_to_dataframe(path_to_imdb_ratings_csv=filename)
         try:
-            imdb_ratings = read_csv_imdb_ratings(filename)
+            explicit = self.movielens.imdb_ratings_dataframe_to_explicit(
+                imdb_ratings=imdb_ratings
+            )
         except Exception as e:
             wandb.log(dict(upload_error=str(e)))
             return f"Couldn't read imdb ratings file: \n{str(e)}"
 
-        explicit = explicit_from_imdb_ratings(
-            imdb_ratings=imdb_ratings,
-            movielens_25m=self.movielens,
-            movielens_the_model_trained_on=self.movielens,
-        )
-        with torch.no_grad(), wandb_timeit("online_recommend"):
+        with torch.no_grad():
             recommendations = self.recommender.online_recommend(
                 explicit, n_recommendations=self.n_recommendations
             )

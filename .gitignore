@@ -1,6 +1,7 @@
 **/data/
 **/local/
 
+**/artifacts/
 **/lightning_logs/
 **/wandb/
 **/.idea/
