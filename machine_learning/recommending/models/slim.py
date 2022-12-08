@@ -213,7 +213,7 @@ class SLIMDataset(SparseDataset):
     def __getitem__(self, indices):
         item = super().__getitem__(indices)
         explicit_val = torch_sparse_slice(
-            self.explicit_val, item["user_ids"], item["item_ids"]
+            self.explicit_val, item["user_id"], item["item_id"]
         )
         item.update(explicit_val=self.pack_sparse_tensor(explicit_val))
         return item
@@ -274,10 +274,10 @@ class SLIMRecommender(LitRecommenderBase):
             self.batch_is_fitted = False
             return -1
         if self.model.is_uninitialized():
-            self.model.init_dense_weight_slice(item_ids=batch["item_ids"])
+            self.model.init_dense_weight_slice(item_ids=batch["item_id"])
 
     def training_step(self, batch, batch_idx):
-        ratings = self.model.training_forward(item_ids=batch["item_ids"])
+        ratings = self.model.training_forward(item_ids=batch["item_id"])
         train_loss = self.loss(explicit=batch["explicit"], model_ratings=ratings)
         self.log("train_loss", train_loss)
 
@@ -288,7 +288,7 @@ class SLIMRecommender(LitRecommenderBase):
             if self.stopping_monitor.is_time_to_stop(val_loss):
                 self.batch_is_fitted = True
                 self.model.transform_dense_slice_to_sparse(
-                    item_ids=self.current_batch["item_ids"]
+                    item_ids=self.current_batch["item_id"]
                 )
 
         return train_loss

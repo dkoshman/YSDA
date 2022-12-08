@@ -7,7 +7,7 @@ from my_tools.utils import BuilderMixin
 
 from . import losses, models
 from .data import build_recommending_dataloader, SparseDataModuleBase
-from .utils import download_data_if_needed
+from .utils import prepare_artifacts_from_config
 
 if TYPE_CHECKING:
     from .interface import RecommenderModuleBase, RecommendingLossInterface
@@ -17,7 +17,7 @@ class LitRecommenderBase(SparseDataModuleBase, pl.LightningModule, BuilderMixin)
     def __init__(self, n_users=None, n_items=None, **config):
         super().__init__()
         self.save_hyperparameters()
-        download_data_if_needed(config=config)
+        prepare_artifacts_from_config(config=config)
         if n_users is None or n_items is None:
             n_users, n_items = self.train_explicit().shape
             self.save_hyperparameters()
@@ -69,7 +69,7 @@ class LitRecommenderBase(SparseDataModuleBase, pl.LightningModule, BuilderMixin)
         return dict(optimizer=optimizer, lr_scheduler=lr_scheduler)
 
     def forward(self, **batch):
-        return self.model(user_ids=batch["user_ids"], item_ids=batch["item_ids"])
+        return self.model(user_ids=batch["user_id"], item_ids=batch["item_id"])
 
     """Step placeholders to enable hooks without error."""
 

@@ -166,6 +166,11 @@ class RecommenderModuleBase(RecommenderModuleInterface, ABC):
         """
         return self.online_nn_ratings(users_explicit)
 
+    def forward(self, user_ids, item_ids):
+        users_explicit = torch_sparse_slice(self.explicit, row_ids=user_ids)
+        ratings = self.online_ratings(users_explicit=users_explicit)
+        return ratings[:, item_ids]
+
     def online_recommend(self, users_explicit, n_recommendations=None):
         users_explicit = self.to_torch_coo(users_explicit).to(self.device)
         ratings = self.online_ratings(users_explicit)

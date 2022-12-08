@@ -106,11 +106,6 @@ class MFSlimRecommender(RecommenderModuleBase):
         self.l2_regularization = l2_regularization
         self.l1_regularization = l1_regularization
 
-    def forward(self, user_ids, item_ids):
-        users_explicit = torch_sparse_slice(self.explicit, row_ids=user_ids)
-        ratings = self.online_ratings(users_explicit=users_explicit)
-        return ratings[:, item_ids]
-
     @Timer()
     def online_ratings(self, users_explicit):
         users_explicit = users_explicit.to(self.device, torch.float32)
@@ -193,8 +188,8 @@ class MFRecommender(LitRecommenderBase):
         self.log("train_batch_size_in_bytes", float(batch_size_in_bytes(batch)))
         explicit = torch_sparse_slice(
             sparse_matrix=self.model.explicit,
-            row_ids=batch["user_ids"],
-            col_ids=batch["item_ids"],
+            row_ids=batch["user_id"],
+            col_ids=batch["item_id"],
         ).to(self.device)
         loss = self.loss(model=self.model, explicit=explicit, **batch)
         self.log("train_loss", loss)

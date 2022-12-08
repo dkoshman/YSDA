@@ -5,11 +5,13 @@ import functools
 import inspect
 import io
 import os
+import re
 import sys
 import time
+import types
 import warnings
 from types import TracebackType, FunctionType
-from typing import TextIO, Callable, Type
+from typing import TextIO, Callable, Type, Dict, Generator
 
 import line_profiler
 import shap
@@ -380,68 +382,79 @@ class TimerClassDecorator(MethodsDecoratorClassDecorator):
         super().__init__(decorator=Timer())
 
 
-def download_data_if_needed(config: dict) -> None:
+def split_full_artifact_name(full_artifact_name: str) -> Dict[str, str]:
+    g = lambda name: f"(?P<{name}>.+)"
+    pattern = f"{g('entity')}/{g('project')}/{g('name')}:{g('alias')}"
+    match = re.fullmatch(pattern=pattern, string=full_artifact_name)
+    if match is None:
+        raise ValueError(
+            f"Full artifact name '{full_artifact_name}' did not match the expected pattern {pattern}."
+        )
+    return match.groupdict()
+
+
+def prepare_artifacts_from_config(config: dict) -> None:
+    for artifact_config in config.get("artifacts", []):
+        prepare_artifact(**artifact_config)
+
+
+def prepare_artifact(
+    full_artifact_name: str,
+    directory: str,
+    artifact_type: str = None,
+    update_with_local_directory: bool = False,
+    match_directory_exactly: bool = False,
+) -> wandb.Artifact:
     """
-    If config dict has a key "data", then its value be in the following format:
-    data:
-      - artifact: entity/project_A/dataset_A:latest
-        directory: local/data
-        match_directory_exactly: True
-      - artifact: entity/project_B/model_C:latest
-        directory: .
-        create_artifact_if_it_doesnt_exist: True
-      ...
-    Any missing files in directory that are part of the artifact will be downloaded.
-
-    If create_artifact_if_it_doesnt_exist is True and directory exists, then an artifact will be
-    created from the directory.
-
-    If match_directory_exactly is True, then content of directory will also be checksummed against the
-    artifact manifest and redownloaded if it doesn't exactly match the expected content.
-    WARNING: This will DELETE all files in directory that are not included in the artifact.
+    :param full_artifact_name: artifact name in format entity/project/artifact_name:alias
+    :param directory: directory to download to or update artifact from
+    :param artifact_type: type of artifact
+    :param update_with_local_directory: if true, then will create or update artifact using directory
+    :param match_directory_exactly: if true, then content of directory will be checksummed against the
+        artifact manifest and redownloaded if it doesn't exactly match the expected content.
+        WARNING: This will DELETE all files in directory that are not included in the artifact.
+    :return: prepared wandb artifact
     """
-    if (data_config := config.get("data")) is None:
-        return
-
-    for artifact_config in data_config:
-        full_artifact_name = artifact_config["artifact"]
-        directory = artifact_config["directory"]
-        match_directory_exactly = artifact_config.get("match_directory_exactly", False)
-        create_artifact_if_it_doesnt_exist = artifact_config.get(
-            "create_artifact_if_it_doesnt_exist", False
+    if directory == ".":
+        raise ValueError("Using cwd as artifact directory is bad practice.")
+    if update_with_local_directory and (
+        not os.path.exists(directory) or not os.listdir(directory)
+    ):
+        raise ValueError(
+            f"Passing update_with_local_directory=True requires that directory {directory} exists and is not empty."
+        )
+    artifact_dict = split_full_artifact_name(full_artifact_name)
+    if update_with_local_directory and (
+        wandb.run.entity != artifact_dict["entity"]
+        or wandb.run.project != artifact_dict["project"]
+    ):
+        raise ValueError(
+            "Cannot update artifact with entity or project different from current ones."
         )
 
-        if match_directory_exactly and directory == ".":
-            raise ValueError(
-                f"Passing match_directory_exactly=True and directory='.' will delete "
-                f"the files in working directory {os.getcwd()}"
-            )
-        if create_artifact_if_it_doesnt_exist and not os.path.exists(directory):
-            raise ValueError(
-                f"Passing create_artifact_if_it_doesnt_exist=True "
-                f"requires that directory {directory} exists."
-            )
+    if update_with_local_directory:
+        artifact = wandb.log_artifact(
+            artifact_or_path=directory,
+            name=artifact_dict["name"],
+            type=artifact_type,
+            aliases=[artifact_dict["alias"]],
+        )
+    else:
+        artifact = wandb.run.use_artifact(full_artifact_name)
+        artifact.download(root=directory)
 
-        is_newly_created_artifact = False
+    if not update_with_local_directory:
         try:
-            artifact: wandb.Artifact = wandb.run.use_artifact(full_artifact_name)
-        except wandb.errors.CommError as e:
-            if not create_artifact_if_it_doesnt_exist:
-                raise e
-            artifact_name = full_artifact_name.split("/")[-1].split(":")[0]
-            artifact = wandb.log_artifact(
-                artifact_or_path=directory, name=artifact_name, type="data"
-            )
-            is_newly_created_artifact = True
-        else:
-            artifact.download(root=directory)
-
-        if match_directory_exactly and not is_newly_created_artifact:
-            try:
-                artifact.verify(root=directory)
-            except ValueError:
+            artifact.verify(root=directory)
+        except ValueError:
+            if match_directory_exactly:
                 artifact.checkout(root=directory)
                 artifact.verify(root=directory)
+            else:
+                warnings.warn(
+                    f"Artifact {full_artifact_name} content doesn't match exactly the content in directory {directory}."
+                )
+    return artifact
 
 
 def construct_decorator(pass_function_args: bool = False):
@@ -521,3 +534,62 @@ def init_torch(debug: bool = True):
         torch.cuda.init()
         torch.backends.cudnn.benchmark = True
     torch.autograd.set_detect_anomaly(mode=debug)
+
+
+class CacheFlag(metaclass=Singleton):
+    _enabled = [False]
+
+    @property
+    def enabled(self):
+        return self._enabled[-1]
+
+    def enter(self, enable: bool):
+        assert isinstance(enable, bool), "Enable must be of bool type."
+        self._enabled.append(enable)
+
+    def exit(self):
+        self._enabled.pop()
+
+
+@contextlib.contextmanager
+def cache(enable=True):
+    """
+    A contextmanager that together with switchable_cache decorator
+    allows for more control over cache mechanics: functools.lru_cache
+    will only be used on decorated functions inside enabled cache contextmanager.
+    """
+    CacheFlag().enter(enable=enable)
+    yield
+    CacheFlag().exit()
+
+
+def switchable_cache(*args, **kwargs):
+    """Decorator to mark functions that later can be used in cache contextmanager."""
+
+    @functools.wraps(functools.lru_cache)
+    def decorator(function):
+        cached_function = functools.lru_cache(*args, **kwargs)(function)
+
+        @functools.wraps(function)
+        def wrapped_function(*function_args, **function_kwargs):
+            if CacheFlag().enabled:
+                return cached_function(*function_args, **function_kwargs)
+            else:
+                return function(*function_args, **function_kwargs)
+
+        return wrapped_function
+
+    return decorator
+
+
+def filter_mro_by_classes_which_defined_function(
+    cls: type, function_name: str
+) -> "Generator[type, None, None]":
+    for subclass in cls.mro():
+        if not hasattr(subclass, function_name):
+            break
+        function = getattr(subclass, function_name)
+        if type(function) is not types.FunctionType:
+            raise ValueError(f"Attribute {function_name} is not a function.")
+        if function.__qualname__.split(".")[0] == subclass.__name__:
+            yield subclass

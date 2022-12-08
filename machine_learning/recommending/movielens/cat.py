@@ -1,24 +1,7 @@
-import functools
-from typing import Literal
-
 import pandas as pd
 
 from ..models.cat import CatboostAggregatorFromArtifacts, CatboostRecommenderBase
 from .data import MovieLens100k, MovieLens25m
-
-
-def ratings_stats(
-    ratings: pd.DataFrame, kind: 'Literal["user", "item"]'
-) -> pd.DataFrame:
-    """
-    Calculate some statistics from ratings dataframe
-    with at least "user_ids", "item_ids" and "rating" in columns
-    """
-    mean_ratings = (
-        ratings.groupby(f"{kind}_ids")["rating"].mean().rename(f"mean_{kind}_ratings")
-    )
-    n_ratings = ratings.groupby(f"{kind}_ids").size().rename(f"{kind}_n_ratings")
-    return pd.concat([mean_ratings, n_ratings], axis="columns")
 
 
 class CatboostMovieLens100kFeatureRecommender(CatboostRecommenderBase):
@@ -26,134 +9,84 @@ class CatboostMovieLens100kFeatureRecommender(CatboostRecommenderBase):
         super().__init__(**kwargs)
         self.movielens = MovieLens100k(movielens_directory)
 
-    @functools.lru_cache()
     def user_features(self):
-        user_features = self.movielens["u.user"].reset_index(names="user_ids")
-        user_ratings_stats = ratings_stats(self.movielens["u.data"], kind="user")
-        user_features = pd.merge(user_features, user_ratings_stats, on="user_ids")
-        user_features["user_ids"] = self.movielens.dataset_to_dense_user_ids(
-            dataset_user_ids=user_features["user_ids"].values
+        user_features = self.movielens["u.user"].reset_index(names="user_id")
+        user_features["user_id"] = self.movielens.dataset_to_dense_user_ids(
+            dataset_user_ids=user_features["user_id"].values
+        )
+        return dict(
+            dataframe=user_features,
+            cat_features={"user_id", "gender", "occupation", "zip code"},
         )
 
-        kind = self.FeatureKind.user
-        self.update_features(
-            kind=kind, cat_features={"user_ids", "gender", "occupation", "zip code"}
-        )
-        return self.maybe_none_left_merge(
-            user_features, super().user_features(), on=kind.merge_on
-        )
-
-    @functools.lru_cache()
     def item_features(self):
         item_features = (
             self.movielens["u.item"]
-            .reset_index(names="item_ids")
+            .reset_index(names="item_id")
             .drop(["movie title", "video release date", "IMDb URL"], axis="columns")
         )
         item_features["release date"] = pd.to_datetime(
             item_features["release date"]
         ).astype(int)
-        item_ratings_stats = ratings_stats(self.movielens["u.data"], kind="item")
-        kind = self.FeatureKind.item
-        self.update_features(
-            kind=kind, cat_features=set(item_features.columns.drop(["release date"]))
-        )
-        item_features = pd.merge(item_features, item_ratings_stats, on="item_ids")
-        item_features["item_ids"] = self.movielens.dataset_to_dense_item_ids(
-            dataset_item_ids=item_features["item_ids"].values
-        )
-        return self.maybe_none_left_merge(
-            item_features, super().item_features(), on=kind.merge_on
+        return dict(
+            dataframe=item_features,
+            cat_features=set(item_features.columns.drop(["release date"])),
         )
 
-    @functools.lru_cache()
     def user_item_features(self):
         user_item_features = self.movielens["u.data"][
-            ["user_ids", "item_ids", "timestamp"]
+            ["user_id", "item_id", "timestamp"]
         ]
-        kind = self.FeatureKind.user_item
-        return self.maybe_none_left_merge(
-            user_item_features, super().user_item_features(), on=kind.merge_on
-        )
+        return dict(dataframe=user_item_features)
 
 
 class CatboostMovieLens100kFeatureAggregatorFromArtifacts(
     CatboostAggregatorFromArtifacts, CatboostMovieLens100kFeatureRecommender
 ):
-    @property
-    def use_user_ids_as_features(self):
-        return True
-
-    @property
-    def use_item_ids_as_features(self):
-        return True
+    pass
 
 
 class CatboostMovieLens25mFeatureRecommender(CatboostRecommenderBase):
-    def __init__(self, *, movielens_directory, use_text_features=False, **kwargs):
+    def __init__(self, *, movielens_directory, **kwargs):
         super().__init__(**kwargs)
         self.movielens = MovieLens25m(movielens_directory)
-        self.use_text_features = use_text_features
 
-    @functools.lru_cache()
-    def user_features(self):
-        kind = self.FeatureKind.user
-        user_features = ratings_stats(self.movielens["ratings"], kind=kind.value)
-        return self.maybe_none_left_merge(
-            user_features, super().user_features(), on=kind.merge_on
-        )
-
-    @functools.lru_cache()
     def item_features(self):
-        item_features = self.movielens["movies"].reset_index()
-
-        item_ratings_stats = ratings_stats(self.movielens["ratings"], kind="item")
-        item_features = pd.merge(item_features, item_ratings_stats, on="item_ids")
-
+        item_features = self.movielens["movies"].reset_index(names="item_id")
+        item_features = item_features.query(
+            "item_id in @self.movielens.unique_dataset_item_ids"
+        )
         genres = item_features["genres"].str.get_dummies()
-        item_features = pd.concat(
-            [item_features.drop(["title", "genres"], axis="columns"), genres],
-            axis="columns",
+        item_features = item_features.drop(["title", "genres"], axis="columns")
+        item_features = item_features.join(genres)
+        item_features["item_id"] = self.movielens.dataset_to_dense_item_ids(
+            dataset_item_ids=item_features["item_id"].values
         )
-        item_features["item_ids"] = self.movielens.dataset_to_dense_item_ids(
-            dataset_item_ids=item_features["item_ids"].values
-        )
-
-        kind = self.FeatureKind.item
-        self.update_features(kind=kind, cat_features=set(item_features.columns))
-        return self.maybe_none_left_merge(
-            item_features, super().item_features(), on=kind.merge_on
+        return dict(
+            dataframe=item_features,
+            cat_features=set(item_features.columns),
         )
 
-    @functools.lru_cache()
     def user_item_features(self):
         user_item_features = self.movielens["ratings"][
-            ["user_ids", "item_ids", "timestamp"]
+            ["user_id", "item_id", "timestamp"]
         ]
-        kind = self.FeatureKind.user_item
-        if self.use_text_features:
-            user_item_tags = (
-                self.movielens["tags"]
-                .groupby(["user_ids", "item_ids"])["tag"]
-                .apply(", ".join)
-                .reset_index()
-            )
-            user_item_features = pd.merge(
-                left=user_item_features, right=user_item_tags, on=kind.merge_on
-            )
-            self.update_features(kind=kind, text_features={"tag"})
-        return self.maybe_none_left_merge(
-            user_item_features, super().user_item_features(), on=kind.merge_on
+        user_item_features = self.set_index(
+            user_item_features, kind=self.FeatureKind.user_item
+        )
+        user_item_tags = (
+            self.movielens["tags"]
+            .groupby(["user_id", "item_id"])["tag"]
+            .apply(", ".join)
+        )
+        user_item_features = user_item_features.join(user_item_tags)
+        return dict(
+            dataframe=user_item_features,
+            text_features={"tag"},
         )
 
 
 class CatboostMovieLens25mFeatureAggregatorFromArtifacts(
     CatboostAggregatorFromArtifacts, CatboostMovieLens25mFeatureRecommender
 ):
-    @property
-    def use_user_ids_as_features(self):
-        return True
-
-    @property
-    def use_item_ids_as_features(self):
-        return True
+    pass

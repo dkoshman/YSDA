@@ -1,9 +1,9 @@
 entity: dkoshman
 project: Recommending
-data:
-  - artifact: dkoshman/Recommending/imdb_ratings:latest
+artifacts:
+  - full_artifact_name: dkoshman/Recommending/imdb_ratings:latest
     directory: data/imdb_ratings
-    create_artifact_if_doesnt_exist: True
+    match_directory_exactly: True
 datamodule:
   movielens:
     class_name: MovieLens100k

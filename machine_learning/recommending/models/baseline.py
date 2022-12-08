@@ -9,7 +9,7 @@ import wandb
 from matplotlib import pyplot as plt
 from sklearn.decomposition import TruncatedSVD
 
-from my_tools.utils import build_class, torch_sparse_slice
+from my_tools.utils import build_class
 
 from ..interface import (
     RecommenderModuleBase,
@@ -65,11 +65,6 @@ class SVDRecommender(RecommenderModuleBase, FitExplicitInterfaceMixin):
             plt.xlabel("Number of components")
             plt.ylabel("Explained cumulative variance ratio")
             plt.plot(np.cumsum(self.model.explained_variance_ratio_))
-
-    def forward(self, user_ids, item_ids):
-        users_explicit = torch_sparse_slice(self.explicit, row_ids=user_ids)
-        ratings = self.online_ratings(users_explicit=users_explicit)
-        return ratings[:, item_ids]
 
     @Timer()
     def online_ratings(self, users_explicit):

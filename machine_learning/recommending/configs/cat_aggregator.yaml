@@ -1,9 +1,4 @@
 name: "Catboost aggregator"
-data:
-  - artifact: dkoshman/Recommending/imdb_ratings:latest
-    directory: data/imdb_ratings
-    create_artifact_if_it_doesnt_exist: True
-    match_directory_exactly: True
 model:
   class_name: CatboostMovieLens100kFeatureAggregatorFromArtifacts
   recommender_artifacts: [svd:latest, my_mf_slim:latest]
@@ -11,7 +6,7 @@ model:
   movielens_directory: local/ml-100k
   cb_gpu_fit_n_users_per_batch: 1000
   cb_params:
-    task_type: GPU
+    task_type: GPU # Catboost GPU training is slightly inferior quality to CPU training.
 # CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=4
 #    gpu_ram_part: 0.2
 #    loss_function: QueryCrossEntropy
@@ -24,7 +19,6 @@ trainer:
   num_sanity_val_steps: 0
   max_epochs: -1
 callbacks:
-#  CatBoostMetrics:
-#    plot_dependence: true
+  CatBoostMetrics: {}
   WandbCheckpointCallback:
     artifact_name: catboost_aggregator

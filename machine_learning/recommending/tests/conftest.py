@@ -228,7 +228,7 @@ class MockLitRecommender(SparseTensorUnpacker, MockLightningModuleInterface):
         )
 
     def forward(self, **batch):
-        return self.model(user_ids=batch["user_ids"], item_ids=batch["item_ids"])
+        return self.model(user_ids=batch["user_id"], item_ids=batch["item_id"])
 
     def step(self, batch, stage):
         relevance = self(**batch)

@@ -17,6 +17,7 @@ import matplotlib.patheffects as pe
 from .data import SparseDataModuleInterface
 from .interface import ExplanationMixin
 from .metrics import RecommendingMetrics
+from scipy.sparse import coo_array
 from .utils import wandb_plt_figure, filter_warnings, save_shap_force_plot, Timer
 
 if TYPE_CHECKING:
@@ -145,7 +146,7 @@ class CatBoostMetrics(pl.callbacks.Callback):
     def __init__(
         self,
         *args,
-        plot_dependence=True,
+        plot_dependence=False,
         max_dataset_size_for_complex_shap=1000,
         **kwargs,
     ):
@@ -167,13 +168,13 @@ class CatBoostMetrics(pl.callbacks.Callback):
     def common_on_end(self, pl_module, stage: 'Literal["train", "val", "test"]'):
         model: "CatboostInterface" = pl_module.model
         if stage == "train":
-            user_item_dataframe, label = model.full_train_dataframe_label()
+            user_item_dataframe = model.train_dataframe
         elif stage == "val":
-            user_item_dataframe, label = model.train_user_item_dataframe_label(
+            user_item_dataframe = model.build_labeled_dataframe(
                 explicit=pl_module.val_explicit()
             )
         elif stage == "test":
-            user_item_dataframe, label = model.train_user_item_dataframe_label(
+            user_item_dataframe = model.build_labeled_dataframe(
                 explicit=pl_module.test_explicit()
             )
         else:
@@ -187,18 +188,13 @@ class CatBoostMetrics(pl.callbacks.Callback):
         )
 
         self.log_single_user_features_dataframe_with_ratings_and_explicit(
-            model=model, dataframe=user_item_dataframe, stage=stage, label=label
+            model=model, dataframe=user_item_dataframe, stage=stage
         )
 
-        pool_kwargs = model.build_pool_kwargs(
-            user_item_dataframe=user_item_dataframe, label=label
-        )
-        pool = catboost.Pool(**model.postprocess_pool_kwargs(**pool_kwargs))
+        pool = model.pool(dataframe=user_item_dataframe)
         self.log_feature_importance(catboost_model=model.model, pool=pool, stage=stage)
 
-        shap_kwargs = model.shap_kwargs(
-            user_item_dataframe=user_item_dataframe, label=label
-        )
+        shap_kwargs = model.shap_kwargs(dataframe=user_item_dataframe)
 
         self.log_shap_summary_plot(**shap_kwargs, stage=stage)
 
@@ -206,20 +202,15 @@ class CatBoostMetrics(pl.callbacks.Callback):
             self.log_shap_dependence_plots(**shap_kwargs, stage=stage)
 
         if len(user_item_dataframe) > self.max_dataset_size_for_complex_shap:
-            user_item_dataframe = model.user_item_dataframe_clip_to_size(
-                dataframe=user_item_dataframe,
-                size=self.max_dataset_size_for_complex_shap,
-            )
-            label = label[user_item_dataframe.index.values]
-            pool_kwargs = model.build_pool_kwargs(
-                user_item_dataframe=user_item_dataframe, label=label
-            )
-            shap_kwargs = model.shap_kwargs(
-                user_item_dataframe=user_item_dataframe, label=label
-            )
+            user_item_dataframe = user_item_dataframe.sample(
+                self.max_dataset_size_for_complex_shap
+            ).sort_index()
+            shap_kwargs = model.shap_kwargs(dataframe=user_item_dataframe)
 
         self.log_shap_force_plot(**shap_kwargs, stage=stage)
 
+        dataframe = model.merge_features(user_item_dataframe)
+        pool_kwargs = model.extract_pool_kwargs(dataframe=dataframe)
         postprocessed_pool_kwargs = model.postprocess_pool_kwargs(**pool_kwargs)
         shap_explanation = model.shap_explainer(X=postprocessed_pool_kwargs["data"])
         self.log_shap_heatmap_plot(shap_explanation=shap_explanation, stage=stage)
@@ -233,7 +224,7 @@ class CatBoostMetrics(pl.callbacks.Callback):
         )
         numeric_features = {}
         for kind in model.FeatureKind:
-            if (features := model.features(kind)) is not None:
+            if (features := model.cached_indexed_features(kind)) is not None:
                 numeric_features[kind.value] = list(
                     features.columns.difference(non_numeric_features)
                 )
@@ -248,22 +239,44 @@ class CatBoostMetrics(pl.callbacks.Callback):
 
     @staticmethod
     def log_single_user_features_dataframe_with_ratings_and_explicit(
-        model: "CatboostInterface", dataframe: pd.DataFrame, label: np.array, stage: str
+        model: "CatboostInterface", dataframe: pd.DataFrame, stage: str
     ):
-        dataframe = dataframe.reset_index(drop=True)
-        user_id = dataframe["user_ids"].sample(1).values[0]
-        user_dataframe = dataframe.query(f"user_ids == @user_id")
-        user_label = label[user_dataframe.index.values]
-        user_pool_kwargs = model.build_pool_kwargs(
-            user_item_dataframe=user_dataframe, label=user_label
+        user_id = dataframe.reset_index()["user_id"].sample(1).values[0]
+        offline_dataframe = dataframe.query(f"user_id == @user_id")
+        user_explicit = coo_array(
+            (
+                offline_dataframe["rating"].values,
+                (
+                    np.zeros(len(offline_dataframe)),
+                    offline_dataframe.reset_index()["item_id"].values,
+                ),
+            ),
+            shape=[1, model.n_items],
         )
-        user_pool = catboost.Pool(**model.postprocess_pool_kwargs(**user_pool_kwargs))
-        with filter_warnings(
-            action="ignore", category=pd.errors.SettingWithCopyWarning
+        online_dataframe = model.build_recommend_dataframe(
+            users_explicit=model.to_torch_coo(user_explicit),
+            user_ids=model.fictive_user_ids(1),
+            n_recommendations=len(offline_dataframe),
+        )
+        for kind, dataframe in zip(
+            ["offline", "online"], [offline_dataframe, online_dataframe]
         ):
-            user_dataframe["ratings"] = model.model.predict(user_pool)
-            user_dataframe["explicit"] = user_label
-        wandb.log({f"{stage} user dataframe": wandb.Table(dataframe=user_dataframe)})
+            pool = model.pool(dataframe=dataframe)
+            features_dataframe = model.merge_features(dataframe)
+            with filter_warnings(
+                action="ignore", category=pd.errors.SettingWithCopyWarning
+            ):
+                features_dataframe["ratings"] = model.model.predict(pool)
+            features_dataframe = features_dataframe.sort_values(
+                "ratings", ascending=False
+            ).reset_index()
+            wandb.log(
+                {
+                    f"{stage} {kind} user dataframe": wandb.Table(
+                        dataframe=features_dataframe
+                    )
+                }
+            )
 
     @staticmethod
     def log_feature_importance(

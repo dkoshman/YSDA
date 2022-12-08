@@ -10,7 +10,6 @@ import pandas as pd
 import torch
 
 from scipy.sparse import coo_matrix
-from tqdm.auto import tqdm
 
 if TYPE_CHECKING:
     from my_tools.utils import SparseTensor
@@ -95,8 +94,8 @@ class MovieLensInterface(RecommendingDatasetInterface, abc.ABC):
     def ratings_columns_to_dtypes(self) -> OrderedDict:
         return OrderedDict(
             {
-                "user_ids": np.int32,
-                "item_ids": np.int32,
+                "user_id": np.int32,
+                "item_id": np.int32,
                 "rating": np.float32,
                 "timestamp": np.int32,
             }
@@ -110,9 +109,6 @@ class MovieLensInterface(RecommendingDatasetInterface, abc.ABC):
     def read(self, filename, **kwargs):
         path = os.path.join(self.directory, filename)
         dataframe = pd.read_csv(path, **kwargs)
-        dataframe = dataframe.rename(
-            {"user_id": "user_ids", "item_id": "item_ids"}, axis="columns"
-        )
         return dataframe.squeeze()
 
     def explicit_feedback_scipy_csr(self, name):
@@ -121,10 +117,10 @@ class MovieLensInterface(RecommendingDatasetInterface, abc.ABC):
     def ratings_dataframe_to_scipy_csr(self, ratings_dataframe):
         movielens_ratings = ratings_dataframe["rating"].to_numpy()
 
-        dataset_user_ids = ratings_dataframe["user_ids"].to_numpy()
+        dataset_user_ids = ratings_dataframe["user_id"].to_numpy()
         user_ids = self.dataset_to_dense_user_ids(dataset_user_ids)
 
-        dataset_item_ids = ratings_dataframe["item_ids"].to_numpy()
+        dataset_item_ids = ratings_dataframe["item_id"].to_numpy()
         item_ids = self.dataset_to_dense_item_ids(dataset_item_ids)
 
         data = movielens_ratings
@@ -173,8 +169,8 @@ class MovieLens100k(MovieLensInterface):
         elif filename == "u.user":
             return self.read(
                 filename=filename,
-                names=["user id", "age", "gender", "occupation", "zip code"],
-                index_col="user id",
+                names=["user_id", "age", "gender", "occupation", "zip code"],
+                index_col="user_id",
             )
         elif filename == "u.item":
             return self.read(
@@ -288,44 +284,41 @@ class MovieLens100k(MovieLensInterface):
 
 
 class MovieLens25m(MovieLensInterface):
-    def __init__(self, directory, time_quantiles: "list[float]" = None):
+    def __init__(
+        self,
+        directory,
+        train_time_quantile: float or None = None,
+        test_user_fraction: float or None = None,
+    ):
         super().__init__(directory=directory)
-        if time_quantiles is not None:
-            splits = self.time_quantiles_deterministic_split(
-                time_quantiles=time_quantiles, dataframe_with_timestamps=self["ratings"]
-            )
-            for i, (quantile, split) in enumerate(zip(time_quantiles, splits)):
-                self.save_dataframe(
-                    dataframe=split,
-                    filename=f"ratings_split{i}_q{quantile}.csv",
-                    index=False,
+        if train_time_quantile is not None:
+            if test_user_fraction is None:
+                raise ValueError(
+                    "train_time_quantile and test_user_fraction should be passed together."
                 )
-
-    @staticmethod
-    def time_quantiles_deterministic_split(
-        time_quantiles: "list[float]", dataframe_with_timestamps: pd.DataFrame
-    ) -> "list[pd.DataFrame]":
-        if sum(time_quantiles) != 1:
-            raise ValueError(
-                f"Quantiles must sum up to one, received {time_quantiles}."
+            self.prepare_splits(
+                train_time_quantile=train_time_quantile,
+                test_user_fraction=test_user_fraction,
             )
-        dataframe = dataframe_with_timestamps
-        quantile_thresholds = np.cumsum(time_quantiles)
-        thresholds = dataframe["timestamp"].quantile(quantile_thresholds)
-        thresholds = [dataframe["timestamp"].min() - 1] + list(thresholds)
-        splits = []
-        for begin, end in tqdm(
-            iterable=zip(thresholds, thresholds[1:]),
-            desc="Splitting by timestamps",
-            total=len(splits),
-        ):
-            splits.append(dataframe.query(f"{begin} < timestamp <= {end}"))
-        return splits
 
-    def save_dataframe(self, dataframe: pd.DataFrame, filename, **to_csv_kwargs) -> str:
-        path = self.abs_path(filename=filename)
-        dataframe.to_csv(path, **to_csv_kwargs)
-        return path
+    def prepare_splits(self, train_time_quantile: float, test_user_fraction: float):
+        time_split_ante, time_split_post = dataframe_quantiles_deterministic_split(
+            quantiles=[train_time_quantile, 1 - train_time_quantile],
+            dataframe=self["ratings"],
+            column_to_split_by="timestamp",
+        )
+        unique_user_ids = time_split_post["user_id"].unique()
+        test_user_ids = np.random.choice(
+            unique_user_ids,
+            size=int(unique_user_ids * test_user_fraction),
+            replace=False,
+        )
+        val_split = time_split_post.query("user_id not in @test_user_ids")
+        test_split = time_split_post.query("user_id in @test_user_ids")
+        splits = dict(train=time_split_ante, val=val_split, test=test_split)
+        for kind, split in splits.items():
+            filename = f"ratings_{kind}.csv"
+            split.to_csv(path_or_buf=self.abs_path(filename=filename), index=False)
 
     @functools.lru_cache(maxsize=20)
     def __getitem__(self, filename):
@@ -354,13 +347,13 @@ class MovieLens25m(MovieLensInterface):
                 filename=filename,
                 index_col="movieId",
                 dtype={"movieId": np.int32, "title": str, "genres": str},
-            ).rename_axis("item_ids")
+            ).rename_axis("item_id")
         elif filename == "tags.csv":
             dtypes = self.ratings_columns_to_dtypes
             dtypes.pop("rating")
             return (
                 self.read(filename=filename, dtype={"tag": str})
-                .rename({"userId": "user_ids", "movieId": "item_ids"}, axis="columns")
+                .rename({"userId": "user_id", "movieId": "item_id"}, axis="columns")
                 .astype(dtypes)
                 .dropna()
             )
@@ -370,12 +363,12 @@ class MovieLens25m(MovieLensInterface):
     @property
     @functools.lru_cache
     def unique_dataset_user_ids(self) -> np.array:
-        return np.unique(self["ratings"]["user_ids"])
+        return np.unique(self["ratings"]["user_id"])
 
     @property
     @functools.lru_cache
     def unique_dataset_item_ids(self):
-        return np.unique(self["ratings"]["item_ids"])
+        return np.unique(self["ratings"]["item_id"])
 
     @property
     @functools.lru_cache()
@@ -444,3 +437,29 @@ class MovieLensMixin:
 
     def test_explicit(self):
         return self.common_explicit(filename="test_explicit_file")
+
+
+def dataframe_quantiles_deterministic_split(
+    dataframe: pd.DataFrame, quantiles: "list[float]", column_to_split_by: str
+) -> "list[pd.DataFrame]":
+    if sum(quantiles) != 1:
+        raise ValueError(f"Quantiles must sum up to one, received {quantiles}.")
+    if not pd.api.types.is_numeric_dtype(dataframe[column_to_split_by].dtype):
+        raise ValueError(
+            f"Splitting column's dtype isn't numeric: "
+            f"{column_to_split_by} -> {dataframe[column_to_split_by].dtype} "
+        )
+    if any(dataframe[column_to_split_by].isna()):
+        raise ValueError(f"Splitting column {column_to_split_by} contains nans.")
+
+    quantile_thresholds = np.cumsum(quantiles)
+    thresholds = dataframe[column_to_split_by].quantile(
+        quantile_thresholds, interpolation="lower"
+    )
+    thresholds = [-np.inf] + list(thresholds)
+    splits = []
+    for begin, end in zip(thresholds, thresholds[1:]):
+        splits.append(dataframe.query(f"{begin} < {column_to_split_by} <= {end}"))
+
+    assert sum(map(len, splits)) == len(dataframe), "Split lengths don't sum up."
+    return splits
