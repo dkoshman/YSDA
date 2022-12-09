@@ -188,8 +188,8 @@ class MFRecommender(LitRecommenderBase):
         self.log("train_batch_size_in_bytes", float(batch_size_in_bytes(batch)))
         explicit = torch_sparse_slice(
             sparse_matrix=self.model.explicit,
-            row_ids=batch["user_id"],
-            col_ids=batch["item_id"],
+            row_ids=batch["user_ids"],
+            col_ids=batch["item_ids"],
         ).to(self.device)
         loss = self.loss(model=self.model, explicit=explicit, **batch)
         self.log("train_loss", loss)

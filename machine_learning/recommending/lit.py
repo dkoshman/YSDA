@@ -20,7 +20,7 @@ class LitRecommenderBase(SparseDataModuleBase, pl.LightningModule, BuilderMixin)
         prepare_artifacts_from_config(config=config)
         if n_users is None or n_items is None:
             n_users, n_items = self.train_explicit().shape
-            self.save_hyperparameters()
+            self.save_hyperparameters()  # This will update n_users, n_items.
         self.model: "RecommenderModuleBase" = self.build_model()
         self.loss: "RecommendingLossInterface" or None = None
         if "loss" in config:

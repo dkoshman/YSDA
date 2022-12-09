@@ -1,4 +1,5 @@
 import abc
+import argparse
 import functools
 import os
 import string
@@ -8,8 +9,11 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 import torch
+import wandb
 
 from scipy.sparse import coo_matrix
+
+from machine_learning.recommending.utils import profile, prepare_artifact
 
 if TYPE_CHECKING:
     from my_tools.utils import SparseTensor
@@ -284,23 +288,7 @@ class MovieLens100k(MovieLensInterface):
 
 
 class MovieLens25m(MovieLensInterface):
-    def __init__(
-        self,
-        directory,
-        train_time_quantile: float or None = None,
-        test_user_fraction: float or None = None,
-    ):
-        super().__init__(directory=directory)
-        if train_time_quantile is not None:
-            if test_user_fraction is None:
-                raise ValueError(
-                    "train_time_quantile and test_user_fraction should be passed together."
-                )
-            self.prepare_splits(
-                train_time_quantile=train_time_quantile,
-                test_user_fraction=test_user_fraction,
-            )
-
+    @profile()
     def prepare_splits(self, train_time_quantile: float, test_user_fraction: float):
         time_split_ante, time_split_post = dataframe_quantiles_deterministic_split(
             quantiles=[train_time_quantile, 1 - train_time_quantile],
@@ -310,7 +298,7 @@ class MovieLens25m(MovieLensInterface):
         unique_user_ids = time_split_post["user_id"].unique()
         test_user_ids = np.random.choice(
             unique_user_ids,
-            size=int(unique_user_ids * test_user_fraction),
+            size=int(len(unique_user_ids) * test_user_fraction),
             replace=False,
         )
         val_split = time_split_post.query("user_id not in @test_user_ids")
@@ -463,3 +451,37 @@ def dataframe_quantiles_deterministic_split(
 
     assert sum(map(len, splits)) == len(dataframe), "Split lengths don't sum up."
     return splits
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Prepare movielens25m artifact and splits."
+    )
+    parser.add_argument("directory", type=str, help="movielens25m directory")
+    parser.add_argument("train_time_quantile", type=float)
+    parser.add_argument("test_user_fraction", type=float)
+    parser.add_argument(
+        "update_with_local_directory", type=bool, nargs="?", default=False
+    )
+    args = parser.parse_args()
+
+    movielens25m = MovieLens25m(directory=args.directory)
+    wandb.init(project="Recommending", job_type="data")
+    artifact = prepare_artifact(
+        full_artifact_name="dkoshman/Recommending/movielens25m:latest",
+        directory=args.directory,
+        artifact_type="data",
+        update_with_local_directory=args.update_with_local_directory,
+    )
+    artifact.wait()
+    movielens25m.prepare_splits(
+        train_time_quantile=args.train_time_quantile,
+        test_user_fraction=args.test_user_fraction,
+    )
+    artifact.metadata["train_time_quantile"] = args.train_time_quantile
+    artifact.metadata["test_user_fraction"] = args.test_user_fraction
+    artifact.save()
+
+
+if __name__ == "__main__":
+    main()

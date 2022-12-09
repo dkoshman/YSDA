@@ -1,19 +1,19 @@
 import os.path
 import re
-from typing import Literal, TYPE_CHECKING
+from typing import Literal, TYPE_CHECKING, Dict
 
 import catboost
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
 import shap
-import torch
 import wandb
 
 from matplotlib import pyplot as plt
 from pytorch_lightning import loggers, profiler
 import matplotlib.patheffects as pe
 
+from my_tools.utils import torch_sparse_slice
 from .data import SparseDataModuleInterface
 from .interface import ExplanationMixin
 from .metrics import RecommendingMetrics
@@ -168,13 +168,13 @@ class CatBoostMetrics(pl.callbacks.Callback):
     def common_on_end(self, pl_module, stage: 'Literal["train", "val", "test"]'):
         model: "CatboostInterface" = pl_module.model
         if stage == "train":
-            user_item_dataframe = model.train_dataframe
+            user_item_dataframe = model.train_user_item_dataframe
         elif stage == "val":
-            user_item_dataframe = model.build_labeled_dataframe(
+            user_item_dataframe = model.build_labeled_user_item_dataframe(
                 explicit=pl_module.val_explicit()
             )
         elif stage == "test":
-            user_item_dataframe = model.build_labeled_dataframe(
+            user_item_dataframe = model.build_labeled_user_item_dataframe(
                 explicit=pl_module.test_explicit()
             )
         else:
@@ -191,10 +191,10 @@ class CatBoostMetrics(pl.callbacks.Callback):
             model=model, dataframe=user_item_dataframe, stage=stage
         )
 
-        pool = model.pool(dataframe=user_item_dataframe)
+        pool = model.pool(user_item_dataframe=user_item_dataframe)
         self.log_feature_importance(catboost_model=model.model, pool=pool, stage=stage)
 
-        shap_kwargs = model.shap_kwargs(dataframe=user_item_dataframe)
+        shap_kwargs = model.shap_kwargs(user_item_dataframe=user_item_dataframe)
 
         self.log_shap_summary_plot(**shap_kwargs, stage=stage)
 
@@ -205,7 +205,7 @@ class CatBoostMetrics(pl.callbacks.Callback):
             user_item_dataframe = user_item_dataframe.sample(
                 self.max_dataset_size_for_complex_shap
             ).sort_index()
-            shap_kwargs = model.shap_kwargs(dataframe=user_item_dataframe)
+            shap_kwargs = model.shap_kwargs(user_item_dataframe=user_item_dataframe)
 
         self.log_shap_force_plot(**shap_kwargs, stage=stage)
 
@@ -253,7 +253,7 @@ class CatBoostMetrics(pl.callbacks.Callback):
             ),
             shape=[1, model.n_items],
         )
-        online_dataframe = model.build_recommend_dataframe(
+        online_dataframe = model.build_recommend_user_item_dataframe(
             users_explicit=model.to_torch_coo(user_explicit),
             user_ids=model.fictive_user_ids(1),
             n_recommendations=len(offline_dataframe),
@@ -261,7 +261,7 @@ class CatBoostMetrics(pl.callbacks.Callback):
         for kind, dataframe in zip(
             ["offline", "online"], [offline_dataframe, online_dataframe]
         ):
-            pool = model.pool(dataframe=dataframe)
+            pool = model.pool(user_item_dataframe=dataframe)
             features_dataframe = model.merge_features(dataframe)
             with filter_warnings(
                 action="ignore", category=pd.errors.SettingWithCopyWarning
@@ -334,12 +334,12 @@ class RecommendingMetricsCallback(pl.callbacks.Callback):
         k: int = 10,
         every_val_epoch=1,
         every_test_epoch=1,
+        assess_online_recommendations=False,
     ):
         self.k = k
         self.every_epoch = dict(val=every_val_epoch, test=every_test_epoch)
-        self.metrics: "Dict[str, RecommendingMetrics] or None" = dict(
-            val=None, test=None
-        )
+        self.assess_online_recommendations = assess_online_recommendations
+        self.metrics: "Dict[str, RecommendingMetrics]" = dict()
         self.log_dict = wandb.log
 
     def skip_epoch(self, current_epoch, stage) -> bool:
@@ -359,9 +359,19 @@ class RecommendingMetricsCallback(pl.callbacks.Callback):
         self.log_dict = pl_module.log_dict
         for stage in ["val", "test"]:
             explicit = getattr(module, f"{stage}_explicit")()
-            if explicit is not None:
-                self.metrics[stage] = RecommendingMetrics(explicit)
+            for is_online in [True, False]:
+                if explicit is not None and (
+                    not is_online or self.assess_online_recommendations
+                ):
+                    kind = self.kind(stage=stage, is_online=is_online)
+                    self.metrics[kind] = RecommendingMetrics(explicit)
 
+    @staticmethod
+    def kind(stage: str, is_online: bool) -> str:
+        assert stage in ["val", "test"], f"Unknown stage {stage}."
+        return stage + "_" + ("online" if is_online else "offline")
+
+    @Timer()
     def on_validation_batch_end(
         self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx
     ):
@@ -372,36 +382,50 @@ class RecommendingMetricsCallback(pl.callbacks.Callback):
     ):
         self.common_on_batch_end(pl_module=pl_module, batch=batch, stage="test")
 
-    def common_on_batch_end(self, pl_module, batch, stage):
-        if self.skip_epoch(current_epoch=pl_module.current_epoch, stage=stage):
-            return
-        user_ids = batch["user_ids"]
-        model = pl_module.model
-        if user_ids is None:
-            user_ids = torch.arange(model.n_users)
-        recommendations = model.recommend(user_ids=user_ids, n_recommendations=self.k)
-        metrics_dict = self.metrics[stage].batch_metrics(
-            user_ids=user_ids, recommendations=recommendations
-        )
-        self.log_metrics(metrics_dict=metrics_dict, stage=stage)
-
-    def log_metrics(self, metrics_dict: dict, stage: Literal["val", "test"]):
-        metrics_dict = {stage + "_" + k: v for k, v in metrics_dict.items()}
-        for metric_name in metrics_dict:
-            wandb.define_metric(metric_name, summary="mean")
-        self.log_dict(metrics_dict)
-
     def on_validation_epoch_end(self, trainer, pl_module):
         self.common_epoch_end(stage="val")
 
     def on_test_epoch_end(self, trainer, pl_module):
         self.common_epoch_end(stage="test")
 
-    def common_epoch_end(self, stage: Literal["val", "test"]):
-        metrics = self.metrics[stage]
-        if metrics is not None and len(metrics.unique_recommended_items):
-            metrics = metrics.finalize_coverage()
-            self.log_metrics(metrics, stage)
+    def common_on_batch_end(self, pl_module, batch, stage):
+        if self.skip_epoch(current_epoch=pl_module.current_epoch, stage=stage):
+            return
+        user_ids = batch["user_ids"]
+        model = pl_module.model
+        for is_online in [True, False]:
+            kind = self.kind(stage=stage, is_online=is_online)
+            if (metrics := self.metrics.get(kind)) is not None:
+                if is_online:
+                    users_explicit = torch_sparse_slice(
+                        model.explicit, row_ids=user_ids
+                    )
+                    recommendations = model.online_recommend(
+                        users_explicit=users_explicit, n_recommendations=self.k
+                    )
+                else:
+                    recommendations = model.recommend(
+                        user_ids=user_ids, n_recommendations=self.k
+                    )
+                metrics_dict = metrics.batch_metrics(
+                    user_ids=user_ids, recommendations=recommendations
+                )
+                self.log_metrics(metrics_dict=metrics_dict, prefix=kind)
+
+    def log_metrics(self, metrics_dict: dict, prefix: str):
+        metrics_dict = {prefix + "_" + k: v for k, v in metrics_dict.items()}
+        for metric_name in metrics_dict:
+            wandb.define_metric(metric_name, summary="mean")
+        self.log_dict(metrics_dict)
+
+    def common_epoch_end(self, stage):
+        for is_online in [True, False]:
+            kind = self.kind(stage=stage, is_online=is_online)
+            if (metrics := self.metrics.get(kind)) is not None and len(
+                metrics.unique_recommended_items
+            ):
+                metrics = metrics.finalize_coverage()
+                self.log_metrics(metrics, prefix=kind)
 
 
 class RecommendingExplanationCallback(pl.callbacks.Callback):

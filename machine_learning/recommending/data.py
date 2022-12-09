@@ -26,8 +26,8 @@ class SparseDataset(Dataset):
         return self.explicit.shape
 
     def __getitem__(self, indices):
-        user_ids = indices.get("user_id", torch.arange(self.shape[0]))
-        item_ids = indices.get("item_id", torch.arange(self.shape[1]))
+        user_ids = indices.get("user_ids", torch.arange(self.shape[0]))
+        item_ids = indices.get("item_ids", torch.arange(self.shape[1]))
 
         explicit = torch_sparse_slice(self.explicit, user_ids, item_ids)
         return dict(
@@ -81,12 +81,12 @@ class Sampler:
 
 class UserSampler(Sampler):
     def __iter__(self):
-        yield from ({"user_id": i} for i in super().__iter__())
+        yield from ({"user_ids": i} for i in super().__iter__())
 
 
 class ItemSampler(Sampler):
     def __iter__(self):
-        yield from ({"item_id": i} for i in super().__iter__())
+        yield from ({"item_ids": i} for i in super().__iter__())
 
 
 class GridSampler:
@@ -121,7 +121,7 @@ class GridSampler:
         if self.shuffle:
             batch_indices_product = np.array(list(batch_indices_product), dtype=object)
             batch_indices_product = np.random.permutation(batch_indices_product)
-        yield from ({"user_id": i[0], "item_id": i[1]} for i in batch_indices_product)
+        yield from ({"user_ids": i[0], "item_ids": i[1]} for i in batch_indices_product)
 
 
 class GridIterableDataset(GridSampler, IterableDataset):

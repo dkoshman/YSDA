@@ -28,19 +28,20 @@ from ..interface import (
     RecommenderModuleBase,
 )
 from ..movielens import lit as movielens_lit
-from ..utils import save_shap_force_plot, wandb_plt_figure, Timer, profile
+from ..utils import (
+    save_shap_force_plot,
+    wandb_plt_figure,
+    Timer,
+    profile,
+    clipped_tensor_string_representation,
+)
 
 if TYPE_CHECKING:
-    from scipy.sparse import spmatrix
     from my_tools.utils import SparseTensor
 
-# split by users, then by time
-# TODO: train aggregator, upload, find out what is the heaviest function during val, limit val batches or
-# split into 0.8 0.199 0.001? tags as cat features
-# maybe add extra features, more models to aggregator [svd(10, 100, 1000 ?), mf(100, 1000), mf no bias]
-
-# TODO: make pipe user_item_dataframe(+maybe ratings) -> add features -> add extra(if not present, ) -> pool_kwargs
-#   then predict: make user_item_dataframe(+maybe extra features) -> pipe
+# TODO:
+#  add tests, tags as cat features
+#  maybe add extra features, more models to aggregator [svd(10, 100, 1000 ?), mf(100, 1000), mf no bias]
 
 
 def batch_fit_catboost_ranker(
@@ -50,9 +51,9 @@ def batch_fit_catboost_ranker(
     cb_fit_verbose: int = 100,
     disable_tqdm: bool = False,
 ) -> catboost.CatBoostRanker:
-
+    """Fits catboost ranker with cb_params to pool in batches with n non-homogenous groups per batch."""
     catboost_ranker = catboost.CatBoostRanker(**cb_params)
-    if not pool.shape[0]:
+    if pool.shape[0] == 0:
         return catboost_ranker
     _, group_indices = np.unique(pool.get_group_id_hash(), return_index=True)
     begins = range(0, len(group_indices), n_groups_per_batch)
@@ -65,7 +66,7 @@ def batch_fit_catboost_ranker(
     if pool.get_text_feature_indices():
         raise ValueError(
             "Models summation is not supported for models with text features, "
-            "so either pass n_groups_per_batch=-1, or remove text_features."
+            "so either pass n_groups_per_batch=-1, or remove text features."
         )
 
     batch_rankers = []
@@ -73,7 +74,7 @@ def batch_fit_catboost_ranker(
         print(
             f"Fitting catboost on "
             f"{'gpu' if cb_params.get('task_type') == 'GPU' else 'cpu'}"
-            f" to pool of shape {pool.shape} ",
+            f" to pool of shape {pool.shape}.",
             file=sys.stderr,
         )
     for begin, end in tqdm(
@@ -221,8 +222,11 @@ class CatboostInterface(
 
     @property
     def shap_explainer(self):
-        """shap.TreeExplainer must be initialized with an already fitted model."""
-        if self._shap_explainer is None and self.model.is_fitted():
+        if self._shap_explainer is None:
+            if not self.model.is_fitted():
+                raise ValueError(
+                    "To initialize shap.TreeExplainer, model must first be fitted."
+                )
             self._shap_explainer = shap.TreeExplainer(
                 self.model, feature_perturbation=self.feature_perturbation
             )
@@ -243,14 +247,22 @@ class CatboostInterface(
         self.model.load_model("tmp")
         self._shap_explainer = pickle.loads(bytes_dict["shap_explainer_bytes"])
 
-    def user_features(self) -> dict or None:
-        """Returns ???"""
+    def user_features(self) -> dict:
+        """
+        Returns dict with these possible keys:
+            dataframe: dataset specific user features with at least a "user_id" column
+            cat_features: set of column names with categorical features
+            text_features: set of column names with text features
+        """
+        return {}
 
-    def item_features(self) -> dict or None:
-        """Returns ???"""
+    def item_features(self) -> dict:
+        """Returns dict analogous to user_features, but with "item_id" column."""
+        return {}
 
-    def user_item_features(self) -> dict or None:
-        """Returns ???"""
+    def user_item_features(self) -> dict:
+        """Returns dict analogous to user_features, but with "user_id" and "item_id" columns."""
+        return {}
 
     @staticmethod
     def set_index(dataframe: pd.DataFrame, kind: FeatureKind):
@@ -261,27 +273,74 @@ class CatboostInterface(
         return dataframe.sort_index()
 
     @functools.lru_cache()
-    def cached_indexed_features(self, kind: FeatureKind) -> pd.DataFrame:
-        dataframes = []
+    def cached_indexed_features(self, kind: FeatureKind) -> pd.DataFrame or None:
         features = getattr(self, f"{kind.value}_features")
-        if "dataframe" in features:
-            dataframes.append(self.set_index(features["dataframe"], kind=kind))
         self.cat_features[kind] |= features.get("cat_features", set())
         self.text_features[kind] |= features.get("text_features", set())
-
-        dataframe = pd.concat(dataframes) if dataframes else None
-        return dataframe
+        if "dataframe" in features:
+            dataframe = self.set_index(features["dataframe"], kind=kind)
+            return dataframe
 
     @Timer()
-    def merge_features(self, dataframe):
+    def merge_features(self, user_item_dataframe):
+        """Merges dataset specific features defined in *_features methods into the given user-item dataframe."""
         for kind in self.FeatureKind:
             features = self.cached_indexed_features(kind=kind)
-            dataframe = maybe_none_join(dataframe, features)
+            user_item_dataframe = maybe_none_join(user_item_dataframe, features)
+        return user_item_dataframe
+
+    def rating_stats(self, ratings_dataframe, kind: FeatureKind) -> pd.DataFrame:
+        """Returns dataframe with kind.index_columns index and some ratings statistics in columns."""
+        if kind not in [
+            self.FeatureKind.user,
+            self.FeatureKind.item,
+        ]:
+            raise ValueError(f"Rating features are undefined for kind {kind}.")
+        kind = kind.value
+        mean_ratings = (
+            ratings_dataframe.groupby(f"{kind}_id")["rating"]
+            .mean()
+            .rename(f"mean_{kind}_ratings")
+        )
+        n_ratings = (
+            ratings_dataframe.groupby(f"{kind}_id").size().rename(f"{kind}_n_ratings")
+        )
+        return pd.concat([mean_ratings, n_ratings], axis="columns")
+
+    @functools.lru_cache()
+    def cached_rating_stats(self, kind: FeatureKind) -> pd.DataFrame or None:
+        ratings_dataframe = self.ratings_user_item_dataframe(explicit=self.explicit)
+        return self.rating_stats(ratings_dataframe=ratings_dataframe, kind=kind)
+
+    def merge_rating_stats(
+        self, dataframe, users_explicit=None, user_ids: np.array = None
+    ) -> pd.DataFrame:
+        """
+        Merges user and item stats from rating_stats method into the
+        received user-item dataframe, using cached stats from train explicit matrix,
+        and recalculating only if the online user stats are needed.
+        """
+        dataframe = self.set_index(dataframe, kind=self.FeatureKind.user_item)
+        user_ratings_stats = self.cached_rating_stats(kind=self.FeatureKind.user)
+        item_ratings_stats = self.cached_rating_stats(kind=self.FeatureKind.item)
+        if user_ids is not None and self.are_user_ids_fictive(user_ids):
+            ratings_dataframe = self.ratings_user_item_dataframe(
+                explicit=users_explicit, user_ids=user_ids
+            )
+            user_ratings_stats = self.rating_stats(
+                ratings_dataframe=ratings_dataframe, kind=self.FeatureKind.user
+            )
+        dataframe = maybe_none_join(dataframe, user_ratings_stats)
+        dataframe = maybe_none_join(dataframe, item_ratings_stats)
         return dataframe
 
-    def ratings_dataframe(
-        self, explicit: "spmatrix", user_ids: np.array = None
+    def ratings_user_item_dataframe(
+        self, explicit: "SparseTensor", user_ids: np.array = None
     ) -> pd.DataFrame:
+        """
+        Builds a dataframe with user_id, item_id multiindex and rating
+        column from user-item pairs present in the explicit feedback matrix.
+        """
         assert explicit.shape[1] == self.n_items, "Invalid explicit matrix shape."
         explicit = self.to_scipy_coo(explicit)
         user_ids = np.arange(self.n_users) if user_ids is None else user_ids
@@ -296,6 +355,12 @@ class CatboostInterface(
         return dataframe
 
     def extract_pool_kwargs(self, dataframe) -> dict:
+        """
+        Builds dict of catboost Pool kwargs from dataframe with at least
+        user_id, item_id, *cat_features, *text_features,
+        some number of numeric features columns,
+        and rating column if it is a labeled dataset.
+        """
         dataframe = dataframe.reset_index()
         group_id = dataframe["user_id"].values
         cat_features = set().union(*self.cat_features.values())
@@ -334,6 +399,11 @@ class CatboostInterface(
         cat_features: List[str] = (),
         text_features: List[str] = (),
     ) -> dict:
+        """
+        Only minor datatype manipulations are performed in this method
+        to comply with what catboost expects, also missing categories
+        and text features are marked with self.unknown_token.
+        """
         dataframe = dataframe.copy()
         for column in dataframe:
             if column in list(cat_features):
@@ -357,30 +427,48 @@ class CatboostInterface(
             group_id=group_id,
         )
 
-    @abc.abstractmethod
-    def build_labeled_dataframe(self, explicit: "spmatrix") -> pd.DataFrame:
-        return self.ratings_dataframe(explicit=explicit)
+    def build_labeled_user_item_dataframe(self, explicit) -> pd.DataFrame:
+        """
+        Given explicit feedback matrix, return dataframe with user-item pairs
+        present in the explicit matrix, plus any extra features, except for dataset
+        specific ones, which will be added automatically later in the pipeline.
+        """
+        dataframe = self.ratings_user_item_dataframe(explicit=explicit)
+        dataframe = self.merge_rating_stats(dataframe=dataframe)
+        return dataframe
 
     @property
     @functools.lru_cache()
-    def train_dataframe(self):
-        return self.build_labeled_dataframe(explicit=self.explicit)
+    def train_user_item_dataframe(self):
+        """Returns the dataframe that the model fits to."""
+        return self.build_labeled_user_item_dataframe(explicit=self.explicit)
 
     @abc.abstractmethod
-    def build_recommend_dataframe(
-        self, users_explicit, user_ids, n_recommendations
+    def build_recommend_user_item_dataframe(
+        self, users_explicit: "SparseTensor", user_ids: np.array, n_recommendations: int
     ) -> pd.DataFrame:
+        """
+        Given users' feedback matrix, their ids and requested number of
+        recommendations, build a dataframe with user-item pairs,
+        where user ids are the ones from received user_ids, and item_ids
+        are the possible candidates for catboost ranker to rank.
+        """
         ...
 
-    def pool(self, dataframe):
-        dataframe = self.merge_features(dataframe)
-        pool_kwargs = self.extract_pool_kwargs(dataframe=dataframe)
+    def pool(self, user_item_dataframe):
+        """
+        Convenience method that consolidates the
+        catboost Pool building pipeline from dataframe received from
+        either build_labeled_dataframe or build_recommend_dataframe method.
+        """
+        user_item_dataframe = self.merge_features(user_item_dataframe)
+        pool_kwargs = self.extract_pool_kwargs(dataframe=user_item_dataframe)
         pool_kwargs = self.postprocess_pool_kwargs(**pool_kwargs)
         pool = catboost.Pool(**pool_kwargs)
         return pool
 
     def fit(self):
-        pool = self.pool(self.train_dataframe)
+        pool = self.pool(self.train_user_item_dataframe)
         self.model = fit_catboost_ranker(
             pool=pool,
             cb_params=self.cb_params,
@@ -397,11 +485,11 @@ class CatboostInterface(
         )
 
     def flat_catboost_predicted_ratings_to_matrix(
-        self, dataframe, flat_predicted_ratings: np.array
+        self, user_ids: np.array, item_ids: np.array, flat_predicted_ratings: np.array
     ) -> "SparseTensor":
-        dataframe = dataframe.reset_index()
-        row_ids = dataframe["user_id"].values.astype(np.int32)
-        col_ids = dataframe["item_id"].values.astype(np.int32)
+        """Unravel the user-item rating pairs into a matrix by mapping the coordinates."""
+        row_ids = user_ids.astype(np.int32)
+        col_ids = item_ids.astype(np.int32)
         ratings = coo_array(
             (flat_predicted_ratings, (row_ids, col_ids)),
             shape=[row_ids.max() + 1, self.n_items],
@@ -418,15 +506,17 @@ class CatboostInterface(
         n_recommendations: int or None,
     ):
         n_recommendations = n_recommendations or self.n_items
-        dataframe = self.build_recommend_dataframe(
+        dataframe = self.build_recommend_user_item_dataframe(
             users_explicit=users_explicit,
             user_ids=user_ids,
             n_recommendations=n_recommendations,
         )
         pool = self.pool(dataframe)
-        ratings = self.model.predict(pool)
+        flat_predicted_ratings = self.model.predict(pool)
         ratings = self.flat_catboost_predicted_ratings_to_matrix(
-            dataframe=dataframe, flat_predicted_ratings=ratings
+            user_ids=dataframe.get_level_values("user_id").values,
+            item_ids=dataframe.get_level_values("item_id").values,
+            flat_predicted_ratings=flat_predicted_ratings,
         )
         recommendations = self.ratings_to_filtered_recommendations(
             explicit=users_explicit,
@@ -443,7 +533,7 @@ class CatboostInterface(
             n_recommendations=n_recommendations,
         )
 
-    def fictive_user_ids(self, n_users):
+    def fictive_user_ids(self, n_users) -> torch.IntTensor:
         """
         Returns fictive user ids to use as group ids during online recommend,
         which do not intersect with user ids the model saw during fit.
@@ -451,6 +541,10 @@ class CatboostInterface(
         return torch.arange(self.n_users, self.n_users + n_users)
 
     def are_user_ids_fictive(self, user_ids: np.array) -> bool:
+        """
+        Predicate to determine if user ids are fictive, or,
+        equivalently, if we are performing an online recommend.
+        """
         return any(user_ids >= self.n_users)
 
     @Timer()
@@ -462,6 +556,11 @@ class CatboostInterface(
         )
 
     def get_feature_importance(self, pool) -> pd.DataFrame:
+        """
+        Given unlabeled pool, returns the default importance type
+        for each feature, which is usually the average feature's
+        impact on the prediction value or loss function.
+        """
         less_indices, more_indices = split_by_group_sizes(
             group_ids=pool.get_group_id_hash(),
             group_size_threshold=self.max_gpu_query_size,
@@ -469,9 +568,15 @@ class CatboostInterface(
         pool = pool.slice(less_indices)
         return self.model.get_feature_importance(pool, prettified=True)
 
-    def shap_kwargs(self, dataframe):
-        dataframe = self.merge_features(dataframe=dataframe)
-        pool_kwargs = self.extract_pool_kwargs(dataframe=dataframe)
+    def shap_kwargs(self, user_item_dataframe):
+        """
+        Given user_item_dataframe, returned by one of the build_*_user_item_dataframe methods,
+        returns all the necessary parameters to start drawing graphs using the shap module.
+        """
+        user_item_dataframe = self.merge_features(
+            user_item_dataframe=user_item_dataframe
+        )
+        pool_kwargs = self.extract_pool_kwargs(dataframe=user_item_dataframe)
         pool = catboost.Pool(**self.postprocess_pool_kwargs(**pool_kwargs))
         shap_values = self.shap_explainer.shap_values(pool)
         return dict(
@@ -493,26 +598,27 @@ class CatboostInterface(
     ) -> dict:
         return_explanations_dict = {}
         if user_id is not None:
+            user_ids = torch.IntTensor([user_id])
             recommendations = self.recommend(
-                user_ids=torch.IntTensor([user_id]), n_recommendations=n_recommendations
+                user_ids=user_ids, n_recommendations=n_recommendations
             )
-            user_explicit = torch_sparse_slice(self.explicit, row_ids=[user_id])
+            user_explicit = torch_sparse_slice(self.explicit, row_ids=user_ids)
         else:
             recommendations = self.online_recommend(
                 users_explicit=user_explicit, n_recommendations=n_recommendations
             )
-            user_id = self.n_users
+            user_ids = self.fictive_user_ids(n_users=1)
 
         recommendations = recommendations[0].cpu().numpy()
-        dataframe = self.build_recommend_dataframe(
+        dataframe = self.build_recommend_user_item_dataframe(
             users_explicit=user_explicit,
-            user_ids=torch.IntTensor([user_id]),
+            user_ids=user_ids,
             n_recommendations=n_recommendations,
         )
         dataframe = dataframe.query(
-            "user_id == @user_id and item_id in @recommendations"
+            "user_id in @user_ids.numpy() and item_id in @recommendations"
         )
-        shap_kwargs = self.shap_kwargs(dataframe=dataframe)
+        shap_kwargs = self.shap_kwargs(user_item_dataframe=dataframe)
         return_explanations_dict["features"] = shap_kwargs["features"]
         if log:
             title = logging_prefix + "features"
@@ -558,76 +664,23 @@ class CatboostInterface(
         return return_explanations_dict
 
 
-class RatingStatsMixin:
-    @staticmethod
-    def rating_stats(
-        ratings_dataframe, kind: CatboostInterface.FeatureKind
-    ) -> pd.DataFrame:
-        if kind not in [
-            CatboostInterface.FeatureKind.user,
-            CatboostInterface.FeatureKind.item,
-        ]:
-            raise ValueError(f"Rating features are undefined for kind {kind}.")
-        kind = kind.value
-        mean_ratings = (
-            ratings_dataframe.groupby(f"{kind}_id")["rating"]
-            .mean()
-            .rename(f"mean_{kind}_ratings")
-        )
-        n_ratings = (
-            ratings_dataframe.groupby(f"{kind}_id").size().rename(f"{kind}_n_ratings")
-        )
-        return pd.concat([mean_ratings, n_ratings], axis="columns")
-
-    @functools.lru_cache()
-    def cached_rating_stats_dict(self: CatboostInterface) -> dict:
-        ratings_dataframe = self.ratings_dataframe(explicit=self.explicit)
-        return {
-            kind: self.rating_stats(ratings_dataframe=ratings_dataframe, kind=kind)
-            for kind in [
-                CatboostInterface.FeatureKind.user,
-                CatboostInterface.FeatureKind.item,
-            ]
-        }
-
-    def join_rating_stats(self: CatboostInterface, dataframe, ratings_dataframe=None):
-        rating_stats_dict = self.cached_rating_stats_dict()
-        if ratings_dataframe is not None and self.are_user_ids_fictive(
-            ratings_dataframe.reset_index()["user_id"]
-        ):
-            kind = CatboostInterface.FeatureKind.user
-            rating_stats_dict[kind] = self.rating_stats(
-                ratings_dataframe=ratings_dataframe, kind=kind
-            )
-        for rating_feature in rating_stats_dict.values():
-            dataframe = maybe_none_join(dataframe, rating_feature)
-        return dataframe
-
-
-class CatboostRecommenderBase(CatboostInterface, RatingStatsMixin):
-    def build_labeled_dataframe(self, explicit):
-        dataframe = self.ratings_dataframe(explicit=explicit)
-        dataframe = self.join_rating_stats(dataframe=dataframe)
-        return dataframe
-
-    def build_recommend_dataframe(self, users_explicit, user_ids, n_recommendations):
+class CatboostRecommenderBase(CatboostInterface):
+    def build_recommend_user_item_dataframe(
+        self, users_explicit, user_ids, n_recommendations
+    ):
         dataframe = pd.DataFrame(
             dict(
                 user_id=np.repeat(user_ids.numpy(), self.n_items),
                 item_id=np.tile(np.arange(self.n_items), len(user_ids)),
             )
         )
-        dataframe = self.set_index(dataframe, kind=self.FeatureKind.user_item)
-        dataframe = self.join_rating_stats(
-            dataframe,
-            ratings_dataframe=self.ratings_dataframe(
-                explicit=users_explicit, user_ids=user_ids
-            ),
+        dataframe = self.merge_rating_stats(
+            dataframe=dataframe, users_explicit=users_explicit, user_ids=user_ids
         )
         return dataframe
 
 
-class CatboostAggregatorRecommender(CatboostInterface, RatingStatsMixin):
+class CatboostAggregatorRecommender(CatboostInterface):
     """This recommender uses other pre-fit models' topk recommendations as features."""
 
     def __init__(
@@ -685,7 +738,16 @@ class CatboostAggregatorRecommender(CatboostInterface, RatingStatsMixin):
         return dataframe
 
     @profile(log_every=10)
-    def poll_fit_recommenders(self, users_explicit, user_ids):
+    def poll_fit_recommenders(
+        self, users_explicit, user_ids
+    ) -> "List[torch.IntTensor]":
+        """
+        Given users' explicit feedback and their user_ids, returns
+        a list of length equal to len(self.fit_recommenders), with
+        torch matrices with the ranks of items that each separate fit_recommender
+        assigned for each user, if the item was recommended at all,
+        and -1 otherwise.
+        """
         extended_ranks = 1 + torch.arange(self.n_items + 1).repeat(len(user_ids), 1)
         extended_ranks[:, -1] = -1
         recommenders_ranks = []
@@ -715,13 +777,12 @@ class CatboostAggregatorRecommender(CatboostInterface, RatingStatsMixin):
         self, users_explicit, user_ids, n_recommendations
     ):
         """
-        Builds dataframe with [user_id, item_id] + self.recommender_names columns
+        Method to determine item recommendation candidates for each user during recommending.
+        Returns user-item dataframe with self.recommender_names columns
         induced by aggregated topk n_recommendations by self.fit_recommenders for
-        users_explicit if passed, otherwise for user_ids. Values in self.recommender_names
+        users with corresponding user_ids. Values in self.recommender_names
         columns at index [user_id, item_id] are equal to rank of item_id in recommender's
-        recommendations for user_id. If train_explicit is passed, recommenders' opinions
-        about user-item pairs present in train_explicit will be added to resulting dataframe,
-        if they are not already present in it.
+        recommendations for user_id.
         """
         recommenders_ranks = self.poll_fit_recommenders(
             user_ids=user_ids, users_explicit=users_explicit
@@ -742,23 +803,15 @@ class CatboostAggregatorRecommender(CatboostInterface, RatingStatsMixin):
         )
         return dataframe
 
-    @staticmethod
-    def tensor_str(tensor, max_size=50):
-        """Returns string representation of a tensor, clipped to max_size."""
-        string = str(tensor)
-        if len(string) >= max_size:
-            string = string[: max_size // 2] + " ... " + string[-max_size // 2 :]
-        string = re.sub(r"\s+", " ", string)
-        return string
-
     def user_batches(
-        self, user_ids: torch.IntTensor, users_explicit: "spmatrix", tqdm_stage=None
+        self, user_ids: torch.IntTensor, users_explicit: "SparseTensor", tqdm_stage=None
     ):
+        """Batched iterator over synchronized user_ids and users_explicit."""
         for batch_indices in tqdm(
             iterable=torch.arange(len(user_ids)).split(
                 split_size=self.dataframe_build_batch_size
             ),
-            desc=f"Building {tqdm_stage or ''} dataframe for users: {self.tensor_str(user_ids)}",
+            desc=f"Building {tqdm_stage or ''} dataframe for users: {clipped_tensor_string_representation(user_ids)}",
             disable=not bool(tqdm_stage),
         ):
             batch_user_ids = user_ids[batch_indices]
@@ -767,7 +820,7 @@ class CatboostAggregatorRecommender(CatboostInterface, RatingStatsMixin):
             )
             yield batch_user_ids, batch_users_explicit
 
-    def build_labeled_dataframe(self, explicit):
+    def build_labeled_user_item_dataframe(self, explicit):
         if explicit.shape != (
             expected_shape := torch.Size([self.n_users, self.n_items])
         ):
@@ -798,11 +851,16 @@ class CatboostAggregatorRecommender(CatboostInterface, RatingStatsMixin):
             dataframes.append(train_dataframe)
 
         dataframe = pd.concat(dataframes)
-        dataframe = self.ratings_dataframe(explicit=explicit).join(dataframe)
-        dataframe = self.join_rating_stats(dataframe=dataframe)
+        super_dataframe = super().build_labeled_user_item_dataframe(explicit=explicit)
+        assert (
+            len(dataframe.index.symmetric_difference(super_dataframe.index)) == 0
+        ), "Index of batch-constructed dataframe doesn't match the expected one."
+        dataframe = dataframe.join(super_dataframe)
         return dataframe
 
-    def build_recommend_dataframe(self, users_explicit, user_ids, n_recommendations):
+    def build_recommend_user_item_dataframe(
+        self, users_explicit, user_ids, n_recommendations
+    ):
         dataframes = []
         for batch_user_ids, batch_users_explicit in self.user_batches(
             user_ids=user_ids, users_explicit=users_explicit
@@ -815,11 +873,8 @@ class CatboostAggregatorRecommender(CatboostInterface, RatingStatsMixin):
                 )
             )
         dataframe = pd.concat(dataframes)
-        dataframe = self.join_rating_stats(
-            dataframe=dataframe,
-            ratings_dataframe=self.ratings_dataframe(
-                explicit=users_explicit, user_ids=user_ids
-            ),
+        dataframe = self.merge_rating_stats(
+            dataframe=dataframe, users_explicit=users_explicit, user_ids=user_ids
         )
         return dataframe
 

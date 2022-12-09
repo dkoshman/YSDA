@@ -442,14 +442,11 @@ def prepare_artifact(
     else:
         artifact = wandb.run.use_artifact(full_artifact_name)
         artifact.download(root=directory)
-
-    if not update_with_local_directory:
         try:
             artifact.verify(root=directory)
         except ValueError:
             if match_directory_exactly:
                 artifact.checkout(root=directory)
-                artifact.verify(root=directory)
             else:
                 warnings.warn(
                     f"Artifact {full_artifact_name} content doesn't match exactly the content in directory {directory}."
@@ -593,3 +590,14 @@ def filter_mro_by_classes_which_defined_function(
             raise ValueError(f"Attribute {function_name} is not a function.")
         if function.__qualname__.split(".")[0] == subclass.__name__:
             yield subclass
+
+
+def clipped_tensor_string_representation(
+    tensor: torch.Tensor, max_size: int = 50
+) -> str:
+    """Returns string representation of a tensor, clipped to max_size."""
+    string = str(tensor)
+    if len(string) >= max_size:
+        string = string[: max_size // 2] + " ... " + string[-max_size // 2 :]
+    string = re.sub(r"\s+", " ", string)
+    return string

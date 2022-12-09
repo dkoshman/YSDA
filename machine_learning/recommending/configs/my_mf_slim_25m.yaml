@@ -3,23 +3,17 @@ artifacts:
   - full_artifact_name: dkoshman/Recommending/imdb_ratings:latest
     directory: data/imdb_ratings
     match_directory_exactly: True
-    artifact_type: data
   - full_artifact_name: dkoshman/Recommending/movielens25m:latest
     directory: data/ml-25m
-    artifact_type: data
 model:
   class_name: MFSlimRecommender
   latent_dimension: 200
   l2_regularization: 0.0
   l1_regularization: 1.0e-6
-loss:
-  class_name: MSELoss
 datamodule:
   movielens:
     class_name: MovieLens25m
     directory: data/ml-25m
-    train_time_quantile: 0.8
-    test_user_fraction: 0.2
   train_explicit_file: ratings_train.csv
   val_explicit_file: ratings_val.csv
   test_explicit_file: ratings_test.csv
@@ -31,24 +25,19 @@ lightning_module:
   class_name: MovieLensMFRecommender
 trainer:
   accelerator: gpu
-  devices: [6]
+  devices: [1]
   log_every_n_steps: 1
-  val_check_interval: 500
+  val_check_interval: 1000
   accumulate_grad_batches: 10
-  limit_val_batches: 20
 callbacks:
   EarlyStopping:
-    monitor: val_ndcg@10
-    check_on_train_epoch_end: False
+    monitor: val_offline_ndcg@10
     mode: max
-    patience: 0
+    check_on_train_epoch_end: False
+    patience: 3
     min_delta: 1.0e-3
   WandbCheckpointCallback:
-    monitor: val_ndcg@10
+    monitor: val_offline_ndcg@10
     mode: max
     save_on_train_epoch_end: False
     artifact_name: my_mf_slim_movielens_25m
-  RecommendingMetricsCallback:
-    k: 10
-  RecommendingExplanationIMDBCallback:
-    path_to_imdb_ratings_csv: data/imdb_ratings/my_imdb_ratings.csv

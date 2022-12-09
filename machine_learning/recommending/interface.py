@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 import wandb
-from machine_learning.recommending.utils import Timer
 
 from machine_learning.recommending.maths import (
     Distance,
@@ -126,7 +125,6 @@ class RecommenderModuleBase(RecommenderModuleInterface, ABC):
         )
         return recommendations
 
-    @Timer()
     def online_nn_ratings(
         self,
         explicit: "SparseTensor" or spmatrix,
@@ -274,7 +272,6 @@ class UnpopularRecommenderMixin:
         return self.users_activity.mean(dim=0, keepdims=True)
 
 
-# TODO: fix loss interface: as mixin for simple losses and as method for complex ones
 class RecommendingLossInterface:
     def __init__(self, explicit):
         pass
