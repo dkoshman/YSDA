@@ -16,10 +16,6 @@ def _test_config(config_path):
         fit(config)
 
 
-def test_baseline_config():
-    _test_config("configs/baseline.yaml")
-
-
 def test_svd_config():
     _test_config("configs/svd.yaml")
 
@@ -34,10 +30,6 @@ def test_implicit_mf_config():
 
 def test_als_config():
     _test_config("configs/als.yaml")
-
-
-def test_cat_config():
-    _test_config("configs/cat.yaml")
 
 
 def test_movielens_cat_config():

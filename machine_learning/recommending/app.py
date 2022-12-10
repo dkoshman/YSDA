@@ -23,11 +23,6 @@ if TYPE_CHECKING:
 class Feedback(Enum, settings=(MultiValue, Unique), init="str rating"):
     not_interested = "Haven't seen it and not interested", 0
     interested = "Haven't seen it, but I'm interested", 3.5
-    # one = "1", 1
-    # two = "2", 2
-    # three = "3", 3
-    # four = "4", 4
-    # five = "5", 5
     one = "⭐️", 1
     two = "⭐️⭐️", 2
     three = "⭐️⭐️⭐️", 3
@@ -116,7 +111,7 @@ class Session:
         self.session_id = time.time()
         self.explicit = np.full(self.recommender.n_items, fill_value=np.nan)
         self.movie_id, self.initial_markdown, self.initial_poster_url = self.content()
-        self.content_task = asyncio.create_task(self.async_content())
+        self.content_task = self.content()
 
     def __deepcopy__(self, memo):
         """
@@ -133,15 +128,15 @@ class Session:
         explicit = scipy.sparse.coo_matrix(np.nan_to_num(self.explicit).reshape(1, -1))
         with torch.no_grad():
             user_recommendations = self.recommender.online_recommend(
-                explicit, n_recommendations=self.recommender.n_items
+                users_explicit=explicit, n_recommendations=2
             )[0].numpy()
 
-        new_items_mask = np.isnan(self.explicit)
-        new_items_positions = new_items_mask[user_recommendations].nonzero()[0]
-        movie_id = user_recommendations[new_items_positions[0]]
+        movie_id = user_recommendations[0]
 
-        # To not recommend same item twice before rating gets saved.
-        self.explicit[movie_id] = 0
+        recommended_but_not_yet_rated_mark = 0
+        if self.explicit[movie_id] == recommended_but_not_yet_rated_mark:
+            movie_id = user_recommendations[1]
+        self.explicit[movie_id] = recommended_but_not_yet_rated_mark
 
         markdown, poster_url = self.movie_markdown_generator(item_id=movie_id)
 
@@ -167,8 +162,12 @@ class Session:
         )
 
     async def next_content(self, feedback: Feedback):
-        with Timer(name="await_content"):
-            next_movie_id, markdown, poster_url = await self.content_task
+        if asyncio.isfuture(self.content_task):
+            with Timer(name="await_content"):
+                content = await self.content_task
+        else:
+            content = self.content_task
+        next_movie_id, markdown, poster_url = content
         self.save_rating(rating=feedback.rating, movie_id=self.movie_id)
         wandb.log(
             dict(

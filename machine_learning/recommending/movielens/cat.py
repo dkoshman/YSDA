@@ -14,7 +14,7 @@ class CatboostMovieLens100kFeatureRecommender(CatboostRecommenderBase):
         user_features["user_id"] = self.movielens.dataset_to_dense_user_ids(
             dataset_user_ids=user_features["user_id"].values
         )
-        return dict(
+        return self.FeatureReturnValue(
             dataframe=user_features,
             cat_features={"user_id", "gender", "occupation", "zip code"},
         )
@@ -37,7 +37,7 @@ class CatboostMovieLens100kFeatureRecommender(CatboostRecommenderBase):
         user_item_features = self.movielens["u.data"][
             ["user_id", "item_id", "timestamp"]
         ]
-        return dict(dataframe=user_item_features)
+        return self.FeatureReturnValue(dataframe=user_item_features)
 
 
 class CatboostMovieLens100kFeatureAggregatorFromArtifacts(
@@ -54,7 +54,8 @@ class CatboostMovieLens25mFeatureRecommender(CatboostRecommenderBase):
     def item_features(self):
         item_features = self.movielens["movies"].reset_index(names="item_id")
         item_features = item_features.query(
-            "item_id in @self.movielens.unique_dataset_item_ids"
+            "item_id in @rated_item_ids",
+            local_dict=dict(rated_item_ids=self.movielens.unique_dataset_item_ids),
         )
         genres = item_features["genres"].str.get_dummies()
         item_features = item_features.drop(["title", "genres"], axis="columns")
@@ -62,7 +63,7 @@ class CatboostMovieLens25mFeatureRecommender(CatboostRecommenderBase):
         item_features["item_id"] = self.movielens.dataset_to_dense_item_ids(
             dataset_item_ids=item_features["item_id"].values
         )
-        return dict(
+        return self.FeatureReturnValue(
             dataframe=item_features,
             cat_features=set(item_features.columns),
         )
@@ -80,7 +81,7 @@ class CatboostMovieLens25mFeatureRecommender(CatboostRecommenderBase):
             .apply(", ".join)
         )
         user_item_features = user_item_features.join(user_item_tags)
-        return dict(
+        return self.FeatureReturnValue(
             dataframe=user_item_features,
             text_features={"tag"},
         )

@@ -3,10 +3,8 @@ artifacts:
   - full_artifact_name: dkoshman/Recommending/imdb_ratings:latest
     directory: data/imdb_ratings
     match_directory_exactly: True
-    artifact_type: data
   - full_artifact_name: dkoshman/Recommending/movielens25m:latest
     directory: data/ml-25m
-    artifact_type: data
 datamodule:
   movielens:
     class_name: MovieLens25m

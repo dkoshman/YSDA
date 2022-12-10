@@ -224,7 +224,7 @@ class CatBoostMetrics(pl.callbacks.Callback):
         )
         numeric_features = {}
         for kind in model.FeatureKind:
-            if (features := model.cached_indexed_features(kind)) is not None:
+            if (features := model.cached_indexed_features_dataframe(kind)) is not None:
                 numeric_features[kind.value] = list(
                     features.columns.difference(non_numeric_features)
                 )

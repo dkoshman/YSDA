@@ -1,10 +1,9 @@
 name: "Catboost movielens run"
 model:
   class_name: CatboostMovieLens100kFeatureRecommender
-  movielens_directory: local/ml-100k
+  movielens_directory: data/ml-100k
   cb_params:
     task_type: GPU
-    devices: [0]
 lightning_module:
   class_name: MovieLensNonGradientRecommender
 trainer:

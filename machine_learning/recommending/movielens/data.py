@@ -301,8 +301,14 @@ class MovieLens25m(MovieLensInterface):
             size=int(len(unique_user_ids) * test_user_fraction),
             replace=False,
         )
-        val_split = time_split_post.query("user_id not in @test_user_ids")
-        test_split = time_split_post.query("user_id in @test_user_ids")
+        val_split = time_split_post.query(
+            "user_id not in @test_user_ids",
+            local_dict=dict(test_user_ids=test_user_ids),
+        )
+        test_split = time_split_post.query(
+            "user_id in @test_user_ids",
+            local_dict=dict(test_user_ids=test_user_ids),
+        )
         splits = dict(train=time_split_ante, val=val_split, test=test_split)
         for kind, split in splits.items():
             filename = f"ratings_{kind}.csv"

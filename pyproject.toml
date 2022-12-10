@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "ysda"
-version = "0.1.9"
+version = "0.1.15"
 description = ""
 authors = ["DimaKoshman <koshmandk@yandex.ru>"]
 readme = "README.md"
@@ -24,7 +24,6 @@ torch = "^1.12.1,<1.13"
 #    #{ url = "https://download.pytorch.org/whl/cu113/torch-1.12.1%2Bcu113-cp310-cp310-linux_x86_64.whl", markers = "sys_platform == 'linux'"},
 #    { version = "^1.12.0", markers = "sys_platform == 'darwin'" }
 #]
-sklearn = "^0.0"
 wandb = "^0.13.3"
 pytorch-lightning = "~1.6"
 einops = "^0.4.1"
@@ -38,6 +37,9 @@ gradio = "^3.7"
 catboost = "^1.1"
 trash-cli = "^0.22"
 transformers = "^4.16"
+line-profiler = "^4.0.2"
+scikit-learn = "^1.2.0"
+aenum = "^3.1.11"
 
 
 [build-system]

@@ -14,17 +14,17 @@ lightning_module:
 trainer:
   max_epochs: 1000
   accelerator: gpu
-  devices: [5]
+  devices: [0]
   check_val_every_n_epoch: 10
   log_every_n_steps: 1
 callbacks:
   EarlyStopping:
-    monitor: val_ndcg@10
+    monitor: val_offline_ndcg@10
     mode: max
     patience: 1
     check_on_train_epoch_end: False
   WandbCheckpointCallback:
-    monitor: val_ndcg@10
+    monitor: val_offline_ndcg@10
     mode: max
     save_on_train_epoch_end: False
     artifact_name: my_mf_slim

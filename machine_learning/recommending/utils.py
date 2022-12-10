@@ -176,7 +176,7 @@ class FileLogger(Logger):
     def __init__(self, file: io.TextIOBase = sys.stderr):
         self.file = file
 
-    # TODO:color
+    # TODO: color
     def log(self, dict_to_log: dict):
         print(*[f"{k}:\t{v}" for k, v in dict_to_log.items()], sep="\n", file=self.file)
 

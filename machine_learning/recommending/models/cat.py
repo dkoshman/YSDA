@@ -2,12 +2,12 @@ import abc
 import functools
 import os
 import pickle
-import re
 import sys
 import warnings
 from collections import Counter
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Tuple, List
+from typing import TYPE_CHECKING, Tuple, List, Set
 
 import catboost
 import einops
@@ -40,8 +40,9 @@ if TYPE_CHECKING:
     from my_tools.utils import SparseTensor
 
 # TODO:
-#  add tests, tags as cat features
-#  maybe add extra features, more models to aggregator [svd(10, 100, 1000 ?), mf(100, 1000), mf no bias]
+#  test app, upload to pypi, upload to huggingface
+#  why do text features work in ml25m with model summation?
+#  tags as cat features? add extra features, more models to aggregator [svd(10, 100, 1000 ?), mf(100, 1000), mf no bias]
 
 
 def batch_fit_catboost_ranker(
@@ -109,7 +110,9 @@ def split_by_group_sizes(
         .query(f"size <= {group_size_threshold}")
         .index
     )
-    less_indices = group_ids.query("group_id in @less_group_ids").index.values
+    less_indices = group_ids.query(
+        "group_id in @less_group_ids", local_dict=dict(less_group_ids=less_group_ids)
+    ).index.values
     more_indices = group_ids.index.difference(less_indices).values
     return less_indices, more_indices
 
@@ -156,10 +159,6 @@ def fit_catboost_ranker(
     return catboost_ranker
 
 
-def maybe_none_join(left: pd.DataFrame, right: pd.DataFrame or None) -> pd.DataFrame:
-    return left if right is None else left.join(right)
-
-
 class CatboostInterface(
     RecommenderModuleBase, FitExplicitInterfaceMixin, ExplanationMixin, abc.ABC
 ):
@@ -175,6 +174,16 @@ class CatboostInterface(
                 self.item: ["item_id"],
                 self.user_item: ["user_id", "item_id"],
             }[self]
+
+    @dataclass
+    class FeatureReturnValue:
+        dataframe: pd.DataFrame = field(
+            default_factory=lambda: pd.DataFrame(
+                columns=CatboostInterface.FeatureKind.user_item.index_columns
+            )
+        )
+        cat_features: "Set[str]" = field(default_factory=set)
+        text_features: "Set[str]" = field(default_factory=set)
 
     def __init__(
         self,
@@ -247,22 +256,22 @@ class CatboostInterface(
         self.model.load_model("tmp")
         self._shap_explainer = pickle.loads(bytes_dict["shap_explainer_bytes"])
 
-    def user_features(self) -> dict:
+    def user_features(self) -> FeatureReturnValue:
         """
-        Returns dict with these possible keys:
+        Returns FeatureReturnValue with these kwargs:
             dataframe: dataset specific user features with at least a "user_id" column
             cat_features: set of column names with categorical features
             text_features: set of column names with text features
         """
-        return {}
+        return self.FeatureReturnValue()
 
-    def item_features(self) -> dict:
+    def item_features(self) -> FeatureReturnValue:
         """Returns dict analogous to user_features, but with "item_id" column."""
-        return {}
+        return self.FeatureReturnValue()
 
-    def user_item_features(self) -> dict:
+    def user_item_features(self) -> FeatureReturnValue:
         """Returns dict analogous to user_features, but with "user_id" and "item_id" columns."""
-        return {}
+        return self.FeatureReturnValue()
 
     @staticmethod
     def set_index(dataframe: pd.DataFrame, kind: FeatureKind):
@@ -273,20 +282,21 @@ class CatboostInterface(
         return dataframe.sort_index()
 
     @functools.lru_cache()
-    def cached_indexed_features(self, kind: FeatureKind) -> pd.DataFrame or None:
-        features = getattr(self, f"{kind.value}_features")
-        self.cat_features[kind] |= features.get("cat_features", set())
-        self.text_features[kind] |= features.get("text_features", set())
-        if "dataframe" in features:
-            dataframe = self.set_index(features["dataframe"], kind=kind)
-            return dataframe
+    def cached_indexed_features_dataframe(self, kind: FeatureKind) -> pd.DataFrame:
+        features: CatboostInterface.FeatureReturnValue = getattr(
+            self, f"{kind.value}_features"
+        )()
+        self.cat_features[kind] |= features.cat_features
+        self.text_features[kind] |= features.text_features
+        features_dataframe = self.set_index(features.dataframe, kind=kind)
+        return features_dataframe
 
     @Timer()
     def merge_features(self, user_item_dataframe):
         """Merges dataset specific features defined in *_features methods into the given user-item dataframe."""
         for kind in self.FeatureKind:
-            features = self.cached_indexed_features(kind=kind)
-            user_item_dataframe = maybe_none_join(user_item_dataframe, features)
+            features_dataframe = self.cached_indexed_features_dataframe(kind=kind)
+            user_item_dataframe = user_item_dataframe.join(features_dataframe)
         return user_item_dataframe
 
     def rating_stats(self, ratings_dataframe, kind: FeatureKind) -> pd.DataFrame:
@@ -330,8 +340,7 @@ class CatboostInterface(
             user_ratings_stats = self.rating_stats(
                 ratings_dataframe=ratings_dataframe, kind=self.FeatureKind.user
             )
-        dataframe = maybe_none_join(dataframe, user_ratings_stats)
-        dataframe = maybe_none_join(dataframe, item_ratings_stats)
+        dataframe = dataframe.join(user_ratings_stats).join(item_ratings_stats)
         return dataframe
 
     def ratings_user_item_dataframe(
@@ -514,8 +523,8 @@ class CatboostInterface(
         pool = self.pool(dataframe)
         flat_predicted_ratings = self.model.predict(pool)
         ratings = self.flat_catboost_predicted_ratings_to_matrix(
-            user_ids=dataframe.get_level_values("user_id").values,
-            item_ids=dataframe.get_level_values("item_id").values,
+            user_ids=dataframe.index.get_level_values("user_id").values,
+            item_ids=dataframe.index.get_level_values("item_id").values,
             flat_predicted_ratings=flat_predicted_ratings,
         )
         recommendations = self.ratings_to_filtered_recommendations(
@@ -718,7 +727,7 @@ class CatboostAggregatorRecommender(CatboostInterface):
         return names
 
     def user_item_features(self):
-        return dict(cat_features=set(self.recommender_names))
+        return self.FeatureReturnValue(cat_features=set(self.recommender_names))
 
     def ranks_dataframe(self, user_ids, item_ids, ranks):
         """
@@ -737,6 +746,7 @@ class CatboostAggregatorRecommender(CatboostInterface):
         dataframe = self.set_index(dataframe, kind=self.FeatureKind.user_item)
         return dataframe
 
+    @Timer()
     @profile(log_every=10)
     def poll_fit_recommenders(
         self, users_explicit, user_ids
@@ -773,6 +783,7 @@ class CatboostAggregatorRecommender(CatboostInterface):
         return recommenders_ranks
 
     @Timer()
+    @profile(log_every=10)
     def aggregate_topk_recommendations(
         self, users_explicit, user_ids, n_recommendations
     ):

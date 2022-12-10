@@ -11,6 +11,7 @@ from machine_learning.recommending.maths import (
     cosine_distance,
     weighted_average,
 )
+from machine_learning.recommending.utils import profile, Timer
 from my_tools.utils import to_torch_coo, to_scipy_coo, torch_sparse_slice
 
 if TYPE_CHECKING:
@@ -79,6 +80,8 @@ class RecommenderModuleBase(RecommenderModuleInterface, ABC):
         for parameter in self.parameters():
             return parameter.device
 
+    @Timer()
+    @profile()
     def ratings_to_filtered_recommendations(
         self, explicit, ratings, n_recommendations=None
     ):
