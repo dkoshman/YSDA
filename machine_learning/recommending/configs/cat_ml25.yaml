@@ -20,7 +20,6 @@ model:
   cb_gpu_fit_n_users_per_batch: 1000
   use_text_features: false
   use_user_ids_as_features: false
-  use_item_ids_as_features: false
 #  cb_params:
 #    task_type: GPU
 # It's easier to control what gpus the model trains on via CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=4

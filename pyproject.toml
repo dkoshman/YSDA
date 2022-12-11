@@ -1,47 +1,5 @@
-[tool.poetry]
-name = "ysda"
-version = "0.1.16"
-description = ""
-authors = ["DimaKoshman <koshmandk@yandex.ru>"]
-readme = "README.md"
-packages = [
-    { include = "my_tools" },
-    { include = "machine_learning/recommending/**/*.py"},
-]
-exclude = [
-    "my_tools/.pytest_cache",
-    "machine_learning/recommending/notebooks",
-    "machine_learning/recommending/Python-3.11.0",
-]
 
-[tool.poetry.dependencies]
-python = ">=3.8,<3.9"
-numpy = "^1.22"
-pandas = "^1.4.0"
-scipy = "^1.7"
-torch = "^1.12.1,<1.13"
 #torch = [
 #    #{ url = "https://download.pytorch.org/whl/cu113/torch-1.12.1%2Bcu113-cp310-cp310-linux_x86_64.whl", markers = "sys_platform == 'linux'"},
 #    { version = "^1.12.0", markers = "sys_platform == 'darwin'" }
 #]
-wandb = "^0.13.3"
-pytorch-lightning = "~1.6"
-einops = "^0.4.1"
-numba = "^0.56.2"
-protobuf = "3.19.4"
-pytest = "^7.1.3"
-matplotlib = "~3.5.0"
-implicit = "^0.6.1"
-shap = "^0.41.0"
-gradio = "^3.7"
-catboost = "^1.1"
-trash-cli = "^0.22"
-transformers = "^4.16"
-line-profiler = "^4.0.2"
-scikit-learn = "^1.2.0"
-aenum = "^3.1.11"
-
-
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
