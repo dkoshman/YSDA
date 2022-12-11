@@ -28,7 +28,7 @@ class CatboostMovieLens100kFeatureRecommender(CatboostRecommenderBase):
         item_features["release date"] = pd.to_datetime(
             item_features["release date"]
         ).astype(int)
-        return dict(
+        return self.FeatureReturnValue(
             dataframe=item_features,
             cat_features=set(item_features.columns.drop(["release date"])),
         )

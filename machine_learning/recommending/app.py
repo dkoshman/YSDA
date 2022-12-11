@@ -219,12 +219,15 @@ def build_app_blocks(
     recommender: "RecommenderModuleBase",
     movie_markdown_generator: MovieMarkdownGenerator,
     media_directory: str,
+    n_recommendations_from_imdb_ratings=10,
 ) -> None:
 
     gr.Markdown("This movie recommender adapts to your preferences")
     session_state = gr.State(
         value=Session(
-            recommender=recommender, movie_markdown_generator=movie_markdown_generator
+            recommender=recommender,
+            movie_markdown_generator=movie_markdown_generator,
+            n_recommendations=n_recommendations_from_imdb_ratings,
         )
     )
 

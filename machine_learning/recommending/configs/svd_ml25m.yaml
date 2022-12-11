@@ -3,11 +3,11 @@ artifacts:
   - full_artifact_name: dkoshman/Recommending/imdb_ratings:latest
     directory: data/imdb_ratings
     match_directory_exactly: True
-  - full_artifact_name: dkoshman/Recommending/movielens25m:v2
+  - full_artifact_name: dkoshman/Recommending/movielens25m:latest
     directory: data/ml-25m
 model:
   class_name: SVDRecommender
-  n_components: 100
+  n_components: 1000
 datamodule:
   movielens:
     class_name: MovieLens25m

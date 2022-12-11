@@ -177,11 +177,7 @@ class CatboostInterface(
 
     @dataclass
     class FeatureReturnValue:
-        dataframe: pd.DataFrame = field(
-            default_factory=lambda: pd.DataFrame(
-                columns=CatboostInterface.FeatureKind.user_item.index_columns
-            )
-        )
+        dataframe: pd.DataFrame or None = None
         cat_features: "Set[str]" = field(default_factory=set)
         text_features: "Set[str]" = field(default_factory=set)
 
@@ -288,39 +284,31 @@ class CatboostInterface(
         )()
         self.cat_features[kind] |= features.cat_features
         self.text_features[kind] |= features.text_features
-        features_dataframe = self.set_index(features.dataframe, kind=kind)
-        return features_dataframe
+        if features.dataframe is not None:
+            features_dataframe = self.set_index(features.dataframe, kind=kind)
+            return features_dataframe
 
     @Timer()
     def merge_features(self, user_item_dataframe):
         """Merges dataset specific features defined in *_features methods into the given user-item dataframe."""
         for kind in self.FeatureKind:
             features_dataframe = self.cached_indexed_features_dataframe(kind=kind)
-            user_item_dataframe = user_item_dataframe.join(features_dataframe)
+            if features_dataframe is not None:
+                user_item_dataframe = user_item_dataframe.join(features_dataframe)
         return user_item_dataframe
 
     def rating_stats(self, ratings_dataframe, kind: FeatureKind) -> pd.DataFrame:
-        """Returns dataframe with kind.index_columns index and some ratings statistics in columns."""
-        if kind not in [
-            self.FeatureKind.user,
-            self.FeatureKind.item,
-        ]:
-            raise ValueError(f"Rating features are undefined for kind {kind}.")
-        kind = kind.value
-        mean_ratings = (
-            ratings_dataframe.groupby(f"{kind}_id")["rating"]
-            .mean()
-            .rename(f"mean_{kind}_ratings")
+        """Returns dataframe with kind.index_columns index or columns and some ratings statistics in columns."""
+        return pd.DataFrame(
+            columns=CatboostInterface.FeatureKind.user_item.index_columns
         )
-        n_ratings = (
-            ratings_dataframe.groupby(f"{kind}_id").size().rename(f"{kind}_n_ratings")
-        )
-        return pd.concat([mean_ratings, n_ratings], axis="columns")
 
     @functools.lru_cache()
-    def cached_rating_stats(self, kind: FeatureKind) -> pd.DataFrame or None:
+    def cached_rating_stats(self, kind: FeatureKind) -> pd.DataFrame:
         ratings_dataframe = self.ratings_user_item_dataframe(explicit=self.explicit)
-        return self.rating_stats(ratings_dataframe=ratings_dataframe, kind=kind)
+        rating_stats = self.rating_stats(ratings_dataframe=ratings_dataframe, kind=kind)
+        rating_stats = self.set_index(rating_stats, kind=kind)
+        return rating_stats
 
     def merge_rating_stats(
         self, dataframe, users_explicit=None, user_ids: np.array = None
@@ -674,6 +662,27 @@ class CatboostInterface(
 
 
 class CatboostRecommenderBase(CatboostInterface):
+    def rating_stats(
+        self, ratings_dataframe, kind: CatboostInterface.FeatureKind
+    ) -> pd.DataFrame:
+        """Returns dataframe with kind.index_columns index and some ratings statistics in columns."""
+        if kind not in [
+            self.FeatureKind.user,
+            self.FeatureKind.item,
+        ]:
+            raise ValueError(f"Rating features are undefined for kind {kind}.")
+        kind = kind.value
+        mean_ratings = (
+            ratings_dataframe.groupby(f"{kind}_id")["rating"]
+            .mean()
+            .rename(f"mean_{kind}_ratings")
+        )
+        n_ratings = (
+            ratings_dataframe.groupby(f"{kind}_id").size().rename(f"{kind}_n_ratings")
+        )
+        dataframe = pd.concat([mean_ratings, n_ratings], axis="columns")
+        return dataframe
+
     def build_recommend_user_item_dataframe(
         self, users_explicit, user_ids, n_recommendations
     ):
@@ -726,8 +735,8 @@ class CatboostAggregatorRecommender(CatboostInterface):
             counter.update([name])
         return names
 
-    def user_item_features(self):
-        return self.FeatureReturnValue(cat_features=set(self.recommender_names))
+    # def user_item_features(self):
+    #     return self.FeatureReturnValue(cat_features=set(self.recommender_names))
 
     def ranks_dataframe(self, user_ids, item_ids, ranks):
         """
