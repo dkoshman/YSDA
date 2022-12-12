@@ -60,7 +60,9 @@ class RecommenderModuleBase(RecommenderModuleInterface, ABC):
         super().__init__()
         self.n_users = n_users
         self.n_items = n_items
-        if explicit is not None:
+        if explicit is None:
+            explicit = torch.sparse_coo_tensor(size=(n_users, n_items))
+        else:
             explicit = to_torch_coo(explicit)
         self.register_buffer(
             name="explicit", tensor=explicit, persistent=persistent_explicit

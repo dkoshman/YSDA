@@ -113,23 +113,13 @@ class Session:
         self.movie_id, self.initial_markdown, self.initial_poster_url = self.content()
         self.content_task = self.content()
 
-    # def __deepcopy__(self, memo):
-    #     """
-    #     Gradio makes a copy of state block at some point, I don't know why exactly.
-    #     The problem is that you can't copy a task, and returning new instance instead
-    #     doesn't break anything, so that's what I'm going to do.
-    #     """
-    #     return Session(
-    #         recommender=self.recommender,
-    #         movie_markdown_generator=self.movie_markdown_generator,
-    #     )
-
     def content(self):
-        explicit = scipy.sparse.coo_matrix(np.nan_to_num(self.explicit).reshape(1, -1))
-        with torch.no_grad():
-            user_recommendations = self.recommender.online_recommend(
-                users_explicit=explicit, n_recommendations=self.recommender.n_items
-            )[0].numpy()
+        explicit = self.recommender.to_torch_coo(
+            scipy.sparse.coo_matrix(np.nan_to_num(self.explicit).reshape(1, -1))
+        )
+        user_recommendations = self.recommender.online_recommend(
+            users_explicit=explicit, n_recommendations=self.recommender.n_items
+        )[0].numpy()
 
         new_items_mask = np.isnan(self.explicit)
         new_items_positions = new_items_mask[user_recommendations].nonzero()[0]

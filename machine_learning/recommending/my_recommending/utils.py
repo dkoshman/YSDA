@@ -95,13 +95,13 @@ def wandb_plt_figure(title, log: bool = True, *args, **kwargs):
             wandb.log({title: wandb.Image(figure)})
 
 
-def tensor_size_in_bytes(tensor):
+def dense_tensor_size_in_bytes(tensor):
     return tensor.numel() * tensor.element_size()
 
 
 def batch_size_in_bytes(batch):
     if torch.is_tensor(batch):
-        return tensor_size_in_bytes(batch)
+        return dense_tensor_size_in_bytes(batch)
     elif isinstance(batch, dict):
         return sum(batch_size_in_bytes(i) for i in batch.values())
     return 0

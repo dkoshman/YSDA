@@ -1,0 +1,13 @@
+name: "ALS run"
+model:
+  class_name: ALSjit
+  epochs: 2
+  latent_dimension_size: 100
+  regularization_lambda: 100
+  confidence_alpha: 10
+  lambda_decay: 0.5
+lightning_module:
+  class_name: MovieLensNonGradientRecommender
+callbacks:
+  WandbCheckpointCallback:
+    artifact_name: als

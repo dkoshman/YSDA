@@ -13,11 +13,11 @@ import wandb
 
 from scipy.sparse import coo_matrix
 
-from ..utils import profile, prepare_artifact
+from my_recommending.utils import profile, prepare_artifact
 
 if TYPE_CHECKING:
     from my_tools.utils import SparseTensor
-    from .lit import LitRecommenderBase
+    from my_recommending.movielens.lit import LitRecommenderBase
 
 
 def csv_imdb_ratings_to_dataframe(

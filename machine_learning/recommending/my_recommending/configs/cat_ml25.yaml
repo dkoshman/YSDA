@@ -1,0 +1,36 @@
+name: "Catboost aggregator 25m"
+artifacts:
+  - full_artifact_name: dkoshman/Recommending/imdb_ratings:latest
+    directory: data/imdb_ratings
+    match_directory_exactly: True
+  - full_artifact_name: dkoshman/Recommending/movielens25m:latest
+    directory: data/ml-25m
+datamodule:
+  movielens:
+    class_name: MovieLens25m
+    directory: data/ml-25m
+  train_explicit_file: ratings_val.csv
+  val_explicit_file:
+  test_explicit_file: #ratings_test.csv
+model:
+  class_name: CatboostMovieLens25mFeatureAggregatorFromArtifacts
+  recommender_artifacts: [svd_movielens_25m:v13, my_mf_slim_movielens_25m:v8]
+  lit_modules: [MovieLensNonGradientRecommender, MovieLensMFRecommender]
+  movielens_directory: data/ml-25m
+  cb_gpu_fit_n_users_per_batch: 1000
+  use_text_features: false
+  use_user_ids_as_features: false
+  persistent_explicit: true
+  cb_params:
+    task_type: GPU
+# It's easier to control what gpus the model trains on via CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=4
+# as devices=[4] can fail unexpectedly because of catboost cuda library gpus reordering.
+lightning_module:
+  class_name: MovieLensNonGradientRecommender
+trainer:
+  num_sanity_val_steps: 0
+callbacks:
+#  CatBoostMetrics: {} # Too slow as of now
+  WandbCheckpointCallback:
+    artifact_name: catboost_aggregator_25m
+
