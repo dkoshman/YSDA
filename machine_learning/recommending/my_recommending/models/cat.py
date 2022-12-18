@@ -247,6 +247,13 @@ class CatboostInterface(
         self.model.load_model("tmp")
         self._shap_explainer = pickle.loads(bytes_dict["shap_explainer_bytes"])
 
+    @Timer()
+    def setup_cache(self):
+        for kind in self.FeatureKind:
+            self.cached_indexed_features_dataframe(kind=kind)
+            if kind != self.FeatureKind.user_item:
+                self.cached_rating_stats(kind=kind)
+
     def user_features(self) -> FeatureReturnValue:
         """
         Returns FeatureReturnValue with these kwargs:
@@ -728,9 +735,6 @@ class CatboostAggregatorRecommender(CatboostInterface):
             names.append(f"{name}_{counter[name]}")
             counter.update([name])
         return names
-
-    # def user_item_features(self):
-    #     return self.FeatureReturnValue(cat_features=set(self.recommender_names))
 
     def ranks_dataframe(self, user_ids, item_ids, ranks):
         """

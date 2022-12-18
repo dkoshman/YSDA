@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "my_recommending"
-version = "0.1.18"
+version = "0.1.22"
 description = ""
 authors = ["DimaKoshman <koshmandk@yandex.ru>"]
 readme = "README.md"

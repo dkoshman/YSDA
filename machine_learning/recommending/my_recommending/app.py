@@ -13,7 +13,7 @@ import torch
 import wandb
 
 from .movielens.data import csv_imdb_ratings_to_dataframe
-from .utils import Timer
+from .utils import Timer, profile
 
 if TYPE_CHECKING:
     from .interface import RecommenderModuleBase
@@ -38,9 +38,16 @@ def load_model(torch_nn_module, state_dict_path):
 
 
 class MovieMarkdownGenerator:
-    def __init__(self, movielens, tmdb_api_token):
+    def __init__(
+        self,
+        movielens,
+        tmdb_api_token,
+        placeholder_image_url="https://upload.wikimedia.org/"
+        "wikipedia/commons/thumb/3/3f/Placeholder_view_vector.svg/681px-Placeholder_view_vector.svg.png",
+    ):
         self.movielens = movielens
         self.tmdb_api_token = tmdb_api_token
+        self.placeholder_image_url = placeholder_image_url
 
     @staticmethod
     def imdb_url(imdb_id):
@@ -82,12 +89,14 @@ class MovieMarkdownGenerator:
                 )
             )
             markdown = self.movielens["movies"].loc[movielens_id]["movie title"]
-            return markdown, ""
+            return markdown, self.placeholder_image_url
 
         movie_results = request.json()["movie_results"][0]
-        poster_url = self.poster_url_from_tmdb_poster_path(
-            poster_path=movie_results["poster_path"]
-        )
+        poster_path = movie_results["poster_path"]
+        if poster_path is not None:
+            poster_url = self.poster_url_from_tmdb_poster_path(poster_path=poster_path)
+        else:
+            poster_url = self.placeholder_image_url
         title = movie_results["title"]
         imdb_url = self.imdb_url(imdb_id=imdb_id)
         markdown = f"""[{title}]({imdb_url})"""
@@ -113,6 +122,7 @@ class Session:
         self.movie_id, self.initial_markdown, self.initial_poster_url = self.content()
         self.content_task = self.content()
 
+    @Timer()
     def content(self):
         explicit = self.recommender.to_torch_coo(
             scipy.sparse.coo_matrix(np.nan_to_num(self.explicit).reshape(1, -1))
@@ -135,6 +145,7 @@ class Session:
     async def async_content(self):
         return self.content()
 
+    @Timer()
     def save_rating(self, rating, movie_id):
         if self.explicit[movie_id] != 0:
             raise ValueError(
@@ -169,6 +180,7 @@ class Session:
         self.content_task = asyncio.create_task(self.async_content())
         return markdown, poster_url
 
+    @profile()
     def upload(self, file_object: TextIO) -> str:
         """Function for file block upload method."""
         filename = file_object.name
@@ -181,10 +193,9 @@ class Session:
             wandb.log(dict(upload_error=str(e)))
             return f"Couldn't read imdb ratings file: \n{str(e)}"
 
-        with torch.no_grad():
-            recommendations = self.recommender.online_recommend(
-                explicit, n_recommendations=self.n_recommendations
-            )
+        recommendations = self.recommender.online_recommend(
+            explicit, n_recommendations=self.n_recommendations
+        )
 
         markdown = ""
         for i, item_id in enumerate(recommendations[0].numpy(), start=1):
@@ -205,6 +216,7 @@ def gradio_relative_html_path(relative_path):
     return os.path.join("file", relative_path)
 
 
+@profile()
 def build_app_blocks(
     recommender: "RecommenderModuleBase",
     movie_markdown_generator: MovieMarkdownGenerator,
