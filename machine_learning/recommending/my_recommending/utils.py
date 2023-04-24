@@ -19,7 +19,6 @@ import torch
 import wandb
 import yaml
 from matplotlib import pyplot as plt
-
 from torch.utils.data import random_split
 
 
@@ -42,7 +41,7 @@ def split_dataset(dataset, fraction):
 
 
 def fetch_artifact(
-    *, entity=None, project=None, artifact_name, alias="latest", api_key=None
+        *, entity=None, project=None, artifact_name, alias="latest", api_key=None
 ):
     wandb_api = wandb.Api(api_key=api_key)
     entity = entity or wandb.run.entity
@@ -167,7 +166,7 @@ class Logger(metaclass=Singleton):
             )
 
     def log_profiled_function(
-        self, profiler: line_profiler.LineProfiler, function: FunctionType
+            self, profiler: line_profiler.LineProfiler, function: FunctionType
     ) -> None:
         raise NotImplementedError
 
@@ -184,7 +183,7 @@ class FileLogger(Logger):
         print(f"{timer.get_name()}:\t{timer.delta}", file=self.file)
 
     def log_profiled_function(
-        self, profiler: line_profiler.LineProfiler, function: FunctionType
+            self, profiler: line_profiler.LineProfiler, function: FunctionType
     ):
         profiler.print_stats(stream=self.file)
 
@@ -207,7 +206,7 @@ class WandbLogger(Logger):
         self.log({time_name: timer.delta, total_time_name: self.total_times[name]})
 
     def log_profiled_function(
-        self, profiler: line_profiler.LineProfiler, function: FunctionType
+            self, profiler: line_profiler.LineProfiler, function: FunctionType
     ):
         stream = io.StringIO()
         profiler.print_stats(stream=stream)
@@ -279,10 +278,10 @@ class Timer(DecoratorInterface):
         return self
 
     def __exit__(
-        self,
-        exc_type: "Type[BaseException]" or None = None,
-        exc_val: BaseException or None = None,
-        exc_tb: TracebackType or None = None,
+            self,
+            exc_type: "Type[BaseException]" or None = None,
+            exc_val: BaseException or None = None,
+            exc_tb: TracebackType or None = None,
     ):
         self.on_exit()
 
@@ -357,7 +356,7 @@ class MethodsDecoratorClassDecorator:
 
     @staticmethod
     def is_unbound_method_defined_in_class(
-        unbound_method: FunctionType, cls: type
+            unbound_method: FunctionType, cls: type
     ) -> bool:
         return unbound_method.__qualname__.startswith(cls.__name__ + ".")
 
@@ -367,11 +366,11 @@ class MethodsDecoratorClassDecorator:
                 continue
             value = getattr(cls, key)
             if (
-                self.is_function(obj=value)
-                and self.is_functions_first_parameter_self(function=value)
-                and self.is_unbound_method_defined_in_class(
-                    unbound_method=value, cls=cls
-                )
+                    self.is_function(obj=value)
+                    and self.is_functions_first_parameter_self(function=value)
+                    and self.is_unbound_method_defined_in_class(
+                unbound_method=value, cls=cls
+            )
             ):
                 setattr(cls, key, self.decorator(value))
         return cls
@@ -399,11 +398,11 @@ def prepare_artifacts_from_config(config: dict) -> None:
 
 
 def prepare_artifact(
-    full_artifact_name: str,
-    directory: str,
-    artifact_type: str = None,
-    update_with_local_directory: bool = False,
-    match_directory_exactly: bool = False,
+        full_artifact_name: str,
+        directory: str,
+        artifact_type: str = None,
+        update_with_local_directory: bool = False,
+        match_directory_exactly: bool = False,
 ) -> wandb.Artifact:
     """
     :param full_artifact_name: artifact name in format entity/project/artifact_name:alias
@@ -418,15 +417,15 @@ def prepare_artifact(
     if directory == ".":
         raise ValueError("Using cwd as artifact directory is bad practice.")
     if update_with_local_directory and (
-        not os.path.exists(directory) or not os.listdir(directory)
+            not os.path.exists(directory) or not os.listdir(directory)
     ):
         raise ValueError(
             f"Passing update_with_local_directory=True requires that directory {directory} exists and is not empty."
         )
     artifact_dict = split_full_artifact_name(full_artifact_name)
     if update_with_local_directory and (
-        wandb.run.entity != artifact_dict["entity"]
-        or wandb.run.project != artifact_dict["project"]
+            wandb.run.entity != artifact_dict["entity"]
+            or wandb.run.project != artifact_dict["project"]
     ):
         raise ValueError(
             "Cannot update artifact with entity or project different from current ones."
@@ -456,7 +455,7 @@ def prepare_artifact(
 
 def construct_decorator(pass_function_args: bool = False):
     """
-    A helper decorator to convert generator with contextlib.contextmanager like
+    A helper decorator to convert generator with contextlib.contextmanager-like
     protocol to a decorator.
 
     :param pass_function_args: whether to pass function_args
@@ -580,7 +579,7 @@ def switchable_cache(*args, **kwargs):
 
 
 def filter_mro_by_classes_which_defined_function(
-    cls: type, function_name: str
+        cls: type, function_name: str
 ) -> "Generator[type, None, None]":
     for subclass in cls.mro():
         if not hasattr(subclass, function_name):
@@ -593,11 +592,11 @@ def filter_mro_by_classes_which_defined_function(
 
 
 def clipped_tensor_string_representation(
-    tensor: torch.Tensor, max_size: int = 50
+        tensor: torch.Tensor, max_size: int = 50
 ) -> str:
     """Returns string representation of a tensor, clipped to max_size."""
     string = str(tensor)
     if len(string) >= max_size:
-        string = string[: max_size // 2] + " ... " + string[-max_size // 2 :]
+        string = string[: max_size // 2] + " ... " + string[-max_size // 2:]
     string = re.sub(r"\s+", " ", string)
     return string
