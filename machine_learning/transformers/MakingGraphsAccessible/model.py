@@ -28,12 +28,8 @@ class Model:
 
 
 def add_unknown_tokens_to_tokenizer(
-        tokenizer, encoder_decoder, unknown_tokens: list[str]
+    tokenizer, encoder_decoder, unknown_tokens: list[str]
 ):
-    assert set(unknown_tokens) == set(unknown_tokens) - set(
-        tokenizer.vocab.keys()
-    ), "Tokens are not unknown."
-
     tokenizer.add_tokens(unknown_tokens)
     encoder_decoder.decoder.resize_token_embeddings(len(tokenizer))
 
@@ -55,7 +51,7 @@ def find_unknown_tokens_for_tokenizer(tokenizer) -> collections.Counter:
 
 
 def replace_pad_token_id_with_negative_hundred_for_hf_transformers_automatic_batch_transformation(
-        tokenizer, token_ids
+    tokenizer, token_ids
 ):
     token_ids[token_ids == tokenizer.pad_token_id] = -100
     return token_ids
@@ -113,16 +109,12 @@ def build_model(config: types.SimpleNamespace or object) -> Model:
         config.pretrained_model_name, config=encoder_decoder_config
     )
     encoder_decoder_config.pad_token_id = tokenizer.pad_token_id
-    encoder_decoder_config.decoder_start_token_id = (
-        tokenizer.convert_tokens_to_ids(
-            get_extra_tokens().benetech_prompt
-        )
+    encoder_decoder_config.decoder_start_token_id = tokenizer.convert_tokens_to_ids(
+        get_extra_tokens().benetech_prompt
     )
     encoder_decoder_config.bos_token_id = encoder_decoder_config.decoder_start_token_id
-    encoder_decoder_config.eos_token_id = (
-        tokenizer.convert_tokens_to_ids(
-            get_extra_tokens().benetech_prompt_end
-        )
+    encoder_decoder_config.eos_token_id = tokenizer.convert_tokens_to_ids(
+        get_extra_tokens().benetech_prompt_end
     )
 
     extra_tokens = list(get_extra_tokens().__dict__.values())
@@ -150,7 +142,7 @@ def build_model(config: types.SimpleNamespace or object) -> Model:
 
 
 def generate_token_strings(
-        model: Model, images: torch.Tensor, skip_special_tokens=True
+    model: Model, images: torch.Tensor, skip_special_tokens=True
 ) -> list[str]:
     decoder_output = model.encoder_decoder.generate(
         images,
@@ -165,7 +157,7 @@ def generate_token_strings(
     )
 
 
-def predict_string(model: Model, image):
+def predict_string(image, model: Model):
     image = model.processor(
         image, random_padding=False, return_tensors="pt"
     ).pixel_values
@@ -190,9 +182,7 @@ class LightningModule(pl.LightningModule):
         self.log("val_loss", loss)
 
     def compute_loss(self, batch: Batch) -> torch.Tensor:
-        outputs = self.encoder_decoder(
-            pixel_values=batch.images, labels=batch.labels
-        )
+        outputs = self.encoder_decoder(pixel_values=batch.images, labels=batch.labels)
         loss = outputs.loss
         return loss
 

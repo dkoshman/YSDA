@@ -151,12 +151,8 @@ class Axes:
     y_axis: Axis
 
     def __post_init__(self):
-        self.x_axis = Axis(
-            **convert_dashes_to_underscores_in_key_names(self.x_axis)
-        )
-        self.y_axis = Axis(
-            **convert_dashes_to_underscores_in_key_names(self.y_axis)
-        )
+        self.x_axis = Axis(**convert_dashes_to_underscores_in_key_names(self.x_axis))
+        self.y_axis = Axis(**convert_dashes_to_underscores_in_key_names(self.y_axis))
 
 
 def preprocess_numerical_value(value):
@@ -348,7 +344,7 @@ def convert_axis_data_to_string(
 def convert_string_to_axis_data(string, values_type: ValuesType):
     data = string.split(get_extra_tokens().value_separator)
     if values_type == ValuesType.numerical:
-        data = [float(i) for i in data]
+        data = [float(i.replace(" ", "")) for i in data]
     return data
 
 

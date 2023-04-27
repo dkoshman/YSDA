@@ -1,0 +1,162 @@
+\documentclass{article}
+
+\usepackage{cmap}  % should be before fontenc
+\usepackage[T2A]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[russian]{babel}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage[pdftex,colorlinks=true,linkcolor=blue,urlcolor=red,unicode=true,hyperfootnotes=false,bookmarksnumbered]{hyperref}
+\usepackage{indentfirst}
+
+% так можно определять команду для повторяющихся обозначений,
+% чтобы не набирать каждый раз заново
+\newcommand{\E}{\ensuremath{\mathsf{E}}}  % матожидание
+\newcommand{\D}{\ensuremath{\mathsf{D}}}  % дисперсия
+\newcommand{\Prb}{\ensuremath{\mathsf{P}}}  % вероятностная мера
+
+\newcommand{\eps}{\varepsilon}  % нормальная буква эпсилон
+\renewcommand{\phi}{\varphi}  % нормальная буква фи
+
+\renewcommand{\le}{\leqslant}  % нормальный знак <=
+\renewcommand{\leq}{\leqslant}  % нормальный знак <=
+\renewcommand{\ge}{\geqslant}  % нормальный знак >=
+\renewcommand{\geq}{\geqslant}  % нормальный знак >=
+
+\newtheorem{lemma}{Лемма}  % создаёт команд для лемм, можно сделать так же для любого другого вида утверждений
+
+\pagestyle{myheadings}
+\markright{Дмитрий Кошман\hfill}  % <- здесь нужно подставить свои имя и фамилию
+
+\begin{document}
+
+\section{Задача 1-1}
+
+Без ограничения общности будем считать, что нужно упорядочить ключи по неубыванию. Покажем, что $g(n) = n-1$.
+
+Оценка снизу:
+
+Для $n=1$ это очевидно. Иначе предположим, что в корректном дереве есть достижимый лист на глубине меньше $n-1$. Представим ключи в виде вершин, а сравнения - в виде ребер между вершинами. Поскольку $n\ge2$, а ребер меньше $n-1$, найдутся две несвязные компоненты, которые могут быть как строго меньше, так и больше друг друга. Получается, что перестановка, которая находится в листе, может как расположить больший элемент после меньшего, так и наоборот. Это противоречит с тем, что дерево корректное и что сортировка идет по неубыванию.
+
+Оценка сверху:
+
+Построим дерево, которое делает $n-1$ сравнение между каждыми рядом стоящими ключами. Если ключи уже отсортированы, возвращаем тривиальную перестановку. Если же в какой-то момент узнаем, что это не так, реализуем сортировку слиянием с нуля.
+
+\section{Задача 1-2}
+
+Поскольку число листьев должно быть не меньше количество исходов, которых $C_{m+n}^n$, то высота дерева не меньше $\log{C_{m+n}^n}$.
+
+\begin{align*}
+h &\ge \log{C_{m+n}^n} = \log(m+n)! - \log m! - \log n!  \\
+&\ge C_0 + \frac{\log(m+n)}{2}+ (m+n)\log(m+n) - \frac{\log m}{2} - m\log m
+- \frac{\log n}{2} - n\log n \\
+&\ge C_0 + (m+n)\log(m+n) - (m+n)\log m - \frac{\log n}{2} + n\log m - n\log n\\
+&\ge C_0 + (m+n)\log(1+\frac{n}{m}) - \frac{n}{2} + n\log \frac{m}{n}  \\
+&\ge C_0 + m\left(\frac{n}{m} - \frac{1}{2}\left(\frac{n}{m}\right)^2 \right)- \frac{n}{2} + n\log \frac{m}{n}  \\
+&\ge C_0 + n\left(1 - \frac{n}{2m}\right)- \frac{n}{2} + n\log \frac{m}{n}  \\
+&\ge C_0 + n\left(1 - \frac{1}{4}\right)- \frac{n}{2} + n\log \frac{m}{n}  \\
+&\ge C_0 + n\log \frac{m}{n}  \\
+\end{align*}
+
+Получаем нижнюю оценку на количество сравнений $\Omega(n\log \frac{m}{n})$
+
+\section{Задача 1-3}
+
+1. Докажем от противного. То есть предположим, что $$
+\forall I, A: \E_I[f_A(I)] > \E_A[f_A(I)]$$
+
+Но тогда 
+$$\forall I: \E_A\E_I[f_A(I)] > \E_A[f_A(I)]$$
+
+$$\E_A\E_I[f_A(I)] > \E_I\E_A[f_A(I)]$$
+$$\E_I\E_A[f_A(I)] > \E_I\E_A[f_A(I)]$$
+
+Противоречие.
+
+Иначе это неравенство можно сформулировать так: найдется алгоритм со сложностью в среднем меньшей, чем рандомизированная сложность.
+\paragraph{}
+2. Определим рандомизированный алгоритм сортировки в модели решающих деревьев как алгоритм, который в каждой вершине задает вопрос $x < y?$, где пара $(x,y)$ выбирается случайно из множества пар, таких, что вопрос про них принесет положительное количество бит информации. Если таких пар нет, то мы в листе.
+
+Основываясь на доказанном неравенстве, где множество $A$ - алгоритмы, удовлетворяющие данному определению, а распределение на множестве входов равномерное, получаем оценку на сложность рандомизированного алгоритма. А поскольку для детерминированного алгоритма $A$ нам известна оценка 
+
+$$\E_I[f_A(I)] = \Omega(|I| \log |I|) = \Omega(n\log n) $$
+
+\section{Задача 1-4}
+
+Пусть стек должен поддерживать следующее соотношение:
+
+$$ \frac{capacity}{a} \le size \le capacity $$
+
+Тогда при заполнении массива мы выделяем новый массив размера 
+$\sqrt{a}\cdot capacity$, а при опустошении до $\frac{capacity}{a}$, выделяем массив размера $\frac{capacity}{\sqrt{a}}$ и перезаписываем $size$ элементов.
+
+Покажем с помощью функции потенциала, что амортизированные стоимости вставки и удаления будут константными. Пусть функция потенциала имеет вид 
+\begin{equation*}
+\phi (size, capacity) = \begin{cases} 
+      \left(\frac{\sqrt{a}}{\sqrt{a} - 1}\right)\left(size - \frac{capacity}{\sqrt{a}}\right) & size \ge \frac{capacity}{\sqrt{a}} \\
+      \left(\frac{1}{\sqrt{a} - 1}\right)\left( \frac{capacity}{\sqrt{a}} - size\right) & size < \frac{capacity}{\sqrt{a}}
+   \end{cases}
+\end{equation*}
+
+
+Неамортизированные стоимости:
+\begin{equation*}
+time(push) = \begin{cases} 
+      1 & size < capacity \\
+      1 + size & size = capacity 
+   \end{cases}
+\end{equation*}
+
+\begin{equation*}
+time(pop) = \begin{cases} 
+      1 & size > \frac{capacity}{a} \\
+      1 + size & size = \frac{capacity}{a} 
+   \end{cases}
+\end{equation*}
+
+Амортизированные стоимости:
+
+\begin{equation*}
+time'(push) =
+\end{equation*}
+\begin{equation*}
+=\begin{cases} 
+      1 + \phi (size + 1, capacity) - \phi (size, capacity)& size < capacity \\
+      1 + size +\phi (size + 1, \sqrt{a}\cdot capacity) - \phi (size, capacity)&  size = capacity 
+   \end{cases}
+\end{equation*}
+\begin{equation*}
+ =\begin{cases} 
+      O(1) & size < capacity \\
+      O(1) + size - \left(\frac{\sqrt{a}}{\sqrt{a} - 1}\right) \left(capacity-\frac{capacity}{\sqrt{a}}\right)&  size = capacity 
+   \end{cases}
+  \end{equation*}
+$$=O(1)$$
+
+\begin{equation*}
+time'(pop) =
+\end{equation*}
+\begin{equation*}
+=\begin{cases} 
+      1 + \phi (size - 1, capacity) - \phi (size, capacity)& size > \frac{capacity}{a} \\
+      1 + size + \phi (size - 1, \frac{capacity}{\sqrt{a}} ) - \phi (size, capacity)& size = \frac{capacity}{a} 
+   \end{cases}
+\end{equation*}
+\begin{equation*}
+ =\begin{cases} 
+      O(1) & size > \frac{capacity}{a} \\
+      O(1) + size + \left(\frac{1}{\sqrt{a} - 1}\right) \left( \frac{capacity}{a} - \frac{capacity}{\sqrt{a}}\right)&  size = \frac{capacity}{a}
+   \end{cases}
+  \end{equation*}
+$$=O(1)$$
+
+\section{Задача 1-5}
+
+Реализуем очередь на массиве, зацикливая указатели на начало. Дальше все аналогично предыдущей задаче.
+
+\section{Задача 1-6}
+
+Пусть инструкция вставки в конец стоит 1 монету. Тогда будем просить за амортизированную операцию вставки 3 монеты.
+
+Пока вектор не заполнится наполовину, будем тратить 1 монету на вставку, остальные выкидывать. Когда достигнем середины, аллоцируем вектор вдвое больший, и будем тратить 1 монету на вставку в изначальный вектор и 2 на копирование в новый. Когда изначальный вектор заполнится, мы перезапишем указатели, деаллоцируем память и будем иметь наполовину заполненный вектор - ситуация, инвариантная начальной.  
+
+\end{document}
