@@ -3,11 +3,7 @@ import pandas as pd
 from matplotlib import pyplot as plt
 
 from config import CONFIG
-from machine_learning.transformers.MakingGraphsAccessible.data import (
-    get_extra_tokens,
-    BenetechOutput,
-    ChartType,
-)
+from data import get_extra_tokens, BenetechOutput, ChartType
 from model import predict_string, build_model
 
 
@@ -38,19 +34,18 @@ def gradio_visualize_prediction(string):
     ...
 
 
-def main():
-    config = CONFIG
-    config.pretrained_model_name = "checkpoint"
-    model = build_model(config)
+config = CONFIG
+config.pretrained_model_name = "checkpoint"
+model = build_model(config)
 
-    interface = gradio.Interface(
-        title="Making graphs accessible",
-        description="Generate textual representation of a graph\n"
-                    "https://www.kaggle.com/competitions/benetech-making-graphs-accessible",
-        fn=lambda image: predict_string(image, model),
-        inputs="image",
-        outputs="text",
-        examples="examples",
-    )
+interface = gradio.Interface(
+    title="Making graphs accessible",
+    description="Generate textual representation of a graph\n"
+    "https://www.kaggle.com/competitions/benetech-making-graphs-accessible",
+    fn=lambda image: predict_string(image, model),
+    inputs="image",
+    outputs="text",
+    examples="examples",
+)
 
-    interface.launch()
+interface.launch()

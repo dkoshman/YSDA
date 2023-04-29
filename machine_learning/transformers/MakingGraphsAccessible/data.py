@@ -229,7 +229,7 @@ class AnnotatedImage:
 
 def generate_annotated_images():
     for image_id in tqdm.autonotebook.tqdm(
-            load_train_image_ids(), "Iterating over annotated images"
+        load_train_image_ids(), "Iterating over annotated images"
     ):
         yield AnnotatedImage.from_image_id(image_id)
 
@@ -331,7 +331,7 @@ def convert_number_to_scientific_string(value: int or float) -> str:
 
 
 def convert_axis_data_to_string(
-        axis_data: list[str or float], values_type: ValuesType
+    axis_data: list[str or float], values_type: ValuesType
 ) -> str:
     formatted_axis_data = []
     for value in axis_data:
