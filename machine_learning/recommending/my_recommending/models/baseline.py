@@ -7,9 +7,8 @@ import numpy as np
 import torch
 import wandb
 from matplotlib import pyplot as plt
-from sklearn.decomposition import TruncatedSVD
-
 from my_tools.utils import build_class
+from sklearn.decomposition import TruncatedSVD
 
 from ..interface import (
     RecommenderModuleBase,
