@@ -39,11 +39,11 @@ def load_model(torch_nn_module, state_dict_path):
 
 class MovieMarkdownGenerator:
     def __init__(
-            self,
-            movielens,
-            tmdb_api_token,
-            placeholder_image_url="https://upload.wikimedia.org/"
-                                  "wikipedia/commons/thumb/3/3f/Placeholder_view_vector.svg/681px-Placeholder_view_vector.svg.png",
+        self,
+        movielens,
+        tmdb_api_token,
+        placeholder_image_url="https://upload.wikimedia.org/"
+        "wikipedia/commons/thumb/3/3f/Placeholder_view_vector.svg/681px-Placeholder_view_vector.svg.png",
     ):
         self.movielens = movielens
         self.tmdb_api_token = tmdb_api_token
@@ -105,10 +105,10 @@ class MovieMarkdownGenerator:
 
 class Session:
     def __init__(
-            self,
-            recommender: "RecommenderModuleBase",
-            movie_markdown_generator: MovieMarkdownGenerator,
-            n_recommendations=10,
+        self,
+        recommender: "RecommenderModuleBase",
+        movie_markdown_generator: MovieMarkdownGenerator,
+        n_recommendations=10,
     ):
         self.recommender = recommender
         self.movie_markdown_generator = movie_markdown_generator
@@ -218,10 +218,10 @@ def gradio_relative_html_path(relative_path):
 
 @profile()
 def build_app_blocks(
-        recommender: "RecommenderModuleBase",
-        movie_markdown_generator: MovieMarkdownGenerator,
-        media_directory: str,
-        n_recommendations_from_imdb_ratings=10,
+    recommender: "RecommenderModuleBase",
+    movie_markdown_generator: MovieMarkdownGenerator,
+    media_directory: str,
+    n_recommendations_from_imdb_ratings=10,
 ) -> None:
     gr.Markdown("This movie recommender adapts to your preferences")
     session_state = gr.State(
@@ -264,6 +264,7 @@ def build_app_blocks(
                         build_button(rated_feedback)
 
     with gr.Tab("Upload IMDb ratings"):
+
         def image_html(filename, width=400):
             path = gradio_relative_html_path(os.path.join(media_directory, filename))
             return f"""<img src="{path}" width="{width}">"""

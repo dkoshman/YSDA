@@ -129,7 +129,8 @@ class ALS(
 
     def analytic_optimum_dispatcher(self, X, Y, sparse_iterator, fixed):
         """This implementation and the next helper method are left here mainly for
-        completeness's sake, for more efficient and less convoluted implementation see ALSJIT."""
+        completeness's sake, for more efficient and less convoluted implementation see ALSJIT.
+        """
         lambda_I = self.regularization_lambda * np.eye(Y.shape[1])
         YtY_plus_lambdaI = Y.T @ Y + lambda_I
 

@@ -15,7 +15,7 @@ class RegularizationGradientHook:
 
 
 def register_regularization_hook(tensor, l2_coefficient, l1_coefficient=0.0):
-    """Adds weight decay gradient hook to tensor in place"""
+    """Adds weight decay gradient hook to tensor in place."""
     if tensor.requires_grad and torch.is_grad_enabled():
         hook = RegularizationGradientHook(
             tensor=tensor, l2_coefficient=l2_coefficient, l1_coefficient=l1_coefficient

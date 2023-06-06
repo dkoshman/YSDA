@@ -6,6 +6,7 @@ def get_local_ace_url(
 ) -> str:
     """
     To watch ace streams:
+
         1. Start docker daemon in terminal or just open desktop docker app.
         2. Pull docker image:
             docker pull ikatson/aceproxy:latest
@@ -16,7 +17,7 @@ def get_local_ace_url(
         6. Go to VLC player -> Open Network -> enter url -> watch.
 
     Example url:
-        http://127.0.0.1:8000/pid/b28db77c5084da7993395d77df96c30bb134f0a9/stream.mp4
+    http://127.0.0.1:8000/pid/b28db77c5084da7993395d77df96c30bb134f0a9/stream.mp4
     """
     match = re.fullmatch(pattern=r"acestream://(?P<stream_id>.+)", string=ace_url)
     stream_id = match.group("stream_id")

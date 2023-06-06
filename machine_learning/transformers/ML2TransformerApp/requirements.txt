@@ -1,8 +1,0 @@
-einops
-pytorch_lightning
-streamlit
-tokenizers
-torch
-torchvision
-transformers
-tqdm

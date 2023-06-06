@@ -69,6 +69,7 @@ class WandbSweepProcessor:
     def _insert_wandb_sweep_specific_keys(self, config, depth):
         """
         Inserts "parameters" and "values" keys to conform with sweep configuration.
+
         https://docs.wandb.ai/guides/sweeps/configuration
         This function will ignore dicts in parameter values as it assumes that dicts
         are already conforming with configuration.
@@ -118,17 +119,18 @@ class WandbSweepProcessor:
 
 class ConfigDispenser(WandbSweepProcessor):
     """
-    If config_path doesn't correspond to a sweep, then
+    If config_path doesn't correspond to a sweep, then.
+
     this class is basically just an identity callable.
     Otherwise, it attains the sweep_id, launches a
     wandb agent and passes it the provided function.
     """
 
     def __init__(
-        self,
-        config_path: str or None = None,
-        runs_count: int = 1,
-        **extra_config_kwargs,
+            self,
+            config_path: str or None = None,
+            runs_count: int = 1,
+            **extra_config_kwargs,
     ):
         self.config_path = config_path
         self.runs_count = runs_count
