@@ -127,10 +127,10 @@ class ConfigDispenser(WandbSweepProcessor):
     """
 
     def __init__(
-            self,
-            config_path: str or None = None,
-            runs_count: int = 1,
-            **extra_config_kwargs,
+        self,
+        config_path: str or None = None,
+        runs_count: int = 1,
+        **extra_config_kwargs,
     ):
         self.config_path = config_path
         self.runs_count = runs_count
