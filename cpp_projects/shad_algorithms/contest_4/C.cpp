@@ -184,15 +184,12 @@ struct CorrespondingOrderIntervalsWithChildren : public CorrespondingOrderInterv
 
     [[nodiscard]] std::pair<CorrespondingOrderIntervals, CorrespondingOrderIntervals>
     SplitIntoCorrespondChildIntervals() const {
-
         CorrespondingOrderIntervals left{GetLeftSubtreeSize(), GetPreorderLeftSubtreeBegin(),
                                          GetInorderLeftSubtreeBegin(),
                                          GetPostorderLeftSubtreeBegin()};
-
         CorrespondingOrderIntervals right{GetRightSubtreeSize(), GetPreorderRightSubtreeBegin(),
                                           GetInorderRightSubtreeBegin(),
                                           GetPostorderRightSubtreeBegin()};
-
         return {left, right};
     }
 };

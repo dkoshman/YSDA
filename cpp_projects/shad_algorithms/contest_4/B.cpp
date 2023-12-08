@@ -77,6 +77,7 @@ public:
         throw std::invalid_argument("Unknown direction.");
     }
 };
+
 std::istream &operator>>(std::istream &in, Point &point) {
     in >> point.xx >> point.yy;
     return in;
@@ -86,7 +87,7 @@ enum class ExternalRelativePositionOf2RectanglesInClockwiseOrder {
     left_and_not_up,
     up_and_not_right,
     right_and_not_down,
-    down_and_not_left
+    down_and_not_left,
 };
 
 enum class NonExternalRelativePositionOf2Rectangles {

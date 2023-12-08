@@ -21,14 +21,11 @@ size_t PositiveMod(T value, T divisor) {
         throw std::invalid_argument("Divisor should be positive");
     }
     auto mod = value % divisor;
-    if (mod < 0) {
-        mod += divisor;
-    }
-    return mod;
+    return mod < 0 ? mod + divisor : mod;
 }
 
 template <class T>
-size_t Pow2(T value) {
+T Pow2(T value) {
     return value * value;
 }
 

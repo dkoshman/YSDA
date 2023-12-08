@@ -96,14 +96,10 @@ public:
     }
 
     std::vector<int32_t> Compute() {
-
         for (int32_t prefix = 0; prefix < static_cast<int32_t>(string.size()); ++prefix) {
-
             auto border = FindLargestBorderFollowedBySameLetterAsPrefix(prefix);
-
             prefix_function[prefix] = border ? 1 + border.value() : 0;
         }
-
         return prefix_function;
     }
 
@@ -119,13 +115,11 @@ private:
         while (border and GetLetterAfterPrefix(border.value()) != letter_after_prefix) {
             border = GetLargestNonDegenerateBorderSizeForPrefix(border.value());
         }
-
         return border;
     }
 
     [[nodiscard]] std::optional<int32_t> GetLargestNonDegenerateBorderSizeForPrefix(
         int32_t prefix_size) const {
-
         return prefix_size >= 1 ? std::optional<int32_t>(prefix_function[prefix_size - 1])
                                 : std::nullopt;
     }

@@ -13,3 +13,4 @@ set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-g -fsanitize=address,undefined,leak -fno-sa
 
 add_executable(main main.cpp)
 add_executable(main_short main_short.cpp)
+add_executable(review review.cpp)

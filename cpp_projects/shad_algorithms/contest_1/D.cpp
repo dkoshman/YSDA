@@ -42,7 +42,6 @@ public:
     }
 
     bool operator!=(const OutputType &other) const {
-
         return smallest_covering_circle_radius + 0.001 < other.smallest_covering_circle_radius or
                other.smallest_covering_circle_radius < smallest_covering_circle_radius - 0.001;
     };
