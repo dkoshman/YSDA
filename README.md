@@ -8,5 +8,5 @@ To set up python environment:
 4. pip install -r YSDA/python3.11/requirements
 5. jupyter notebook --no-browser --ip 0.0.0.0 --port 6172
 6. on local machine:
-    ssh -N -f -L localhost:6172:localhost:6172 koshmandm@193.106.92.23
+    ssh -N -f -L localhost:6172:localhost:6172 <user@host>
 7. go to localhost:6172 in your browser
