@@ -2,7 +2,7 @@ import re
 
 
 def get_local_ace_url(
-    ace_url: str, docker_port=8000, server_ip: str = "127.0.0.1"
+        ace_url: str, docker_port: int = 8000, server_ip: str = "127.0.0.1"
 ) -> str:
     """
     To watch ace streams:
