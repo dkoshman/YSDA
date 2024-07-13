@@ -17,7 +17,7 @@ def get_local_ace_url(
         6. Go to VLC player -> Open Network -> enter url -> watch.
 
     Example url:
-    http://127.0.0.1:8000/pid/b28db77c5084da7993395d77df96c30bb134f0a9/stream.mp4
+    http://127.0.0.1:8000/pid/458a0ddd7d193f6d2750cd14d03a47f47a808e09/stream.mp4
     """
     url = f"http://{server_ip}:{docker_port}/pid/{stream_id}/stream.mp4"
     return url
